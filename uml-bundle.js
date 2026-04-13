@@ -3699,6 +3699,249 @@
       entries[n].y = result.nodes[n].y;
     }
 
+    function nudgeFreeClassEntriesWithinBands(direction) {
+      if (!hasHierarchyEdges) return;
+
+      var moveAlongX = direction !== 'LR';
+      var moveAxis = moveAlongX ? 'x' : 'y';
+      var fixedAxis = moveAlongX ? 'y' : 'x';
+      var sizeKey = moveAlongX ? 'width' : 'height';
+      var fixedSizeKey = moveAlongX ? 'height' : 'width';
+      var fixedThreshold = moveAlongX
+        ? Math.max(28, effectiveGapY * 0.35)
+        : Math.max(28, effectiveGapX * 0.35);
+      var minGap = moveAlongX
+        ? Math.max(20, Math.round(effectiveGapX * 0.28))
+        : Math.max(20, Math.round(effectiveGapY * 0.28));
+      var maxShift = moveAlongX
+        ? Math.max(60, Math.round(effectiveGapX * 1.1))
+        : Math.max(60, Math.round(effectiveGapY * 1.1));
+
+      var hasInheritAtBottomLocal = {};
+      var hasInheritAtTopLocal = {};
+      var movableNames = [];
+      for (var rhi = 0; rhi < relationships.length; rhi++) {
+        var hRel = relationships[rhi];
+        if (hRel.type === 'generalization' || hRel.type === 'realization') {
+          hasInheritAtBottomLocal[hRel.to] = true;
+          hasInheritAtTopLocal[hRel.from] = true;
+        }
+      }
+
+      for (var entryName in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, entryName)) continue;
+        if (hierNodes[entryName]) continue;
+        movableNames.push(entryName);
+      }
+      if (!movableNames.length) return;
+
+      function fixedCenter(entry) {
+        return entry[fixedAxis] + entry.box[fixedSizeKey] / 2;
+      }
+
+      function moveEntry(entry, delta) {
+        if (Math.abs(delta) < 0.5) return;
+        entry[moveAxis] += delta;
+      }
+
+      function cloneEntryWithDelta(entry, delta) {
+        return {
+          cls: entry.cls,
+          box: entry.box,
+          x: entry.x + (moveAlongX ? delta : 0),
+          y: entry.y + (moveAlongX ? 0 : delta),
+        };
+      }
+
+      function edgeCoord(entry, side) {
+        if (moveAlongX) {
+          if (side === 'left') return entry.x;
+          if (side === 'right') return entry.x + entry.box.width;
+          return entry.x + entry.box.width / 2;
+        }
+        if (side === 'top') return entry.y;
+        if (side === 'bottom') return entry.y + entry.box.height;
+        return entry.y + entry.box.height / 2;
+      }
+
+      function relationRouteScore(rel, movedName, delta) {
+        var fromEntryBase = entries[rel.from];
+        var toEntryBase = entries[rel.to];
+        if (!fromEntryBase || !toEntryBase) return Number.POSITIVE_INFINITY;
+
+        var fromEntry = rel.from === movedName ? cloneEntryWithDelta(fromEntryBase, delta) : fromEntryBase;
+        var toEntry = rel.to === movedName ? cloneEntryWithDelta(toEntryBase, delta) : toEntryBase;
+        var scoreEntries = {};
+        for (var scoreName in entries) {
+          if (!Object.prototype.hasOwnProperty.call(entries, scoreName)) continue;
+          scoreEntries[scoreName] = scoreName === movedName ? cloneEntryWithDelta(entries[scoreName], delta) : entries[scoreName];
+        }
+
+        var sourceSide = routeSourceSideForRelation(fromEntry, toEntry, rel.type, hasInheritAtBottomLocal[rel.from]);
+        var targetSide = routeEntrySide(fromEntry, toEntry, hasInheritAtTopLocal[rel.to]);
+        var route = computeOrthogonalRoute(
+          fromEntry,
+          toEntry,
+          hasInheritAtBottomLocal[rel.from],
+          hasInheritAtTopLocal[rel.to],
+          0,
+          scoreEntries,
+          rel.from,
+          rel.to,
+          0,
+          targetSide,
+          sourceSide,
+          hasInheritAtTopLocal[rel.from],
+          hasInheritAtBottomLocal[rel.to],
+          null,
+          null,
+          false
+        );
+        if (!route || !route.points || route.points.length < 2) return Number.POSITIVE_INFINITY;
+
+        var routeLen = UMLShared.measureOrthogonalRoute(route.points);
+        var bends = UMLShared.countOrthogonalBends(route.points);
+        var directDist = Math.abs(route.points[0].x - route.points[route.points.length - 1].x) +
+          Math.abs(route.points[0].y - route.points[route.points.length - 1].y);
+        var detourPenalty = 0;
+        if (directDist > 0) {
+          var efficiency = routeLen / directDist;
+          if (efficiency > 1.5) detourPenalty = (efficiency - 1.5) * 300;
+        }
+        return routeLen + bends * 48 + detourPenalty;
+      }
+
+      function entryRouteScore(name, delta) {
+        var total = 0;
+        var count = 0;
+        for (var sri = 0; sri < relationships.length; sri++) {
+          var rel = relationships[sri];
+          if (rel.type === 'generalization' || rel.type === 'realization') continue;
+          if (rel.from !== name && rel.to !== name) continue;
+          var relScore = relationRouteScore(rel, name, delta);
+          if (!isFinite(relScore)) continue;
+          total += relScore;
+          count++;
+        }
+        if (!count) return Number.POSITIVE_INFINITY;
+        return total + Math.abs(delta) * 0.15;
+      }
+
+      function collectShiftCandidates(name) {
+        var entry = entries[name];
+        if (!entry) return [0];
+
+        var ownCenter = entry[moveAxis] + entry.box[sizeKey] / 2;
+        var candidates = [0];
+        for (var cri = 0; cri < relationships.length; cri++) {
+          var rel = relationships[cri];
+          if (rel.type === 'generalization' || rel.type === 'realization') continue;
+          if (rel.from !== name && rel.to !== name) continue;
+
+          var isSource = rel.from === name;
+          var partnerName = isSource ? rel.to : rel.from;
+          var partnerEntry = entries[partnerName];
+          if (!partnerEntry) continue;
+
+          var sourceEntry = isSource ? entry : partnerEntry;
+          var targetEntry = isSource ? partnerEntry : entry;
+          var sourceSide = routeSourceSideForRelation(sourceEntry, targetEntry, rel.type, hasInheritAtBottomLocal[rel.from]);
+          var targetSide = routeEntrySide(sourceEntry, targetEntry, hasInheritAtTopLocal[rel.to]);
+          var ownSide = isSource ? sourceSide : targetSide;
+          var partnerSide = isSource ? targetSide : sourceSide;
+          var ownCoord = edgeCoord(entry, ownSide);
+          var partnerCoord = edgeCoord(partnerEntry, partnerSide);
+          var partnerCenter = partnerEntry[moveAxis] + partnerEntry.box[sizeKey] / 2;
+
+          candidates.push(partnerCoord - ownCoord);
+          candidates.push((partnerCoord - ownCoord) * 0.5);
+          candidates.push(partnerCenter - ownCenter);
+          candidates.push((partnerCenter - ownCenter) * 0.5);
+        }
+        return candidates;
+      }
+
+      function fixedStart(entry) {
+        return entry[fixedAxis];
+      }
+
+      function fixedEnd(entry) {
+        return entry[fixedAxis] + entry.box[fixedSizeKey];
+      }
+
+      movableNames.sort(function(a, b) {
+        var startDelta = fixedStart(entries[a]) - fixedStart(entries[b]);
+        if (Math.abs(startDelta) > 1) return startDelta;
+        return entries[a][moveAxis] - entries[b][moveAxis];
+      });
+
+      var bands = [];
+      for (var mni = 0; mni < movableNames.length; mni++) {
+        var name = movableNames[mni];
+        var entry = entries[name];
+        var lastBand = bands.length ? bands[bands.length - 1] : null;
+        var entryStart = fixedStart(entry);
+        var entryEnd = fixedEnd(entry);
+        var overlapsBand = lastBand && entryStart <= lastBand.max + fixedThreshold && entryEnd >= lastBand.min - fixedThreshold;
+        if (!lastBand || !overlapsBand) {
+          bands.push({ ref: fixedCenter(entry), min: entryStart, max: entryEnd, names: [name] });
+        } else {
+          lastBand.names.push(name);
+          lastBand.min = Math.min(lastBand.min, entryStart);
+          lastBand.max = Math.max(lastBand.max, entryEnd);
+        }
+      }
+
+      for (var pass = 0; pass < 3; pass++) {
+        var changed = false;
+        for (var bi = 0; bi < bands.length; bi++) {
+          var band = bands[bi];
+          band.names.sort(function(a, b) { return entries[a][moveAxis] - entries[b][moveAxis]; });
+
+          for (var idx = 0; idx < band.names.length; idx++) {
+            var currentName = band.names[idx];
+            var currentEntry = entries[currentName];
+            var currentScore = entryRouteScore(currentName, 0);
+            if (!isFinite(currentScore)) continue;
+
+            var lower = Number.NEGATIVE_INFINITY;
+            var upper = Number.POSITIVE_INFINITY;
+            if (idx > 0) {
+              var prevEntry = entries[band.names[idx - 1]];
+              lower = prevEntry[moveAxis] + prevEntry.box[sizeKey] + minGap - currentEntry[moveAxis];
+            }
+            if (idx < band.names.length - 1) {
+              var nextEntry = entries[band.names[idx + 1]];
+              upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
+            }
+
+            var candidateDeltas = collectShiftCandidates(currentName);
+            var bestDelta = 0;
+            var bestScore = currentScore;
+            for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
+              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
+              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
+              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+
+              var candidateScore = entryRouteScore(currentName, candidateDelta);
+              if (candidateScore + 4 < bestScore) {
+                bestScore = candidateScore;
+                bestDelta = candidateDelta;
+              }
+            }
+
+            if (Math.abs(bestDelta) >= 1) {
+              moveEntry(currentEntry, bestDelta);
+              changed = true;
+            }
+          }
+        }
+        if (!changed) break;
+      }
+    }
+
+    nudgeFreeClassEntriesWithinBands(result.direction || effectiveDirection);
+
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var n2 in entries) {
       if (!Object.prototype.hasOwnProperty.call(entries, n2)) continue;
@@ -4303,6 +4546,8 @@
           pathPoints = [{ x: cdgSnapX, y: cdg0.y }, { x: cdgSnapX, y: cdg3.y }];
         }
       }
+
+      pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
 
       var routeSegments = UMLShared.buildOrthogonalSegments(pathPoints);
 
@@ -4982,7 +5227,13 @@
     if (!points || points.length < 3) return points;
 
     var tol = 1.5;
-    var outwardGap = Math.max(16, CFG.diamondH + 4, CFG.arrowSize + 4);
+    var minArrowStub = CFG.arrowSize * 2;
+    var outwardGap = Math.max(16, CFG.diamondH + 4, CFG.arrowSize + 4, minArrowStub);
+
+    function segmentLength(a, b) {
+      if (!a || !b) return 0;
+      return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+    }
 
     function needsVertical(side) {
       return side === 'top' || side === 'bottom';
@@ -5003,19 +5254,19 @@
 
     function startsOutward(anchor, next, side) {
       if (!anchor || !next) return true;
-      if (side === 'left') return Math.abs(next.y - anchor.y) <= tol && next.x <= anchor.x - tol;
-      if (side === 'right') return Math.abs(next.y - anchor.y) <= tol && next.x >= anchor.x + tol;
-      if (side === 'top') return Math.abs(next.x - anchor.x) <= tol && next.y <= anchor.y - tol;
-      if (side === 'bottom') return Math.abs(next.x - anchor.x) <= tol && next.y >= anchor.y + tol;
+      if (side === 'left') return Math.abs(next.y - anchor.y) <= tol && next.x <= anchor.x - tol && segmentLength(anchor, next) + tol >= minArrowStub;
+      if (side === 'right') return Math.abs(next.y - anchor.y) <= tol && next.x >= anchor.x + tol && segmentLength(anchor, next) + tol >= minArrowStub;
+      if (side === 'top') return Math.abs(next.x - anchor.x) <= tol && next.y <= anchor.y - tol && segmentLength(anchor, next) + tol >= minArrowStub;
+      if (side === 'bottom') return Math.abs(next.x - anchor.x) <= tol && next.y >= anchor.y + tol && segmentLength(anchor, next) + tol >= minArrowStub;
       return true;
     }
 
     function endsOutward(prev, anchor, side) {
       if (!anchor || !prev) return true;
-      if (side === 'left') return Math.abs(prev.y - anchor.y) <= tol && prev.x <= anchor.x - tol;
-      if (side === 'right') return Math.abs(prev.y - anchor.y) <= tol && prev.x >= anchor.x + tol;
-      if (side === 'top') return Math.abs(prev.x - anchor.x) <= tol && prev.y <= anchor.y - tol;
-      if (side === 'bottom') return Math.abs(prev.x - anchor.x) <= tol && prev.y >= anchor.y + tol;
+      if (side === 'left') return Math.abs(prev.y - anchor.y) <= tol && prev.x <= anchor.x - tol && segmentLength(prev, anchor) + tol >= minArrowStub;
+      if (side === 'right') return Math.abs(prev.y - anchor.y) <= tol && prev.x >= anchor.x + tol && segmentLength(prev, anchor) + tol >= minArrowStub;
+      if (side === 'top') return Math.abs(prev.x - anchor.x) <= tol && prev.y <= anchor.y - tol && segmentLength(prev, anchor) + tol >= minArrowStub;
+      if (side === 'bottom') return Math.abs(prev.x - anchor.x) <= tol && prev.y >= anchor.y + tol && segmentLength(prev, anchor) + tol >= minArrowStub;
       return true;
     }
 
@@ -5035,7 +5286,7 @@
       } else {
         while (turnIndex < pointsIn.length && Math.abs(pointsIn[turnIndex].x - pointsIn[0].x) <= tol) turnIndex++;
         if (turnIndex < pointsIn.length) {
-          rebuilt.push({ x: pointsIn[turnIndex].x, y: stub.y });
+          rebuilt.push({ x: stub.x, y: pointsIn[turnIndex].y });
         }
       }
 
@@ -5062,7 +5313,7 @@
         while (turnIndex >= 0 && Math.abs(pointsIn[turnIndex].x - end.x) <= tol) turnIndex--;
         rebuilt = pointsIn.slice(0, turnIndex + 1);
         if (turnIndex >= 0) {
-          rebuilt.push({ x: stub.x, y: pointsIn[turnIndex].y });
+          rebuilt.push({ x: pointsIn[turnIndex].x, y: stub.y });
         }
       }
       rebuilt.push(stub);
@@ -5139,7 +5390,6 @@
   function reanchorWholePartRouteStart(points, entry, desiredSide) {
     if (!points || points.length < 2) return points;
     if (desiredSide !== 'top' && desiredSide !== 'bottom') return points;
-
     var boundaryY = desiredSide === 'top' ? entry.y : (entry.y + entry.box.height);
     var minX = entry.x - 1;
     var maxX = entry.x + entry.box.width + 1;
@@ -5164,6 +5414,44 @@
     var exitPoint = points[outsideIndex];
     var rebuilt = [{ x: exitPoint.x, y: boundaryY }].concat(points.slice(outsideIndex));
     return UMLShared.simplifyOrthogonalPath(rebuilt);
+  }
+
+  function enforceMinimumArrowheadStub(points, fromE, toE, sourceSide, targetSide, enforceSource, enforceTarget) {
+    if (!points || points.length < 2) return points;
+
+    var minStub = CFG.arrowSize * 2;
+
+    function extendEndpoint(pointsIn, side, entry, isStart) {
+      if (!entry || !entry.box) return pointsIn;
+      var updated = pointsIn.slice();
+      var anchorIndex = isStart ? 0 : updated.length - 1;
+      var neighborIndex = isStart ? 1 : updated.length - 2;
+      if (neighborIndex < 0 || neighborIndex >= updated.length) return updated;
+
+      var anchor = updated[anchorIndex];
+      var neighbor = updated[neighborIndex];
+      var span = Math.abs(anchor.x - neighbor.x) + Math.abs(anchor.y - neighbor.y);
+      if (span + 0.5 >= minStub) return updated;
+
+      var replacement = { x: neighbor.x, y: neighbor.y };
+      if (side === 'left') replacement = { x: anchor.x - minStub, y: anchor.y };
+      else if (side === 'right') replacement = { x: anchor.x + minStub, y: anchor.y };
+      else if (side === 'top') replacement = { x: anchor.x, y: anchor.y - minStub };
+      else if (side === 'bottom') replacement = { x: anchor.x, y: anchor.y + minStub };
+      else return updated;
+
+      updated[neighborIndex] = replacement;
+      return simplifyPath(orthogonalize(updated));
+    }
+
+    var adjusted = points.slice();
+    if (enforceSource) {
+      adjusted = extendEndpoint(adjusted, classEdgeForPoint(adjusted[0], fromE, sourceSide), fromE, true);
+    }
+    if (enforceTarget) {
+      adjusted = extendEndpoint(adjusted, classEdgeForPoint(adjusted[adjusted.length - 1], toE, targetSide), toE, false);
+    }
+    return adjusted;
   }
 
   /**
