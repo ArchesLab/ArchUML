@@ -4294,6 +4294,67 @@
       };
     }
 
+    function classObstacleRect(obstacle) {
+      if (!obstacle) return null;
+      if (typeof obstacle.left === 'number' && typeof obstacle.right === 'number' &&
+          typeof obstacle.top === 'number' && typeof obstacle.bottom === 'number') {
+        return obstacle;
+      }
+      if (typeof obstacle.x1 === 'number' && typeof obstacle.y1 === 'number' &&
+          typeof obstacle.x2 === 'number' && typeof obstacle.y2 === 'number') {
+        return {
+          left: Math.min(obstacle.x1, obstacle.x2),
+          right: Math.max(obstacle.x1, obstacle.x2),
+          top: Math.min(obstacle.y1, obstacle.y2),
+          bottom: Math.max(obstacle.y1, obstacle.y2)
+        };
+      }
+      if (typeof obstacle.x === 'number' && typeof obstacle.y === 'number') {
+        var width = typeof obstacle.w === 'number' ? obstacle.w : obstacle.width;
+        var height = typeof obstacle.h === 'number' ? obstacle.h : obstacle.height;
+        if (typeof width === 'number' && typeof height === 'number') {
+          return {
+            left: obstacle.x,
+            right: obstacle.x + width,
+            top: obstacle.y,
+            bottom: obstacle.y + height
+          };
+        }
+      }
+      return null;
+    }
+
+    function classRectsOverlap(a, b, pad) {
+      var gap = pad || 0;
+      var ra = classObstacleRect(a);
+      var rb = classObstacleRect(b);
+      if (!ra || !rb) return false;
+      return ra.right + gap > rb.left && ra.left - gap < rb.right &&
+        ra.bottom + gap > rb.top && ra.top - gap < rb.bottom;
+    }
+
+    function classTextPlacementHitsSegments(rect, segments, pad) {
+      var gap = typeof pad === 'number' ? pad : 0;
+      for (var i = 0; i < segments.length; i++) {
+        var segmentRect = segmentObstacleRect(segments[i], gap);
+        if (segmentRect && classRectsOverlap(rect, segmentRect, 0)) return true;
+      }
+      return false;
+    }
+
+    function classTextPlacementIsClear(rect, obstacles, labels, routeSegments, obstaclePad, labelPad, segmentPad) {
+      for (var i = 0; i < obstacles.length; i++) {
+        if (classRectsOverlap(rect, obstacles[i], obstaclePad)) return false;
+      }
+      for (var j = 0; j < labels.length; j++) {
+        if (classRectsOverlap(rect, labels[j], labelPad)) return false;
+      }
+      if (routeSegments && routeSegments.length && classTextPlacementHitsSegments(rect, routeSegments, segmentPad || 3)) {
+        return false;
+      }
+      return true;
+    }
+
     function pushClassTextSvg(target, text, placement, fontSize, fontStyle) {
       if (!placement) return;
       target.push('<text x="' + placement.x + '" y="' + placement.y +
@@ -4351,6 +4412,85 @@
         maxComfortGap: 16,
         preferredPointWeight: 0.08
       };
+      var directPlacement = null;
+      var directRect = null;
+      var nearbySegments = [];
+      var rawFirstPoint = isSource ? endpoint.point : endpoint.prevPoint;
+      var rawSecondPoint = isSource ? endpoint.nextPoint : endpoint.point;
+      var horizMultLane = Math.max(5, Math.round(CFG.labelOffset * 0.75));
+      var directCandidates = [];
+      var side = endpoint.side || 'right';
+      var primaryOffset = endpoint.count > 1 ? (10 + Math.min(12, Math.abs(endpoint.centered || 0) * 0.35)) : 6;
+      var secondaryOffset = primaryOffset + 8;
+      var rowOffset = CFG.fontSizeStereotype + 8;
+      var sourceInheritOffset = isSource && endpoint.dy > 0 && hasInheritAtBottom[routeInfo.rel.from]
+        ? CFG.triangleH + CFG.junctionGap + 4
+        : 0;
+      var entryCx0 = entry.x + entry.box.width / 2;
+      var partnerCx0 = partner.x + partner.box.width / 2;
+      var sideBias0 = endpoint.point.x < entryCx0 - 1 ? -1 : (endpoint.point.x > entryCx0 + 1 ? 1 : 0);
+
+      if (sideBias0 === 0) {
+        if (Math.abs(partnerCx0 - entryCx0) < 1) sideBias0 = isSource ? 1 : -1;
+        else sideBias0 = partnerCx0 >= entryCx0 ? 1 : -1;
+      }
+
+      nearbySegments = classRouteSegmentsExcept(noteRouteSegments, routeInfo.routeIndex, segmentIndex);
+
+      if (side === 'right') {
+        directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
+        directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
+        directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
+        directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
+      } else if (side === 'left') {
+        directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
+        directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+        directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
+        directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+      } else if (side === 'top') {
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y - 6, anchor: sideBias0 < 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x - sideBias0 * primaryOffset, y: endpoint.point.y - 6, anchor: sideBias0 > 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * secondaryOffset, y: endpoint.point.y - 6, anchor: sideBias0 < 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y + rowOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
+      } else {
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y + rowOffset + sourceInheritOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x - sideBias0 * primaryOffset, y: endpoint.point.y + rowOffset + sourceInheritOffset, anchor: sideBias0 > 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * secondaryOffset, y: endpoint.point.y + rowOffset + sourceInheritOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
+        directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y - 6 + sourceInheritOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
+      }
+
+      if (!isSource &&
+          endpoint.count > 1 &&
+          endpoint.prevPrevPoint &&
+          Math.abs(endpoint.prevPrevPoint.y - endpoint.prevPoint.y) < 1) {
+        directCandidates.push({
+          x: (endpoint.prevPrevPoint.x + endpoint.prevPoint.x) / 2,
+          y: endpoint.prevPoint.y - horizMultLane,
+          anchor: 'middle'
+        });
+        directCandidates.push({
+          x: (endpoint.prevPrevPoint.x + endpoint.prevPoint.x) / 2,
+          y: endpoint.prevPoint.y + rowOffset,
+          anchor: 'middle'
+        });
+      }
+
+      for (var dci = 0; dci < directCandidates.length; dci++) {
+        directPlacement = directCandidates[dci];
+        directRect = classTextRect(text, directPlacement.x, directPlacement.y, directPlacement.anchor, CFG.fontSizeStereotype);
+        if (classTextPlacementIsClear(
+          directRect,
+          classObstacles.concat(noteMarkerObstacles),
+          placedLabels,
+          nearbySegments,
+          6,
+          8,
+          3
+        )) {
+          directPlacement.rect = directRect;
+          return directPlacement;
+        }
+      }
 
       if (!isSource &&
           endpoint.count > 1 &&
@@ -4368,10 +4508,9 @@
 
       if (!points || points.length < 2) return null;
 
-      options.otherSegments = classRouteSegmentsExcept(noteRouteSegments, routeInfo.routeIndex, segmentIndex);
+      options.otherSegments = nearbySegments;
 
       if (Math.abs(points[0].y - points[1].y) < 1) {
-        var horizMultLane = Math.max(5, Math.round(CFG.labelOffset * 0.75));
         options.fractions = fractions;
         options.preferredPoint = classPointAlongSegment(points[0], points[1], preferredFraction);
         options.horizontalPlacements = [
@@ -4432,8 +4571,14 @@
         fontSize: CFG.fontSizeStereotype,
         otherSegments: classOtherRouteSegments(noteRouteSegments, routeInfo.routeIndex),
         endpointPad: 20,
-        preferredGap: 8,
-        maxComfortGap: 18,
+        preferredGap: 6,
+        maxComfortGap: 12,
+        verticalPlacements: [
+          { anchor: 'start', dx: 5, dy: 0, penalty: 0 },
+          { anchor: 'end', dx: -5, dy: 0, penalty: 2 },
+          { anchor: 'start', dx: 9, dy: 0, penalty: 7 },
+          { anchor: 'end', dx: -9, dy: 0, penalty: 9 }
+        ],
         preferredPointWeight: 0.14,
         scoreCandidate: function(segment, placement) {
           var bonus = segment.isH ? 10 : -4;
