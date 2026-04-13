@@ -7695,130 +7695,6 @@
       }
     }
 
-    function buildComponentLayoutColumns() {
-      var columnItems = [];
-      for (var name in entries) columnItems.push(name);
-      columnItems.sort(function(a, b) {
-        if (Math.abs(entries[a].x - entries[b].x) > 1) return entries[a].x - entries[b].x;
-        if (Math.abs(entries[a].y - entries[b].y) > 1) return entries[a].y - entries[b].y;
-        return a < b ? -1 : 1;
-      });
-
-      var columnThreshold = Math.max(24, effectiveGapX * 0.3);
-      var columns = [];
-      for (var cni = 0; cni < columnItems.length; cni++) {
-        var entryName = columnItems[cni];
-        var entry = entries[entryName];
-        var lastColumn = columns.length ? columns[columns.length - 1] : null;
-        if (!lastColumn || Math.abs(entry.x - lastColumn.refX) > columnThreshold) {
-          columns.push({ refX: entry.x, names: [entryName] });
-        } else {
-          lastColumn.names.push(entryName);
-        }
-      }
-      return columns;
-    }
-
-    function refineComponentColumnPositions() {
-      if (actualDirection !== 'LR' || connectors.length === 0) return false;
-
-      var columns = buildComponentLayoutColumns();
-      var minGapY = Math.max(18, effectiveGapY * 0.55);
-      var maxShift = Math.max(24, effectiveGapY * 0.6);
-      var moved = false;
-
-      function averageDeltaForEntry(entryName) {
-        var entry = entries[entryName];
-        if (!entry) return 0;
-
-        var entryCenterY = entry.y + entry.box.height / 2;
-        var entryCenterX = entry.x + entry.box.width / 2;
-        var totalDelta = 0;
-        var totalWeight = 0;
-
-        for (var ci = 0; ci < connectors.length; ci++) {
-          var conn = connectors[ci];
-          var isSource = conn.from === entryName;
-          var isTarget = conn.to === entryName;
-          if (!isSource && !isTarget) continue;
-
-          var otherName = isSource ? conn.to : conn.from;
-          var otherEntry = entries[otherName];
-          if (!otherEntry) continue;
-
-          var ownAlias = isSource ? conn.fromPort : conn.toPort;
-          var otherAlias = isSource ? conn.toPort : conn.fromPort;
-          var ownPort = ownAlias && entry.portPositions ? entry.portPositions[ownAlias] : null;
-          var otherPort = otherAlias && otherEntry.portPositions ? otherEntry.portPositions[otherAlias] : null;
-          var ownY = ownPort ? ownPort.cy : entryCenterY;
-          var otherY = otherPort ? otherPort.cy : otherEntry.y + otherEntry.box.height / 2;
-
-          var weight = ownPort && otherPort ? 1.6 : ((ownPort || otherPort) ? 1.2 : 0.9);
-          var spanX = Math.abs((otherEntry.x + otherEntry.box.width / 2) - entryCenterX);
-          if (spanX > effectiveGapX * 0.5) {
-            weight *= Math.max(0.35, 1 - ((spanX - effectiveGapX * 0.5) / Math.max(effectiveGapX * 4, 1)));
-          }
-
-          totalDelta += (otherY - ownY) * weight;
-          totalWeight += weight;
-        }
-
-        if (!totalWeight) return 0;
-        return Math.max(-maxShift, Math.min(maxShift, totalDelta / totalWeight));
-      }
-
-      for (var colIdx = 0; colIdx < columns.length; colIdx++) {
-        var orderedNames = columns[colIdx].names.slice();
-        orderedNames.sort(function(a, b) {
-          if (Math.abs(entries[a].y - entries[b].y) > 1) return entries[a].y - entries[b].y;
-          return a < b ? -1 : 1;
-        });
-
-        if (!orderedNames.length) continue;
-
-        var targetYs = [];
-        for (var oi = 0; oi < orderedNames.length; oi++) {
-          var orderedEntry = entries[orderedNames[oi]];
-          var desiredShift = averageDeltaForEntry(orderedNames[oi]);
-          targetYs.push(orderedEntry.y + desiredShift * 0.65);
-        }
-
-        if (orderedNames.length > 1) {
-          var packedYs = targetYs.slice();
-          for (var downIdx = 1; downIdx < packedYs.length; downIdx++) {
-            var prevName = orderedNames[downIdx - 1];
-            packedYs[downIdx] = Math.max(
-              packedYs[downIdx],
-              packedYs[downIdx - 1] + entries[prevName].box.height + minGapY
-            );
-          }
-          for (var upIdx = packedYs.length - 2; upIdx >= 0; upIdx--) {
-            var currentName = orderedNames[upIdx];
-            packedYs[upIdx] = Math.min(
-              packedYs[upIdx],
-              packedYs[upIdx + 1] - entries[currentName].box.height - minGapY
-            );
-          }
-
-          var offsetTotal = 0;
-          for (var shiftIdx = 0; shiftIdx < packedYs.length; shiftIdx++) {
-            offsetTotal += targetYs[shiftIdx] - packedYs[shiftIdx];
-          }
-          var sharedShift = offsetTotal / packedYs.length;
-          for (var packIdx = 0; packIdx < packedYs.length; packIdx++) packedYs[packIdx] += sharedShift;
-          targetYs = packedYs;
-        }
-
-        for (var yi = 0; yi < orderedNames.length; yi++) {
-          if (Math.abs(entries[orderedNames[yi]].y - targetYs[yi]) < 0.75) continue;
-          entries[orderedNames[yi]].y = targetYs[yi];
-          moved = true;
-        }
-      }
-
-      return moved;
-    }
-
     // ── Place ports to minimize crossings and avoidable bends ──
     var desiredPortY = {};
     function portKey(compName, alias) {
@@ -8209,7 +8085,7 @@
     }
 
     rebuildDesiredPortY(false);
-    for (var layoutPass = 0; layoutPass < 4; layoutPass++) {
+    for (var layoutPass = 0; layoutPass < 3; layoutPass++) {
       optimizePortConnectionGraphOrder();
 
       for (var en in entries) {
@@ -8260,10 +8136,7 @@
         }
       }
 
-      if (layoutPass < 3) {
-        refineComponentColumnPositions();
-        rebuildDesiredPortY(true);
-      }
+      if (layoutPass < 2) rebuildDesiredPortY(true);
     }
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -9082,14 +8955,39 @@
       }
 
       if (pos) {
-        pushCandidate({
-          x: componentEndpointX(pos, isJoinedAssembly),
-          y: pos.cy,
-          side: pos.side,
-          stub: stub,
-          movePenalty: 0,
-          apply: null
-        });
+        var preferredY = otherPos ? otherPos.cy : (otherEntry ? otherEntry.y + otherEntry.box.height / 2 : pos.cy);
+        var desiredY = clampComponentPortY(entry, alias, preferredY);
+        var candidateYs = [pos.cy];
+        var movementBounds = getPortMovementBounds(entry, alias);
+        if (desiredY !== null) {
+          candidateYs.push(desiredY);
+          candidateYs.push((pos.cy + desiredY) / 2);
+        }
+        if (movementBounds) {
+          candidateYs.push(movementBounds.lower);
+          candidateYs.push(movementBounds.upper);
+          candidateYs.push((pos.cy + movementBounds.lower) / 2);
+          candidateYs.push((pos.cy + movementBounds.upper) / 2);
+          if (desiredY !== null) {
+            candidateYs.push((desiredY + movementBounds.lower) / 2);
+            candidateYs.push((desiredY + movementBounds.upper) / 2);
+          }
+        }
+
+        for (var yi = 0; yi < candidateYs.length; yi++) {
+          var candidateY = desiredY === null ? pos.cy : clampComponentPortY(entry, alias, candidateYs[yi]);
+          if (candidateY === null) candidateY = pos.cy;
+          pushCandidate({
+            x: componentEndpointX(pos, isJoinedAssembly),
+            y: candidateY,
+            side: pos.side,
+            stub: stub,
+            movePenalty: Math.abs(candidateY - pos.cy) * 0.5,
+            apply: Math.abs(candidateY - pos.cy) > 0.75 ? function(entryRef, aliasRef, targetYRef) {
+              return function() { movePortPositionToY(entryRef, aliasRef, targetYRef); };
+            }(entry, alias, candidateY) : null
+          });
+        }
         return candidates;
       }
 
@@ -9163,11 +9061,345 @@
     }
 
     function refineRouteEndpoints(conn, points, fpPos, tpPos, skipNames) {
+      if (!points || points.length < 2) return points;
+
+      function tryCandidate(entry, alias, targetY, applyToPoints) {
+        if (!entry || !alias) return null;
+        var pos = entry.portPositions && entry.portPositions[alias] ? entry.portPositions[alias] : null;
+        var clampedY = clampComponentPortY(entry, alias, targetY);
+        if (!pos || clampedY === null || Math.abs(clampedY - pos.cy) < 0.75) return null;
+        var candidate = applyToPoints(points, clampedY);
+        // Check against box obstacles only (not occupied segments) — small port
+        // movements to eliminate cosmetic doglegs should not be blocked by
+        // nearby occupied lanes from other connectors.
+        if (routeHitsObstacle(candidate, obstacles, skipNames, null)) {
+          return null;
+        }
+        return {
+          points: candidate,
+          move: Math.abs(clampedY - pos.cy),
+          apply: function() { movePortPositionToY(entry, alias, clampedY); }
+        };
+      }
+
+      function tryStraightLineCandidate(sourceTargetY, targetTargetY) {
+        var sourceEntry = entries[conn.from];
+        var targetEntry = entries[conn.to];
+        var sourcePos = sourceEntry && conn.fromPort && sourceEntry.portPositions ? sourceEntry.portPositions[conn.fromPort] : null;
+        var targetPos = targetEntry && conn.toPort && targetEntry.portPositions ? targetEntry.portPositions[conn.toPort] : null;
+        if (!sourcePos || !targetPos) return null;
+
+        var sourceY = sourceTargetY === null ? sourcePos.cy : clampComponentPortY(sourceEntry, conn.fromPort, sourceTargetY);
+        var targetY = targetTargetY === null ? targetPos.cy : clampComponentPortY(targetEntry, conn.toPort, targetTargetY);
+        if (sourceY === null || targetY === null || Math.abs(sourceY - targetY) > 0.75) return null;
+
+        var laneY = (sourceY + targetY) / 2;
+        var candidate = applyStraightHorizontalLane(points, laneY);
+        if (routeHitsObstacle(candidate, obstacles, skipNames, null)) return null;
+
+        var move = Math.abs(laneY - sourcePos.cy) + Math.abs(laneY - targetPos.cy);
+        var crossings = UMLShared.countRouteCrossings(candidate, occupiedSegments);
+        return {
+          points: candidate,
+          move: move,
+          score: move + crossings * 5000,
+          apply: function() {
+            if (Math.abs(laneY - sourcePos.cy) >= 0.75) movePortPositionToY(sourceEntry, conn.fromPort, laneY);
+            if (Math.abs(laneY - targetPos.cy) >= 0.75) movePortPositionToY(targetEntry, conn.toPort, laneY);
+          }
+        };
+      }
+
+      function tryStraightenNearlyHorizontalRoute() {
+        if (!fpPos || !tpPos) return null;
+        if ((fpPos.side !== 'left' && fpPos.side !== 'right') || (tpPos.side !== 'left' && tpPos.side !== 'right')) return null;
+
+        var first = points[0];
+        var last = points[points.length - 1];
+        var totalSpanX = Math.abs(last.x - first.x);
+        if (totalSpanX < 48) return null;
+
+        var longestHorizontal = null;
+        for (var pi = 0; pi < points.length - 1; pi++) {
+          var seg0 = points[pi];
+          var seg1 = points[pi + 1];
+          if (Math.abs(seg1.y - seg0.y) >= 1) continue;
+          var segLen = Math.abs(seg1.x - seg0.x);
+          if (!longestHorizontal || segLen > longestHorizontal.len) {
+            longestHorizontal = { y: seg0.y, len: segLen };
+          }
+        }
+        if (!longestHorizontal || longestHorizontal.len < Math.max(40, totalSpanX * 0.45)) return null;
+
+        var straightCandidates = [];
+        function pushStraightCandidate(candidate) {
+          if (!candidate) return;
+          straightCandidates.push(candidate);
+        }
+
+        pushStraightCandidate(tryStraightLineCandidate(tpPos.cy, null));
+        pushStraightCandidate(tryStraightLineCandidate(null, fpPos.cy));
+
+        var sourceBounds = getPortMovementBounds(entries[conn.from], conn.fromPort);
+        var targetBounds = getPortMovementBounds(entries[conn.to], conn.toPort);
+        if (sourceBounds && targetBounds) {
+          var lower = Math.max(sourceBounds.lower, targetBounds.lower);
+          var upper = Math.min(sourceBounds.upper, targetBounds.upper);
+          if (lower <= upper) {
+            var laneCandidates = [
+              Math.max(lower, Math.min(upper, longestHorizontal.y)),
+              Math.max(lower, Math.min(upper, (fpPos.cy + tpPos.cy) / 2)),
+              (lower + upper) / 2
+            ];
+            for (var lci = 0; lci < laneCandidates.length; lci++) {
+              pushStraightCandidate(tryStraightLineCandidate(laneCandidates[lci], laneCandidates[lci]));
+            }
+          }
+        }
+
+        if (!straightCandidates.length) return null;
+
+        straightCandidates.sort(function(a, b) {
+          if (a.score !== b.score) return a.score - b.score;
+          return UMLShared.measureOrthogonalRoute(a.points) - UMLShared.measureOrthogonalRoute(b.points);
+        });
+
+        var bestStraight = straightCandidates[0];
+        if (!bestStraight) return null;
+
+        var currentRouteLen = UMLShared.measureOrthogonalRoute(points);
+        if (UMLShared.measureOrthogonalRoute(bestStraight.points) + 8 > currentRouteLen && bestStraight.move > 18) {
+          return null;
+        }
+
+        bestStraight.apply();
+        return bestStraight.points;
+      }
+
+      var straightened = tryStraightenNearlyHorizontalRoute();
+      if (straightened) return straightened;
+
+      // Snap nearly horizontal links to the same Y when one endpoint can move slightly.
+      // Handles both direct 2-point links and 4-point H-V-H doglegs with tiny V segments.
+      var effectiveDy = 0;
+      var isNearlyHorizontal = false;
+      if (fpPos && tpPos) {
+        if (points.length === 2) {
+          effectiveDy = points[1].y - points[0].y;
+          isNearlyHorizontal = Math.abs(effectiveDy) > 0.5 && Math.abs(effectiveDy) <= 8 &&
+            Math.abs(points[1].x - points[0].x) > 24;
+        } else if (points.length === 4) {
+          // H-V-H dogleg: check if the V segment is tiny
+          var hvhP0 = points[0], hvhP1 = points[1], hvhP2 = points[2], hvhP3 = points[3];
+          var hvhFirstH = Math.abs(hvhP1.y - hvhP0.y) < 1;
+          var hvhSecondV = Math.abs(hvhP2.x - hvhP1.x) < 1;
+          var hvhThirdH = Math.abs(hvhP3.y - hvhP2.y) < 1;
+          var hvhVLen = Math.abs(hvhP2.y - hvhP1.y);
+          if (hvhFirstH && hvhSecondV && hvhThirdH && hvhVLen > 0.5 && hvhVLen <= 8) {
+            effectiveDy = hvhP3.y - hvhP0.y;
+            isNearlyHorizontal = true;
+          }
+        }
+      }
+      if (isNearlyHorizontal) {
+        var bestDirect = null;
+        var midY = (fpPos.cy + tpPos.cy) / 2;
+        var directCandidates = [
+          { entry: entries[conn.from], alias: conn.fromPort, targetY: tpPos.cy, apply: applySourceLaneSmoothing, move: Math.abs(tpPos.cy - fpPos.cy) },
+          { entry: entries[conn.to], alias: conn.toPort, targetY: fpPos.cy, apply: applyTargetLaneSmoothing, move: Math.abs(fpPos.cy - tpPos.cy) },
+          { entry: entries[conn.from], alias: conn.fromPort, targetY: midY, apply: applySourceLaneSmoothing, move: Math.abs(midY - fpPos.cy) },
+          { entry: entries[conn.to], alias: conn.toPort, targetY: midY, apply: applyTargetLaneSmoothing, move: Math.abs(midY - tpPos.cy) }
+        ];
+        for (var dci = 0; dci < directCandidates.length; dci++) {
+          var directCandidate = directCandidates[dci];
+          var directResult = tryCandidate(directCandidate.entry, directCandidate.alias, directCandidate.targetY, directCandidate.apply);
+          if (!directResult) continue;
+          if (!bestDirect || directResult.move < bestDirect.move) {
+            bestDirect = directResult;
+          }
+        }
+        if (bestDirect) {
+          bestDirect.apply();
+          return bestDirect.points;
+        }
+      }
+
+      // Remove H-V-H doglegs near a source port by moving the port onto the horizontal lane.
+      // Two tiers: very tiny vertical jogs (≤6px) are always removed regardless of
+      // surrounding segment lengths; larger ones use stricter thresholds.
+      if (fpPos && points.length >= 4) {
+        var p0 = points[0], p1 = points[1], p2 = points[2], p3 = points[3];
+        var firstIsH = Math.abs(p1.y - p0.y) < 1;
+        var secondIsV = Math.abs(p2.x - p1.x) < 1;
+        var thirdIsH = Math.abs(p3.y - p2.y) < 1;
+        var firstLen = Math.abs(p1.x - p0.x) + Math.abs(p1.y - p0.y);
+        var secondLen = Math.abs(p2.x - p1.x) + Math.abs(p2.y - p1.y);
+        var thirdLen = Math.abs(p3.x - p2.x) + Math.abs(p3.y - p2.y);
+        if (firstIsH && secondIsV && thirdIsH && secondLen <= 18 &&
+            (secondLen <= 6 || (firstLen <= 36 && thirdLen >= 80))) {
+          var sourceSmoothed = tryCandidate(entries[conn.from], conn.fromPort, p2.y, applySourceLaneSmoothing);
+          if (sourceSmoothed) {
+            sourceSmoothed.apply();
+            return sourceSmoothed.points;
+          }
+        }
+      }
+
+      // Remove H-V-H doglegs near a target port by moving the target port onto the horizontal lane.
+      if (tpPos && points.length >= 4) {
+        var t3 = points[points.length - 4];
+        var t2 = points[points.length - 3];
+        var t1 = points[points.length - 2];
+        var t0 = points[points.length - 1];
+        var tailFirstIsH = Math.abs(t2.y - t3.y) < 1;
+        var tailSecondIsV = Math.abs(t1.x - t2.x) < 1;
+        var tailThirdIsH = Math.abs(t0.y - t1.y) < 1;
+        var tailFirstLen = Math.abs(t2.x - t3.x) + Math.abs(t2.y - t3.y);
+        var tailSecondLen = Math.abs(t1.x - t2.x) + Math.abs(t1.y - t2.y);
+        var tailThirdLen = Math.abs(t0.x - t1.x) + Math.abs(t0.y - t1.y);
+        if (tailFirstIsH && tailSecondIsV && tailThirdIsH && tailSecondLen <= 18 &&
+            (tailSecondLen <= 6 || (tailThirdLen <= 36 && tailFirstLen >= 80))) {
+          var targetSmoothed = tryCandidate(entries[conn.to], conn.toPort, t2.y, applyTargetLaneSmoothing);
+          if (targetSmoothed) {
+            targetSmoothed.apply();
+            return targetSmoothed.points;
+          }
+        }
+      }
+
       return points;
     }
 
-    // Port order and component positions are finalized during layout.
-    // Routing consumes those fixed endpoints and should not swap or move them.
+    // ── Pre-routing crossing swap ──
+    // For each pair of connectors that share a source or target port group
+    // (same component, same side), check if their port Y order matches
+    // their target endpoint Y order.  If not, swap ports to avoid crossings.
+    (function preRoutingCrossingSwap() {
+      // Build a map: "compName:side" → [{connIdx, portAlias, portY, otherEndY}]
+      var sideGroups = {};
+      for (var pci = 0; pci < connectors.length; pci++) {
+        var pc = connectors[pci];
+        var pcFromE = entries[pc.from], pcToE = entries[pc.to];
+        if (!pcFromE || !pcToE) continue;
+
+        // Check source port group
+        if (pc.fromPort && pcFromE.portPositions && pcFromE.portPositions[pc.fromPort]) {
+          var fp = pcFromE.portPositions[pc.fromPort];
+          var otherY = pc.toPort && pcToE.portPositions && pcToE.portPositions[pc.toPort]
+            ? pcToE.portPositions[pc.toPort].cy
+            : pcToE.y + pcToE.box.height / 2;
+          // When the route needs to detour vertically (target is far away
+          // or requires wrapping under/over other components), use an
+          // effective Y that reflects the actual route path direction.
+          // Heuristic: if horizontal distance > 2× component widths AND
+          // the route will go via the bottom/top margin, push otherEndY
+          // to extreme values so the port is placed at the bottom/top to
+          // avoid crossing routes that go directly to adjacent targets.
+          // Long-distance routes wrap below or above other components,
+          // so their effective Y is at the diagram edge, not the partner Y.
+          // These ports should be placed at the bottom/top of the port list
+          // so their detouring routes don't cross shorter direct routes.
+          var fpSide = fp.side;
+          var horizontalDist = Math.abs(pcToE.x - pcFromE.x);
+          var isLongRoute = horizontalDist > (pcFromE.box.width + pcToE.box.width) * 1.5;
+          if (isLongRoute) {
+            // Long routes typically go via the bottom margin (below all boxes).
+            // Push effective Y to bottom so port is placed lowest.
+            otherY = 9999;
+          }
+          var fKey = pc.from + ':' + fpSide;
+          if (!sideGroups[fKey]) sideGroups[fKey] = [];
+          sideGroups[fKey].push({ connIdx: pci, alias: pc.fromPort, portY: fp.cy, otherEndY: otherY, comp: pc.from, isSource: true });
+        }
+
+        // Check target port group
+        if (pc.toPort && pcToE.portPositions && pcToE.portPositions[pc.toPort]) {
+          var tp = pcToE.portPositions[pc.toPort];
+          var otherY2 = pc.fromPort && pcFromE.portPositions && pcFromE.portPositions[pc.fromPort]
+            ? pcFromE.portPositions[pc.fromPort].cy
+            : pcFromE.y + pcFromE.box.height / 2;
+          var tpSide = tp.side;
+          var horizontalDist2 = Math.abs(pcFromE.x - pcToE.x);
+          var isLongRoute2 = horizontalDist2 > (pcFromE.box.width + pcToE.box.width) * 1.5;
+          if (isLongRoute2) {
+            otherY2 = 9999;
+          }
+          var tKey = pc.to + ':' + tpSide;
+          if (!sideGroups[tKey]) sideGroups[tKey] = [];
+          sideGroups[tKey].push({ connIdx: pci, alias: pc.toPort, portY: tp.cy, otherEndY: otherY2, comp: pc.to, isSource: false });
+        }
+      }
+
+      // For each group with 2+ connectors, check if port Y order matches target Y order
+      for (var sgk in sideGroups) {
+        var sg = sideGroups[sgk];
+        if (sg.length < 2) continue;
+
+        // Count crossings: port i is above port j, but target i is below target j
+        function countGroupCrossings(group) {
+          var crossings = 0;
+          for (var i = 0; i < group.length; i++) {
+            for (var j = i + 1; j < group.length; j++) {
+              var portAbove = group[i].portY < group[j].portY;
+              var targetAbove = group[i].otherEndY < group[j].otherEndY;
+              if (portAbove !== targetAbove && Math.abs(group[i].otherEndY - group[j].otherEndY) > 4) {
+                crossings++;
+              }
+            }
+          }
+          return crossings;
+        }
+
+        var currentCrossings = countGroupCrossings(sg);
+        if (currentCrossings === 0) continue;
+
+        // Try all pairwise swaps to find the best improvement
+        var bestSwap = null;
+        var bestImprovement = 0;
+        for (var si = 0; si < sg.length; si++) {
+          for (var sj = si + 1; sj < sg.length; sj++) {
+            // Simulate swap
+            var tmpPortY = sg[si].portY;
+            sg[si].portY = sg[sj].portY;
+            sg[sj].portY = tmpPortY;
+            var newCrossings = countGroupCrossings(sg);
+            var improvement = currentCrossings - newCrossings;
+            if (improvement > bestImprovement) {
+              bestImprovement = improvement;
+              bestSwap = { i: si, j: sj };
+            }
+            // Undo simulation
+            tmpPortY = sg[si].portY;
+            sg[si].portY = sg[sj].portY;
+            sg[sj].portY = tmpPortY;
+          }
+        }
+
+        if (bestSwap) {
+          var a = sg[bestSwap.i], b = sg[bestSwap.j];
+          var compEntry = entries[a.comp];
+          if (!compEntry) continue;
+          var sidePorts = sgk.indexOf(':left') !== -1 ? compEntry.leftPorts : compEntry.rightPorts;
+          var idxA = sidePorts.indexOf(a.alias);
+          var idxB = sidePorts.indexOf(b.alias);
+          if (idxA >= 0 && idxB >= 0) {
+            // Swap ports in the side list
+            sidePorts[idxA] = b.alias;
+            sidePorts[idxB] = a.alias;
+
+            // Directly swap port Y positions (don't recompute — that reads
+            // stale desiredPortY and reverts the swap)
+            var posA = compEntry.portPositions[a.alias];
+            var posB = compEntry.portPositions[b.alias];
+            if (posA && posB) {
+              var savedCy = posA.cy, savedConnY = posA.connY, savedY = posA.y;
+              posA.cy = posB.cy; posA.connY = posB.connY; posA.y = posB.y;
+              posB.cy = savedCy; posB.connY = savedConnY; posB.y = savedY;
+            }
+          }
+        }
+      }
+    })();
 
     // ── Draw connectors ──
     var placedLabels = [];
@@ -9375,6 +9607,53 @@
       var points = refineRouteEndpoints(conn, bestRoute.points, fpPos, tpPos, skipN);
       points = UMLShared.simplifyOrthogonalPath(points);
 
+      // Post-process: eliminate tiny H-V-H doglegs by snapping the port with the
+      // smaller displacement directly to the other end's Y.
+      if (points.length === 4) {
+        var dg0 = points[0], dg1 = points[1], dg2 = points[2], dg3 = points[3];
+        var dgH1 = Math.abs(dg1.y - dg0.y) < 1;
+        var dgV  = Math.abs(dg2.x - dg1.x) < 1;
+        var dgH2 = Math.abs(dg3.y - dg2.y) < 1;
+        var dgVLen = Math.abs(dg2.y - dg1.y);
+        if (dgH1 && dgV && dgH2 && dgVLen > 0.3 && dgVLen <= 10) {
+          // Pick the endpoint whose port moves less
+          var moveSourceDy = Math.abs(dg3.y - dg0.y);
+          var moveToSource = moveSourceDy;  // move target to source Y
+          var moveToTarget = moveSourceDy;  // move source to target Y
+          // Try snapping source to target Y (source moves)
+          var snapY = dg3.y;
+          var snapEntry = entries[conn.from];
+          var snapAlias = conn.fromPort;
+          // Or snap target to source Y (target moves less if source is further)
+          if (fpPos && tpPos) {
+            var srcMoveDist = Math.abs(dg3.y - fpPos.cy);
+            var tgtMoveDist = Math.abs(dg0.y - tpPos.cy);
+            if (tgtMoveDist < srcMoveDist) {
+              snapY = dg0.y;
+              snapEntry = entries[conn.to];
+              snapAlias = conn.toPort;
+            }
+          }
+          if (snapEntry && snapAlias && snapEntry.portPositions && snapEntry.portPositions[snapAlias]) {
+            var snapPos = snapEntry.portPositions[snapAlias];
+            var snapBounds = getPortMovementBounds(snapEntry, snapAlias);
+            // Allow snap if within bounds OR if the dogleg is tiny (cosmetic jog ≤ 6px)
+            var canSnap = dgVLen <= 6 || (snapBounds && snapY >= snapBounds.lower && snapY <= snapBounds.upper);
+            if (canSnap) {
+              var straightLine = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
+              if (!routeHitsObstacle(straightLine, obstacles, skipN, null)) {
+                // Directly update the port position
+                snapPos.cy = snapY;
+                snapPos.connY = snapY;
+                snapPos.y = snapY - CFG.portSize / 2;
+                points = straightLine;
+                if (conn.fromPort && fromE.portPositions[conn.fromPort]) fpPos = fromE.portPositions[conn.fromPort];
+                if (conn.toPort && toE.portPositions[conn.toPort]) tpPos = toE.portPositions[conn.toPort];
+              }
+            }
+          }
+        }
+      }
       if (UMLShared.routeHitsObstacle(points, obstacles, skipN, occupiedSegments)) {
         points = UMLShared.routeOrthogonalConnector(bestRoute.source, bestRoute.target, obstacles, {
           skipNames: skipN,
