@@ -3693,17 +3693,21 @@
     });
 
     // Read back positions
-    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var n in result.nodes) {
       if (!entries[n]) continue;
       entries[n].x = result.nodes[n].x;
       entries[n].y = result.nodes[n].y;
-      if (entries[n].cls) entries[n].noteTargets = buildMemberNoteTargets(entries[n]);
-      
-      minX = Math.min(minX, entries[n].x);
-      minY = Math.min(minY, entries[n].y);
-      maxX = Math.max(maxX, entries[n].x + entries[n].box.width);
-      maxY = Math.max(maxY, entries[n].y + entries[n].box.height);
+    }
+
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var n2 in entries) {
+      if (!Object.prototype.hasOwnProperty.call(entries, n2)) continue;
+      if (entries[n2].cls) entries[n2].noteTargets = buildMemberNoteTargets(entries[n2]);
+
+      minX = Math.min(minX, entries[n2].x);
+      minY = Math.min(minY, entries[n2].y);
+      maxX = Math.max(maxX, entries[n2].x + entries[n2].box.width);
+      maxY = Math.max(maxY, entries[n2].y + entries[n2].box.height);
     }
 
     return {
@@ -8138,6 +8142,314 @@
 
       if (layoutPass < 2) rebuildDesiredPortY(true);
     }
+
+    function nudgeComponentEntriesPreservingPortOrder(direction) {
+      var moveAlongX = direction === 'TB';
+      var moveAxis = moveAlongX ? 'x' : 'y';
+      var fixedAxis = moveAlongX ? 'y' : 'x';
+      var sizeKey = moveAlongX ? 'width' : 'height';
+      var fixedSizeKey = moveAlongX ? 'height' : 'width';
+      var fixedThreshold = moveAlongX
+        ? Math.max(24, effectiveGapY * 0.3)
+        : Math.max(24, effectiveGapX * 0.3);
+      var minGap = moveAlongX
+        ? Math.max(18, Math.round(effectiveGapX * 0.25))
+        : Math.max(18, Math.round(effectiveGapY * 0.25));
+      var maxShift = moveAlongX
+        ? Math.max(72, Math.round(effectiveGapX * 1.1))
+        : Math.max(72, Math.round(effectiveGapY * 1.1));
+      var obstaclePad = 18;
+
+      function fixedCenter(entry) {
+        return entry[fixedAxis] + entry.box[fixedSizeKey] / 2;
+      }
+
+      function shiftEntry(entry, delta) {
+        if (Math.abs(delta) < 0.5) return;
+        entry[moveAxis] += delta;
+        for (var alias in entry.portPositions) {
+          if (!Object.prototype.hasOwnProperty.call(entry.portPositions, alias)) continue;
+          var pos = entry.portPositions[alias];
+          if (moveAlongX) {
+            pos.x += delta;
+            pos.cx += delta;
+            pos.connX += delta;
+          } else {
+            pos.y += delta;
+            pos.cy += delta;
+            pos.connY += delta;
+          }
+        }
+      }
+
+      function ownAnchor(entry, conn, isSource) {
+        var alias = isSource ? conn.fromPort : conn.toPort;
+        if (alias && entry.portPositions[alias]) {
+          var pos = entry.portPositions[alias];
+          return moveAlongX ? pos.cx : pos.cy;
+        }
+        return entry[moveAxis] + entry.box[sizeKey] / 2;
+      }
+
+      function partnerAnchor(conn, compName) {
+        var partnerName = conn.from === compName ? conn.to : conn.from;
+        var partnerEntry = entries[partnerName];
+        if (!partnerEntry) return null;
+
+        var partnerAlias = conn.from === compName ? conn.toPort : conn.fromPort;
+        if (partnerAlias && partnerEntry.portPositions[partnerAlias]) {
+          var partnerPos = partnerEntry.portPositions[partnerAlias];
+          return moveAlongX ? partnerPos.cx : partnerPos.cy;
+        }
+        return partnerEntry[moveAxis] + partnerEntry.box[sizeKey] / 2;
+      }
+
+      function shiftedRect(entry, delta) {
+        return {
+          x: entry.x + (moveAlongX ? delta : 0),
+          y: entry.y + (moveAlongX ? 0 : delta),
+          width: entry.box.width,
+          height: entry.box.height,
+        };
+      }
+
+      function shiftedPortPosition(entry, alias, delta) {
+        var pos = alias && entry.portPositions ? entry.portPositions[alias] : null;
+        if (!pos) return null;
+        return {
+          cx: pos.cx + (moveAlongX ? delta : 0),
+          cy: pos.cy + (moveAlongX ? 0 : delta),
+          connX: pos.connX + (moveAlongX ? delta : 0),
+          connY: pos.connY + (moveAlongX ? 0 : delta),
+          side: pos.side,
+          kind: pos.kind || null,
+        };
+      }
+
+      function endpointX(pos) {
+        if (!pos) return null;
+        if (pos.kind === 'provide') {
+          return pos.side === 'right'
+            ? pos.cx + CFG.ifaceStick + CFG.ifaceRadius
+            : pos.cx - CFG.ifaceStick - CFG.ifaceRadius;
+        }
+        if (pos.kind === 'require') {
+          return pos.side === 'right'
+            ? pos.cx + CFG.ifaceStick
+            : pos.cx - CFG.ifaceStick;
+        }
+        return pos.connX;
+      }
+
+      function endpointCandidate(entry, alias, delta, otherEntry, otherDelta) {
+        var pos = shiftedPortPosition(entry, alias, delta);
+        if (pos) {
+          return {
+            x: endpointX(pos),
+            y: pos.connY,
+            side: pos.side,
+            stub: 24,
+          };
+        }
+
+        var rect = shiftedRect(entry, delta);
+        var otherRect = otherEntry ? shiftedRect(otherEntry, otherDelta) : null;
+        var cx = rect.x + rect.width / 2;
+        var cy = rect.y + rect.height / 2;
+        if (otherRect) {
+          var otherCx = otherRect.x + otherRect.width / 2;
+          var otherCy = otherRect.y + otherRect.height / 2;
+          if (Math.abs(otherCx - cx) > 5) {
+            return {
+              x: otherCx > cx ? rect.x + rect.width : rect.x,
+              y: cy,
+              side: otherCx > cx ? 'right' : 'left',
+              stub: 24,
+            };
+          }
+          return {
+            x: cx,
+            y: otherCy > cy ? rect.y + rect.height : rect.y,
+            side: otherCy > cy ? 'bottom' : 'top',
+            stub: 24,
+          };
+        }
+
+        return { x: cx, y: cy, side: 'right', stub: 24 };
+      }
+
+      function buildRouteObstacles(compName, delta) {
+        var routeObstacles = [];
+        for (var obstacleName in entries) {
+          if (!Object.prototype.hasOwnProperty.call(entries, obstacleName)) continue;
+          var obstacleEntry = entries[obstacleName];
+          var obstacleRect = shiftedRect(obstacleEntry, obstacleName === compName ? delta : 0);
+          routeObstacles.push({
+            x1: obstacleRect.x - obstaclePad,
+            y1: obstacleRect.y - obstaclePad,
+            x2: obstacleRect.x + obstacleRect.width + obstaclePad,
+            y2: obstacleRect.y + obstacleRect.height + obstaclePad,
+            name: obstacleName,
+          });
+        }
+        return routeObstacles;
+      }
+
+      function componentRouteScore(compName, delta) {
+        var entry = entries[compName];
+        if (!entry) return Number.POSITIVE_INFINITY;
+
+        var routeObstacles = buildRouteObstacles(compName, delta);
+        var total = 0;
+        var count = 0;
+
+        for (var ci = 0; ci < connectors.length; ci++) {
+          var conn = connectors[ci];
+          if (conn.from !== compName && conn.to !== compName) continue;
+
+          var fromEntry = entries[conn.from];
+          var toEntry = entries[conn.to];
+          if (!fromEntry || !toEntry) continue;
+
+          var fromDelta = conn.from === compName ? delta : 0;
+          var toDelta = conn.to === compName ? delta : 0;
+          var fromRect = shiftedRect(fromEntry, fromDelta);
+          var toRect = shiftedRect(toEntry, toDelta);
+          var source = endpointCandidate(fromEntry, conn.fromPort, fromDelta, toEntry, toDelta);
+          var target = endpointCandidate(toEntry, conn.toPort, toDelta, fromEntry, fromDelta);
+          var skipNames = {};
+          skipNames[conn.from] = true;
+          skipNames[conn.to] = true;
+
+          var routed = UMLShared.routeOrthogonalConnector(source, target, routeObstacles, {
+            skipNames: skipNames,
+            stub: 24,
+            clearance: 18,
+            bendPenalty: 38,
+            extraXs: [fromRect.x + fromRect.width / 2, toRect.x + toRect.width / 2],
+            extraYs: [fromRect.y + fromRect.height / 2, toRect.y + toRect.height / 2]
+          });
+          var points = UMLShared.simplifyOrthogonalPath(routed.points);
+          if (routeHitsObstacle(points, routeObstacles, skipNames, null)) {
+            total += 200000;
+            count++;
+            continue;
+          }
+
+          total += UMLShared.measureOrthogonalRoute(points) + UMLShared.countOrthogonalBends(points) * 36;
+          count++;
+        }
+
+        if (!count) return Number.POSITIVE_INFINITY;
+        return total + Math.abs(delta) * 0.2;
+      }
+
+      function collectShiftCandidates(compName) {
+        var entry = entries[compName];
+        if (!entry) return [0];
+
+        var candidates = [0];
+        var deltas = [];
+        for (var ci = 0; ci < connectors.length; ci++) {
+          var conn = connectors[ci];
+          if (conn.from !== compName && conn.to !== compName) continue;
+
+          var own = ownAnchor(entry, conn, conn.from === compName);
+          var partner = partnerAnchor(conn, compName);
+          if (partner === null) continue;
+          deltas.push(partner - own);
+        }
+
+        if (!deltas.length) return candidates;
+        deltas.sort(function(a, b) { return a - b; });
+        for (var di = 0; di < deltas.length; di++) {
+          candidates.push(deltas[di]);
+          candidates.push(deltas[di] * 0.5);
+        }
+        if (deltas.length % 2 === 1) {
+          candidates.push(deltas[(deltas.length - 1) / 2]);
+        } else {
+          var hi = deltas.length / 2;
+          candidates.push((deltas[hi - 1] + deltas[hi]) / 2);
+        }
+        return candidates;
+      }
+
+      var names = [];
+      for (var name in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, name)) continue;
+        names.push(name);
+      }
+
+      names.sort(function(a, b) {
+        var fixedDelta = fixedCenter(entries[a]) - fixedCenter(entries[b]);
+        if (Math.abs(fixedDelta) > 1) return fixedDelta;
+        return entries[a][moveAxis] - entries[b][moveAxis];
+      });
+
+      var bands = [];
+      for (var ni = 0; ni < names.length; ni++) {
+        var bandName = names[ni];
+        var bandEntry = entries[bandName];
+        var lastBand = bands.length ? bands[bands.length - 1] : null;
+        if (!lastBand || Math.abs(fixedCenter(bandEntry) - lastBand.ref) > fixedThreshold) {
+          bands.push({ ref: fixedCenter(bandEntry), names: [bandName] });
+        } else {
+          lastBand.names.push(bandName);
+        }
+      }
+
+      for (var pass = 0; pass < 3; pass++) {
+        var changed = false;
+        for (var bi = 0; bi < bands.length; bi++) {
+          var band = bands[bi];
+          band.names.sort(function(a, b) {
+            return entries[a][moveAxis] - entries[b][moveAxis];
+          });
+
+          for (var idx = 0; idx < band.names.length; idx++) {
+            var currentName = band.names[idx];
+            var currentEntry = entries[currentName];
+            var currentScore = componentRouteScore(currentName, 0);
+            if (!isFinite(currentScore)) continue;
+
+            var lower = Number.NEGATIVE_INFINITY;
+            var upper = Number.POSITIVE_INFINITY;
+            if (idx > 0) {
+              var prevEntry = entries[band.names[idx - 1]];
+              lower = prevEntry[moveAxis] + prevEntry.box[sizeKey] + minGap - currentEntry[moveAxis];
+            }
+            if (idx < band.names.length - 1) {
+              var nextEntry = entries[band.names[idx + 1]];
+              upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
+            }
+
+            var candidateDeltas = collectShiftCandidates(currentName);
+            var bestDelta = 0;
+            var bestScore = currentScore;
+            for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
+              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
+              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
+              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+
+              var candidateScore = componentRouteScore(currentName, candidateDelta);
+              if (candidateScore + 6 < bestScore) {
+                bestScore = candidateScore;
+                bestDelta = candidateDelta;
+              }
+            }
+
+            if (Math.abs(bestDelta) >= 1) {
+              shiftEntry(currentEntry, bestDelta);
+              changed = true;
+            }
+          }
+        }
+        if (!changed) break;
+      }
+    }
+
+    nudgeComponentEntriesPreservingPortOrder(actualDirection);
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     var portLabelFs = CFG.fontSize - 1;
