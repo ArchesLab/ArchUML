@@ -74,43 +74,14 @@
     return {
       stroke: get('--uml-stroke', '#4060a0'),
       text: get('--uml-text', '#222'),
-      fill: get('--uml-fill', '#fcfbf7'),
-      headerFill: get('--uml-header-fill', '#d7e4f5'),
+      fill: get('--uml-fill', '#fdfcf8'),
+      headerFill: get('--uml-header-fill', '#dbe8f8'),
       line: get('--uml-line', '#444'),
-      secondaryLine: get('--uml-secondary-line', '#7f8e9d'),
-      secondaryFill: get('--uml-secondary-fill', '#f4f7fb'),
+      secondaryLine: get('--uml-secondary-line', '#6c7c8d'),
+      secondaryFill: get('--uml-secondary-fill', '#eef4fa'),
       labelBg: get('--uml-label-fill', 'rgba(255,255,255,0.94)'),
       labelStroke: get('--uml-label-stroke', 'rgba(64,96,160,0.18)'),
     };
-  }
-
-  function renderLabelChip(text, x, y, options) {
-    var opts = options || {};
-    var fontSize = opts.fontSize || BASE_CFG.fontSize;
-    var fontFamily = opts.fontFamily || BASE_CFG.fontFamily;
-    var anchor = opts.anchor || 'start';
-    var bold = !!opts.bold;
-    var italic = !!opts.italic;
-    var padX = opts.padX != null ? opts.padX : 8;
-    var padY = opts.padY != null ? opts.padY : 4;
-    var radius = opts.radius != null ? opts.radius : 6;
-    var fill = opts.fill || '#fff';
-    var stroke = opts.stroke || 'rgba(64,96,160,0.16)';
-    var strokeWidth = opts.strokeWidth != null ? opts.strokeWidth : 1;
-    var textColor = opts.textColor || '#222';
-    var width = textWidth(text, bold, fontSize, fontFamily);
-    var left = x - padX;
-    if (anchor === 'middle') left = x - width / 2 - padX;
-    else if (anchor === 'end') left = x - width - padX;
-    var top = y - fontSize + 2 - padY;
-    var boxW = width + padX * 2;
-    var boxH = fontSize + padY * 2 + 2;
-    return '<g>' +
-      '<rect x="' + left + '" y="' + top + '" width="' + boxW + '" height="' + boxH + '" rx="' + radius + '" ry="' + radius +
-      '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"/>' +
-      '<text x="' + x + '" y="' + y + '" text-anchor="' + anchor + '" font-size="' + fontSize + '" fill="' + textColor + '"' +
-      (bold ? ' font-weight="bold"' : '') + (italic ? ' font-style="italic"' : '') + '>' + escapeXml(text) + '</text>' +
-      '</g>';
   }
 
   // ─── SVG Wrapper ────────────────────────────────────────────────
@@ -2039,7 +2010,6 @@
     createAutoInit: createAutoInit,
     drawNote: drawNote,
     measureNote: measureNote,
-    renderLabelChip: renderLabelChip,
     drawNoteConnector: drawNoteConnector,
     parseNoteLine: parseNoteLine,
     drawActorStickFigure: drawActorStickFigure,
@@ -2063,25 +2033,28 @@
     drawArrow: function(svg, x, y, ux, uy, color, size, sw) {
       var as = size || BASE_CFG.arrowSize;
       var strw = sw || BASE_CFG.strokeWidth;
-      var hw = as * 0.35;
+      var hw = as * 0.44;
+      var tipBack = as * 0.06;
       var px = -uy, py = ux;
       svg.push('<polygon points="' +
         x + ',' + y + ' ' +
-        (x + ux * as + px * hw) + ',' + (y + uy * as + py * hw) + ' ' +
-        (x + ux * as - px * hw) + ',' + (y + uy * as - py * hw) +
-        '" fill="' + color + '" stroke="none"/>');
+        (x + ux * (as + tipBack) + px * hw) + ',' + (y + uy * (as + tipBack) + py * hw) + ' ' +
+        (x + ux * (as * 0.18)) + ',' + (y + uy * (as * 0.18)) + ' ' +
+        (x + ux * (as + tipBack) - px * hw) + ',' + (y + uy * (as + tipBack) - py * hw) +
+        '" fill="' + color + '" stroke="' + color + '" stroke-width="' + (strw * 0.35) + '" stroke-linejoin="miter"/>');
     },
 
     drawOpenArrow: function(svg, x, y, ux, uy, color, size, sw) {
       var as = size || BASE_CFG.arrowSize;
       var strw = sw || BASE_CFG.strokeWidth;
-      var hw = as * 0.4;
+      var hw = as * 0.48;
+      var stem = as * 0.96;
       var px = -uy, py = ux;
       svg.push('<polyline points="' +
-        (x + ux * as + px * hw) + ',' + (y + uy * as + py * hw) + ' ' +
+        (x + ux * stem + px * hw) + ',' + (y + uy * stem + py * hw) + ' ' +
         x + ',' + y + ' ' +
-        (x + ux * as - px * hw) + ',' + (y + uy * as - py * hw) +
-        '" fill="none" stroke="' + color + '" stroke-width="' + strw + '"/>');
+        (x + ux * stem - px * hw) + ',' + (y + uy * stem - py * hw) +
+        '" fill="none" stroke="' + color + '" stroke-width="' + (strw * 1.05) + '" stroke-linecap="round" stroke-linejoin="miter"/>');
     },
 
     drawCrossMarker: function(svg, x, y, ux, uy, color, size, sw) {
@@ -2107,18 +2080,20 @@
     drawHollowTriangle: function(svg, x, y, ux, uy, colors, size, sw) {
       var as = (size || BASE_CFG.arrowSize) * 1.2;
       var strw = sw || BASE_CFG.strokeWidth;
-      var hw = as * 0.45;
+      var hw = as * 0.52;
+      var tail = as * 1.04;
       var px = -uy, py = ux;
       svg.push('<polygon points="' +
         x + ',' + y + ' ' +
-        (x + ux * as + px * hw) + ',' + (y + uy * as + py * hw) + ' ' +
-        (x + ux * as - px * hw) + ',' + (y + uy * as - py * hw) +
-        '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + strw + '"/>');
+        (x + ux * tail + px * hw) + ',' + (y + uy * tail + py * hw) + ' ' +
+        (x + ux * tail - px * hw) + ',' + (y + uy * tail - py * hw) +
+        '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + (strw * 1.02) + '" stroke-linejoin="miter"/>');
     },
 
     drawDiamond: function(svg, x, y, ux, uy, color, filled, bgColor, size, sw) {
-      var dh = size || 14;
-      var dw = (size || 10) / 2;
+      var base = size || 14;
+      var dh = base;
+      var dw = base * 0.46;
       var strw = sw || BASE_CFG.strokeWidth;
       var px = -uy, py = ux;
 
@@ -2130,7 +2105,7 @@
       svg.push('<polygon points="' +
         p1x + ',' + p1y + ' ' + p2x + ',' + p2y + ' ' +
         p3x + ',' + p3y + ' ' + p4x + ',' + p4y +
-        '" fill="' + (filled ? color : (bgColor || '#fff')) + '" stroke="' + color + '" stroke-width="' + strw + '"/>');
+        '" fill="' + (filled ? color : (bgColor || '#fff')) + '" stroke="' + color + '" stroke-width="' + (strw * 1.02) + '" stroke-linejoin="miter"/>');
     },
 
     resolveNodeTarget: resolveNodeTarget,
@@ -6346,7 +6321,7 @@
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
       svg.push('<line class="uml-node-shadow" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
-        '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="' + CFG.lifelineDash + '"/>');
+        '" stroke="' + colors.secondaryLine + '" stroke-width="4" stroke-dasharray="' + CFG.lifelineDash + '"/>');
     }
 
     // ── Draw activation bars (execution specifications) ──
@@ -6419,7 +6394,7 @@
       for (var ei = 0; ei < frag.elseYs.length; ei++) {
         var ey = frag.elseYs[ei].y;
         svg.push('<line x1="' + fragL + '" y1="' + ey + '" x2="' + fragR + '" y2="' + ey +
-          '" stroke="' + colors.line + '" stroke-width="1" stroke-dasharray="6,4"/>');
+          '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="6,4"/>');
         if (frag.elseYs[ei].condition) {
           guardSvg.push('<text x="' + (fragL + 10) + '" y="' + (ey + 16) +
             '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
@@ -6675,22 +6650,23 @@
   function drawMsgArrow(svg, x, y, dir, msgType, colors) {
     // dir: -1 = pointing right, 1 = pointing left
     var as = CFG.arrowSize;
-    var hw = as * 0.4;
+    var hw = as * 0.48;
 
     if (msgType === 'sync') {
       // Filled triangle
       svg.push('<polygon points="' +
         x + ',' + y + ' ' +
-        (x + dir * as) + ',' + (y - hw) + ' ' +
-        (x + dir * as) + ',' + (y + hw) +
-        '" fill="' + colors.line + '" stroke="none"/>');
+        (x + dir * (as * 1.06)) + ',' + (y - hw) + ' ' +
+        (x + dir * (as * 0.18)) + ',' + y + ' ' +
+        (x + dir * (as * 1.06)) + ',' + (y + hw) +
+        '" fill="' + colors.line + '" stroke="' + colors.line + '" stroke-width="0.45" stroke-linejoin="miter"/>');
     } else {
       // Open arrowhead (async or response)
       svg.push('<polyline points="' +
-        (x + dir * as) + ',' + (y - hw) + ' ' +
+        (x + dir * (as * 0.96)) + ',' + (y - hw) + ' ' +
         x + ',' + y + ' ' +
-        (x + dir * as) + ',' + (y + hw) +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        (x + dir * (as * 0.96)) + ',' + (y + hw) +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + (CFG.strokeWidth * 1.05) + '" stroke-linecap="round" stroke-linejoin="miter"/>');
     }
   }
 
@@ -12178,7 +12154,7 @@
       var sbox = systemBoxes[sbi2];
       svg.push('<rect x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
         '" rx="' + CFG.sysRx + '" ry="' + CFG.sysRx +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + colors.secondaryFill + '" fill-opacity="0.7" stroke="' + colors.secondaryLine + '" stroke-width="1.2"/>');
       // System title
       svg.push('<text x="' + (sbox.x + sbox.width / 2) + '" y="' + (sbox.y + CFG.sysTitlePadY - 6) +
         '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
@@ -12208,7 +12184,7 @@
 
       // Draw line
       svg.push('<line x1="' + p1.x + '" y1="' + p1.y + '" x2="' + p2.x + '" y2="' + p2.y +
-        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+        '" stroke="' + (isDashed ? colors.secondaryLine : colors.line) + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
 
       // Arrowhead at target
       var adx = p2.x - p1.x, ady = p2.y - p1.y;
@@ -12969,21 +12945,19 @@
       var ae0 = entries[aen];
       activityObstacles.push({ x: ae0.x, y: ae0.y, w: ae0.box.width, h: ae0.box.height });
     }
-    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
 
     // ── Draw swimlanes (behind everything) ──
     if (laneInfo) {
       var laneTopY = -layout.offsetY - laneExtraTop;
       var laneBotY = layout.height - layout.offsetY + CFG.svgPad / 2;
       var laneH = laneBotY - laneTopY;
-      var laneColors = ['#f0f4fa', '#e8edf5'];
-
       for (var li = 0; li < laneInfo.lanes.length; li++) {
         var ln = laneInfo.lanes[li];
-        var laneColor = laneColors[li % laneColors.length];
+        var laneOpacity = li % 2 === 0 ? '0.46' : '0.30';
         // Lane background
         svg.push('<rect x="' + ln.x + '" y="' + laneTopY + '" width="' + ln.width + '" height="' + laneH +
-          '" fill="' + laneColor + '" stroke="' + colors.stroke + '" stroke-width="0.5" opacity="0.5"/>');
+          '" fill="' + colors.secondaryFill + '" fill-opacity="' + laneOpacity + '" stroke="' + colors.secondaryLine + '" stroke-width="0.5"/>');
         // Lane header
         svg.push('<rect x="' + ln.x + '" y="' + laneTopY + '" width="' + ln.width + '" height="' + CFG.laneHeaderH +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
