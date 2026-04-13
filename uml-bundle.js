@@ -4333,6 +4333,19 @@
         ra.bottom + gap > rb.top && ra.top - gap < rb.bottom;
     }
 
+    function classRectOverlapArea(a, b, pad) {
+      var gap = pad || 0;
+      var ra = classObstacleRect(a);
+      var rb = classObstacleRect(b);
+      if (!ra || !rb) return 0;
+      var left = Math.max(ra.left - gap, rb.left);
+      var right = Math.min(ra.right + gap, rb.right);
+      var top = Math.max(ra.top - gap, rb.top);
+      var bottom = Math.min(ra.bottom + gap, rb.bottom);
+      if (right <= left || bottom <= top) return 0;
+      return (right - left) * (bottom - top);
+    }
+
     function classTextPlacementHitsSegments(rect, segments, pad) {
       var gap = typeof pad === 'number' ? pad : 0;
       for (var i = 0; i < segments.length; i++) {
@@ -4340,6 +4353,35 @@
         if (segmentRect && classRectsOverlap(rect, segmentRect, 0)) return true;
       }
       return false;
+    }
+
+    function classTextPlacementPenalty(rect, obstacles, labels, routeSegments, obstaclePad, labelPad, segmentPad) {
+      var penalty = 0;
+      for (var i = 0; i < obstacles.length; i++) {
+        penalty += classRectOverlapArea(rect, obstacles[i], obstaclePad) * 10;
+      }
+      for (var j = 0; j < labels.length; j++) {
+        penalty += classRectOverlapArea(rect, labels[j], labelPad) * 20;
+      }
+      if (routeSegments && routeSegments.length) {
+        for (var k = 0; k < routeSegments.length; k++) {
+          var segmentRect = segmentObstacleRect(routeSegments[k], segmentPad || 3);
+          if (segmentRect && classRectsOverlap(rect, segmentRect, 0)) {
+            penalty += 500;
+          }
+        }
+      }
+      return penalty;
+    }
+
+    function excludeClassMarkerObstacles(obstacles, excluded) {
+      if (!excluded || !excluded.length) return obstacles.slice();
+      var kept = [];
+      for (var i = 0; i < obstacles.length; i++) {
+        if (excluded.indexOf(obstacles[i]) >= 0) continue;
+        kept.push(obstacles[i]);
+      }
+      return kept;
     }
 
     function classTextPlacementIsClear(rect, obstacles, labels, routeSegments, obstaclePad, labelPad, segmentPad) {
@@ -4414,6 +4456,8 @@
       };
       var directPlacement = null;
       var directRect = null;
+      var bestDirectPlacement = null;
+      var bestDirectPenalty = Number.POSITIVE_INFINITY;
       var nearbySegments = [];
       var rawFirstPoint = isSource ? endpoint.point : endpoint.prevPoint;
       var rawSecondPoint = isSource ? endpoint.nextPoint : endpoint.point;
@@ -4426,6 +4470,12 @@
       var sourceInheritOffset = isSource && endpoint.dy > 0 && hasInheritAtBottom[routeInfo.rel.from]
         ? CFG.triangleH + CFG.junctionGap + 4
         : 0;
+      var ownMarkerObstacles = isSource ? (routeInfo.sourceMarkerObstacles || []) : (routeInfo.targetMarkerObstacles || []);
+      var ownHasMarker = ownMarkerObstacles.length > 0;
+      var placementObstacles = excludeClassMarkerObstacles(
+        classObstacles.concat(noteMarkerObstacles),
+        ownMarkerObstacles
+      );
       var entryCx0 = entry.x + entry.box.width / 2;
       var partnerCx0 = partner.x + partner.box.width / 2;
       var sideBias0 = endpoint.point.x < entryCx0 - 1 ? -1 : (endpoint.point.x > entryCx0 + 1 ? 1 : 0);
@@ -4438,15 +4488,29 @@
       nearbySegments = classRouteSegmentsExcept(noteRouteSegments, routeInfo.routeIndex, segmentIndex);
 
       if (side === 'right') {
-        directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
-        directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
-        directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
-        directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
+        if (ownHasMarker) {
+          directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
+          directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+          directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
+          directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+        } else {
+          directCandidates.push({ x: endpoint.point.x + 10, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + 10, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
+          directCandidates.push({ x: endpoint.point.x + primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
+          directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
+          directCandidates.push({ x: endpoint.point.x + secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'start' });
+        }
       } else if (side === 'left') {
+        if (!ownHasMarker) {
+          directCandidates.push({ x: endpoint.point.x - 10, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x - 10, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+        }
         directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
         directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
         directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
         directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+        directCandidates.push({ x: endpoint.point.x - secondaryOffset - 8, y: endpoint.point.y - horizMultLane, anchor: 'end' });
       } else if (side === 'top') {
         directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y - 6, anchor: sideBias0 < 0 ? 'end' : 'start' });
         directCandidates.push({ x: endpoint.point.x - sideBias0 * primaryOffset, y: endpoint.point.y - 6, anchor: sideBias0 > 0 ? 'end' : 'start' });
@@ -4478,9 +4542,27 @@
       for (var dci = 0; dci < directCandidates.length; dci++) {
         directPlacement = directCandidates[dci];
         directRect = classTextRect(text, directPlacement.x, directPlacement.y, directPlacement.anchor, CFG.fontSizeStereotype);
+        var directPenalty = classTextPlacementPenalty(
+          directRect,
+          placementObstacles,
+          placedLabels,
+          nearbySegments,
+          6,
+          8,
+          3
+        );
+        if (directPenalty < bestDirectPenalty) {
+          bestDirectPenalty = directPenalty;
+          bestDirectPlacement = {
+            x: directPlacement.x,
+            y: directPlacement.y,
+            anchor: directPlacement.anchor,
+            rect: directRect
+          };
+        }
         if (classTextPlacementIsClear(
           directRect,
-          classObstacles.concat(noteMarkerObstacles),
+          placementObstacles,
           placedLabels,
           nearbySegments,
           6,
@@ -4491,6 +4573,8 @@
           return directPlacement;
         }
       }
+
+      if (bestDirectPlacement) return bestDirectPlacement;
 
       if (!isSource &&
           endpoint.count > 1 &&
@@ -4559,7 +4643,7 @@
       return UMLShared.placeOrthogonalLabel(
         text,
         points,
-        classObstacles.concat(noteMarkerObstacles),
+        placementObstacles,
         placedLabels,
         options
       );
@@ -5203,14 +5287,21 @@
       }
 
       // Source decorations (deferred to draw on top of class boxes)
+      var sourceMarkerObstacles = [];
+      var targetMarkerObstacles = [];
+
       if (orel.type === 'composition') {
         var sourceDiamond = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
         UMLShared.drawDiamond(decorSvg, sourceDiamond.x, sourceDiamond.y, startDx, startDy, colors.line, true, colors.fill);
-        noteMarkerObstacles.push(pointObstacleRect(sourceDiamond.x + startDx * CFG.diamondH / 2, sourceDiamond.y + startDy * CFG.diamondH / 2, CFG.diamondH));
+        var sourceDiamondObstacle = pointObstacleRect(sourceDiamond.x + startDx * CFG.diamondH / 2, sourceDiamond.y + startDy * CFG.diamondH / 2, CFG.diamondH);
+        noteMarkerObstacles.push(sourceDiamondObstacle);
+        sourceMarkerObstacles.push(sourceDiamondObstacle);
       } else if (orel.type === 'aggregation') {
         var sourceAggregation = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
         UMLShared.drawDiamond(decorSvg, sourceAggregation.x, sourceAggregation.y, startDx, startDy, colors.line, false, colors.fill);
-        noteMarkerObstacles.push(pointObstacleRect(sourceAggregation.x + startDx * CFG.diamondH / 2, sourceAggregation.y + startDy * CFG.diamondH / 2, CFG.diamondH));
+        var sourceAggregationObstacle = pointObstacleRect(sourceAggregation.x + startDx * CFG.diamondH / 2, sourceAggregation.y + startDy * CFG.diamondH / 2, CFG.diamondH);
+        noteMarkerObstacles.push(sourceAggregationObstacle);
+        sourceMarkerObstacles.push(sourceAggregationObstacle);
       }
 
       if (orel.navigability === 'bidirectional') {
@@ -5223,22 +5314,30 @@
         }
         var sourceArrow = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, sourceArrow.x, sourceArrow.y, startDx, startDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6));
+        var sourceArrowObstacle = pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6);
+        noteMarkerObstacles.push(sourceArrowObstacle);
+        sourceMarkerObstacles.push(sourceArrowObstacle);
       } else if (orel.navigability === 'non-navigable-both') {
         var sourceCross = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, sourceCross.x, sourceCross.y, startDx, startDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6));
+        var sourceCrossObstacle = pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6);
+        noteMarkerObstacles.push(sourceCrossObstacle);
+        sourceMarkerObstacles.push(sourceCrossObstacle);
       }
 
       // Target decorations (deferred to draw on top of class boxes)
       if (orel.type === 'dependency' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
         var targetArrow = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, targetArrow.x, targetArrow.y, endDx, endDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6));
+        var targetArrowObstacle = pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6);
+        noteMarkerObstacles.push(targetArrowObstacle);
+        targetMarkerObstacles.push(targetArrowObstacle);
       } else if (orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
         var targetCross = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, targetCross.x, targetCross.y, endDx, endDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6));
+        var targetCrossObstacle = pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6);
+        noteMarkerObstacles.push(targetCrossObstacle);
+        targetMarkerObstacles.push(targetCrossObstacle);
       }
 
       classRelationTextQueue.push({
@@ -5258,6 +5357,7 @@
           count: srcCount,
           centered: srcCentered
         },
+        sourceMarkerObstacles: sourceMarkerObstacles,
         target: {
           point: pLast,
           prevPoint: pPrev,
@@ -5269,7 +5369,8 @@
           prevSegmentIndex: visiblePathPoints.length >= 3 ? visiblePathPoints.length - 3 : null,
           count: tgtCount,
           centered: tgtCentered
-        }
+        },
+        targetMarkerObstacles: targetMarkerObstacles
       });
 
       UMLShared.reserveOrthogonalRoute(pathPoints, classOccupiedSegments);
