@@ -98,7 +98,7 @@
       '<feDropShadow dx="0" dy="2.5" stdDeviation="2.6" flood-color="#000" flood-opacity="0.22"/>' +
       '</filter>' +
       '</defs>' +
-      '<style>.uml-node-shadow{filter:' + shadowFilter + ';}</style>' +
+      '<style>.uml-node-shadow{filter:' + shadowFilter + ';}line,polyline,path{stroke-linecap:square;stroke-linejoin:miter;}</style>' +
       '<g transform="translate(' + ox + ',' + oy + ')">';
   }
 
@@ -1314,7 +1314,7 @@
     var labelW = textWidth(label, false, fontSize);
     var labelH = fontSize + 6;
     var segments = buildOrthogonalSegments(points);
-    var fractions = opts.fractions || [0.5, 0.35, 0.65, 0.22, 0.78];
+    var fractions = opts.fractions || [0.5, 0.34, 0.66, 0.2, 0.8];
     var otherSegments = opts.otherSegments || [];
 
     if (!segments.length) return null;
@@ -1333,17 +1333,26 @@
       var placements = segment.isH
         ? (opts.horizontalPlacements || [
             { anchor: 'middle', dx: 0, dy: -10, penalty: 0 },
-            { anchor: 'middle', dx: 0, dy: labelH + 4, penalty: 8 }
+            { anchor: 'middle', dx: 0, dy: labelH + 4, penalty: 8 },
+            { anchor: 'middle', dx: 0, dy: -(labelH + 8), penalty: 14 },
+            { anchor: 'middle', dx: 0, dy: labelH * 2 + 8, penalty: 18 }
           ])
         : (opts.verticalPlacements || [
-            { anchor: 'start', dx: 10, dy: 0, penalty: 2 },
-            { anchor: 'end', dx: -10, dy: 0, penalty: 6 }
+            { anchor: 'start', dx: 12, dy: 0, penalty: 2 },
+            { anchor: 'end', dx: -12, dy: 0, penalty: 4 },
+            { anchor: 'start', dx: labelW + 16, dy: 0, penalty: 18 },
+            { anchor: 'end', dx: -(labelW + 16), dy: 0, penalty: 18 }
           ]);
+
+      var endpointInset = segment.length > 0
+        ? Math.min(0.42, ((segment.isH ? labelW / 2 : labelH / 2) + (opts.endpointPad || 14)) / segment.length)
+        : 0;
 
       for (var pi = 0; pi < placements.length; pi++) {
         var placement = placements[pi];
         for (var fi = 0; fi < fractions.length; fi++) {
           var fraction = fractions[fi];
+          if (fraction < endpointInset || fraction > 1 - endpointInset) continue;
           var lx, ly;
           if (segment.isH) {
             lx = segment.x1 + (segment.x2 - segment.x1) * fraction + placement.dx;
@@ -2092,8 +2101,8 @@
 
     drawDiamond: function(svg, x, y, ux, uy, color, filled, bgColor, size, sw) {
       var base = size || 14;
-      var dh = base;
-      var dw = base * 0.46;
+      var dh = base * 1.12;
+      var dw = base * 0.34;
       var strw = sw || BASE_CFG.strokeWidth;
       var px = -uy, py = ux;
 
@@ -4026,7 +4035,19 @@
     }
 
     // ── Draw relationships ──
-    var decorSvg = []; // arrowhead decorations drawn after class boxes
+    var decorSvg = []; // arrowhead decorations drawn above boxes and lines, below labels
+
+    function offsetClassMarkerPoint(x, y, ux, uy, markerKind) {
+      var shift = CFG.strokeWidth * 0.75;
+      if (markerKind === 'triangle') shift += 0.9;
+      else if (markerKind === 'diamond') shift += 0.0;
+      else if (markerKind === 'open-arrow') shift += 0.6;
+      else if (markerKind === 'cross') shift += 0.45;
+      return {
+        x: x + ux * shift,
+        y: y + uy * shift
+      };
+    }
 
     // Group generalization/realization by target for shared-target rendering
     var inheritGroups = {};  // target -> { type, children: [] }
@@ -4351,8 +4372,9 @@
       var parentBot = parentEntry.y + parentEntry.box.height;
 
       // Hollow triangle at parent bottom (deferred to draw on top of class boxes)
-      var triTop = parentBot;
-      var triBot = parentBot + CFG.triangleH;
+      var triAnchor = offsetClassMarkerPoint(parentCx, parentBot, 0, 1, 'triangle');
+      var triTop = triAnchor.y;
+      var triBot = triTop + CFG.triangleH;
       noteMarkerObstacles.push({
         x: parentCx - CFG.triangleW / 2 - 6,
         y: triTop - 4,
@@ -4581,13 +4603,14 @@
 
       pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
 
-      var routeSegments = UMLShared.buildOrthogonalSegments(pathPoints);
+      var visiblePathPoints = pathPoints;
+      var routeSegments = UMLShared.buildOrthogonalSegments(visiblePathPoints);
 
       // Build polyline points string
       var pointsStr = '';
-      for (var pi3 = 0; pi3 < pathPoints.length; pi3++) {
+      for (var pi3 = 0; pi3 < visiblePathPoints.length; pi3++) {
         if (pi3 > 0) pointsStr += ' ';
-        pointsStr += pathPoints[pi3].x + ',' + pathPoints[pi3].y;
+        pointsStr += visiblePathPoints[pi3].x + ',' + visiblePathPoints[pi3].y;
       }
 
       // Draw main polyline
@@ -4624,11 +4647,13 @@
 
       // Source decorations (deferred to draw on top of class boxes)
       if (orel.type === 'composition') {
-        UMLShared.drawDiamond(decorSvg, p0.x, p0.y, startDx, startDy, colors.line, true, colors.fill);
-        noteMarkerObstacles.push(pointObstacleRect(p0.x + startDx * CFG.diamondH / 2, p0.y + startDy * CFG.diamondH / 2, CFG.diamondH));
+        var sourceDiamond = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
+        UMLShared.drawDiamond(decorSvg, sourceDiamond.x, sourceDiamond.y, startDx, startDy, colors.line, true, colors.fill);
+        noteMarkerObstacles.push(pointObstacleRect(sourceDiamond.x + startDx * CFG.diamondH / 2, sourceDiamond.y + startDy * CFG.diamondH / 2, CFG.diamondH));
       } else if (orel.type === 'aggregation') {
-        UMLShared.drawDiamond(decorSvg, p0.x, p0.y, startDx, startDy, colors.line, false, colors.fill);
-        noteMarkerObstacles.push(pointObstacleRect(p0.x + startDx * CFG.diamondH / 2, p0.y + startDy * CFG.diamondH / 2, CFG.diamondH));
+        var sourceAggregation = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
+        UMLShared.drawDiamond(decorSvg, sourceAggregation.x, sourceAggregation.y, startDx, startDy, colors.line, false, colors.fill);
+        noteMarkerObstacles.push(pointObstacleRect(sourceAggregation.x + startDx * CFG.diamondH / 2, sourceAggregation.y + startDy * CFG.diamondH / 2, CFG.diamondH));
       }
 
       if (orel.navigability === 'bidirectional') {
@@ -4639,20 +4664,24 @@
           sourceArrowX += startDx * markerOffset;
           sourceArrowY += startDy * markerOffset;
         }
-        UMLShared.drawOpenArrow(decorSvg, sourceArrowX, sourceArrowY, startDx, startDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(sourceArrowX, sourceArrowY, CFG.arrowSize + 6));
+        var sourceArrow = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'open-arrow');
+        UMLShared.drawOpenArrow(decorSvg, sourceArrow.x, sourceArrow.y, startDx, startDy, colors.line);
+        noteMarkerObstacles.push(pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6));
       } else if (orel.navigability === 'non-navigable-both') {
-        UMLShared.drawCrossMarker(decorSvg, p0.x, p0.y, startDx, startDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(p0.x, p0.y, CFG.arrowSize + 6));
+        var sourceCross = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'cross');
+        UMLShared.drawCrossMarker(decorSvg, sourceCross.x, sourceCross.y, startDx, startDy, colors.line);
+        noteMarkerObstacles.push(pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6));
       }
 
       // Target decorations (deferred to draw on top of class boxes)
       if (orel.type === 'dependency' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
-        UMLShared.drawOpenArrow(decorSvg, pLast.x, pLast.y, endDx, endDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(pLast.x, pLast.y, CFG.arrowSize + 6));
+        var targetArrow = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'open-arrow');
+        UMLShared.drawOpenArrow(decorSvg, targetArrow.x, targetArrow.y, endDx, endDy, colors.line);
+        noteMarkerObstacles.push(pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6));
       } else if (orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
-        UMLShared.drawCrossMarker(decorSvg, pLast.x, pLast.y, endDx, endDy, colors.line);
-        noteMarkerObstacles.push(pointObstacleRect(pLast.x, pLast.y, CFG.arrowSize + 6));
+        var targetCross = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'cross');
+        UMLShared.drawCrossMarker(decorSvg, targetCross.x, targetCross.y, endDx, endDy, colors.line);
+        noteMarkerObstacles.push(pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6));
       }
 
       // Determine if the first/last segment is horizontal or vertical
@@ -4662,9 +4691,10 @@
 
       // Place relationship labels away from boxes and previously routed edges.
       if (orel.label) {
-        var labelPlacement = UMLShared.placeOrthogonalLabel(orel.label, pathPoints, classObstacles, placedLabels, {
+        var labelPlacement = UMLShared.placeOrthogonalLabel(orel.label, visiblePathPoints, classObstacles, placedLabels, {
           fontSize: CFG.fontSizeStereotype,
           otherSegments: placedRouteSegments,
+          endpointPad: 20,
           scoreCandidate: function(segment, placement) {
             var bonus = segment.isH ? 10 : -4;
             if (placement.anchor === 'middle') bonus += 2;
@@ -4837,10 +4867,10 @@
       }
     }
 
-    // ── Draw arrowhead decorations on top of class boxes ──
+    // ── Draw relationship decorations on top of lines and class boxes ──
     for (var di = 0; di < decorSvg.length; di++) svg.push(decorSvg[di]);
 
-    // ── Draw relationship labels on top of lines and class boxes ──
+    // ── Draw relationship labels on top of absolutely everything else ──
     for (var lsi = 0; lsi < labelSvg.length; lsi++) svg.push(labelSvg[lsi]);
 
     var noteObstacles = [];
@@ -5736,6 +5766,7 @@
     activationW: 12,
     activationOffset: 4,  // horizontal shift per stacking depth level
     lifelineDash: '6,4',
+    lifelineStrokeWidth: 2,
     fragmentPadX: 10,
     fragmentPadY: 6,
     fragmentLabelW: 50,
@@ -6255,7 +6286,7 @@
         activationBars.push({ pIdx: findPIdx(openId), startY: oEntry.y, endY: totalH - 20, depth: oEntry.depth });
       }
     }
-    // Helper to find the connection point X (lifeline center or activation bar edge)
+    // Helper to find the visible connection edge (lifeline stroke edge or activation border)
     function getEdgeX(pIdx, y, side) {
       if (pIdx === undefined) return 0;
       var center = partX[pIdx];
@@ -6268,9 +6299,11 @@
           if (ab.depth > bestDepth) bestDepth = ab.depth;
         }
       }
-      if (bestDepth === -1) return center;
+      var sideSign = side === 'right' ? 1 : -1;
+      if (bestDepth === -1) return center + sideSign * (CFG.lifelineStrokeWidth / 2);
       var abx = center - CFG.activationW / 2 + bestDepth * CFG.activationOffset;
-      return (side === 'right') ? (abx + CFG.activationW) : abx;
+      var edge = (side === 'right') ? (abx + CFG.activationW) : abx;
+      return edge + sideSign * 0.5;
     }
 
     var sequenceNoteObstacles = [];
@@ -6321,7 +6354,7 @@
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
       svg.push('<line class="uml-node-shadow" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
-        '" stroke="' + colors.secondaryLine + '" stroke-width="4" stroke-dasharray="' + CFG.lifelineDash + '"/>');
+        '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
     }
 
     // ── Draw activation bars (execution specifications) ──
@@ -6422,8 +6455,8 @@
         // Create messages: arrow points to the participant box edge (UML 2.0 G179)
         if (createYs.hasOwnProperty(m.to) && my <= createYs[m.to] + partH) {
           x2 = isLeft
-            ? partX[toIdx] + partWidths[toIdx] / 2   // right edge of box
-            : partX[toIdx] - partWidths[toIdx] / 2;  // left edge of box
+            ? partX[toIdx] + partWidths[toIdx] / 2 + CFG.strokeWidth / 2   // right edge of box
+            : partX[toIdx] - partWidths[toIdx] / 2 - CFG.strokeWidth / 2;  // left edge of box
         } else {
           x2 = getEdgeX(toIdx, my, isLeft ? 'right' : 'left');
         }
@@ -6650,22 +6683,19 @@
   function drawMsgArrow(svg, x, y, dir, msgType, colors) {
     // dir: -1 = pointing right, 1 = pointing left
     var as = CFG.arrowSize;
-    var hw = as * 0.48;
+    var hw = as * 0.5;
 
     if (msgType === 'sync') {
-      // Filled triangle
       svg.push('<polygon points="' +
         x + ',' + y + ' ' +
-        (x + dir * (as * 1.06)) + ',' + (y - hw) + ' ' +
-        (x + dir * (as * 0.18)) + ',' + y + ' ' +
-        (x + dir * (as * 1.06)) + ',' + (y + hw) +
-        '" fill="' + colors.line + '" stroke="' + colors.line + '" stroke-width="0.45" stroke-linejoin="miter"/>');
+        (x + dir * as) + ',' + (y - hw) + ' ' +
+        (x + dir * as) + ',' + (y + hw) +
+        '" fill="' + colors.line + '" stroke="none"/>');
     } else {
-      // Open arrowhead (async or response)
       svg.push('<polyline points="' +
-        (x + dir * (as * 0.96)) + ',' + (y - hw) + ' ' +
+        (x + dir * as) + ',' + (y - hw) + ' ' +
         x + ',' + y + ' ' +
-        (x + dir * (as * 0.96)) + ',' + (y + hw) +
+        (x + dir * as) + ',' + (y + hw) +
         '" fill="none" stroke="' + colors.line + '" stroke-width="' + (CFG.strokeWidth * 1.05) + '" stroke-linecap="round" stroke-linejoin="miter"/>');
     }
   }
@@ -7426,6 +7456,7 @@
         var labelPlacement = UMLShared.placeOrthogonalLabel(tr.label, points, stateObstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
+          endpointPad: 18,
           scoreCandidate: function(segment, placement) {
             var bonus = segment.isH ? 8 : -4;
             if (placement.anchor === 'middle') bonus += 2;
@@ -11328,6 +11359,7 @@
         var labelPlacement = UMLShared.placeOrthogonalLabel(lk.label, points, obstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
+          endpointPad: 22,
           scoreCandidate: function(segment) {
             return segment.isH ? 10 : -4;
           }
@@ -13165,6 +13197,7 @@
         var guardPlacement = UMLShared.placeOrthogonalLabel(guardText, points, activityObstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
+          endpointPad: 18,
           fractions: [0.5, 0.38, 0.62],
           scoreCandidate: function(segment) {
             var bonus = segment.isH ? 12 : -6;
