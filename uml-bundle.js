@@ -74,10 +74,43 @@
     return {
       stroke: get('--uml-stroke', '#4060a0'),
       text: get('--uml-text', '#222'),
-      fill: get('--uml-fill', '#fff'),
-      headerFill: get('--uml-header-fill', '#d0ddef'),
+      fill: get('--uml-fill', '#fcfbf7'),
+      headerFill: get('--uml-header-fill', '#d7e4f5'),
       line: get('--uml-line', '#444'),
+      secondaryLine: get('--uml-secondary-line', '#7f8e9d'),
+      secondaryFill: get('--uml-secondary-fill', '#f4f7fb'),
+      labelBg: get('--uml-label-fill', 'rgba(255,255,255,0.94)'),
+      labelStroke: get('--uml-label-stroke', 'rgba(64,96,160,0.18)'),
     };
+  }
+
+  function renderLabelChip(text, x, y, options) {
+    var opts = options || {};
+    var fontSize = opts.fontSize || BASE_CFG.fontSize;
+    var fontFamily = opts.fontFamily || BASE_CFG.fontFamily;
+    var anchor = opts.anchor || 'start';
+    var bold = !!opts.bold;
+    var italic = !!opts.italic;
+    var padX = opts.padX != null ? opts.padX : 8;
+    var padY = opts.padY != null ? opts.padY : 4;
+    var radius = opts.radius != null ? opts.radius : 6;
+    var fill = opts.fill || '#fff';
+    var stroke = opts.stroke || 'rgba(64,96,160,0.16)';
+    var strokeWidth = opts.strokeWidth != null ? opts.strokeWidth : 1;
+    var textColor = opts.textColor || '#222';
+    var width = textWidth(text, bold, fontSize, fontFamily);
+    var left = x - padX;
+    if (anchor === 'middle') left = x - width / 2 - padX;
+    else if (anchor === 'end') left = x - width - padX;
+    var top = y - fontSize + 2 - padY;
+    var boxW = width + padX * 2;
+    var boxH = fontSize + padY * 2 + 2;
+    return '<g>' +
+      '<rect x="' + left + '" y="' + top + '" width="' + boxW + '" height="' + boxH + '" rx="' + radius + '" ry="' + radius +
+      '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"/>' +
+      '<text x="' + x + '" y="' + y + '" text-anchor="' + anchor + '" font-size="' + fontSize + '" fill="' + textColor + '"' +
+      (bold ? ' font-weight="bold"' : '') + (italic ? ' font-style="italic"' : '') + '>' + escapeXml(text) + '</text>' +
+      '</g>';
   }
 
   // ─── SVG Wrapper ────────────────────────────────────────────────
@@ -484,13 +517,13 @@
       (x + w) + ',' + (y + f) + ' ' +
       (x + w) + ',' + (y + h) + ' ' +
       x + ',' + (y + h) +
-      '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="1"/>');
+      '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
     // Fold triangle
     svg.push('<polyline class="uml-node-shadow uml-note-fold" points="' +
       (x + w - f) + ',' + y + ' ' +
       (x + w - f) + ',' + (y + f) + ' ' +
       (x + w) + ',' + (y + f) +
-      '" fill="none" stroke="' + colors.line + '" stroke-width="1"/>');
+      '" fill="none" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
   }
 
   /**
@@ -498,9 +531,9 @@
    */
   function drawNoteConnector(svg, fromX, fromY, toX, toY, colors) {
     svg.push('<line class="uml-note-connector" x1="' + fromX + '" y1="' + fromY + '" x2="' + toX + '" y2="' + toY +
-      '" stroke="' + colors.line + '" stroke-width="1" stroke-linecap="round" stroke-dasharray="' + NOTE_CFG.connectorDash + '"/>');
+      '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-linecap="round" stroke-dasharray="' + NOTE_CFG.connectorDash + '"/>');
     svg.push('<circle class="uml-note-anchor" cx="' + toX + '" cy="' + toY + '" r="' + NOTE_CFG.circleR +
-      '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="1"/>');
+      '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
   }
 
   /**
@@ -2006,6 +2039,7 @@
     createAutoInit: createAutoInit,
     drawNote: drawNote,
     measureNote: measureNote,
+    renderLabelChip: renderLabelChip,
     drawNoteConnector: drawNoteConnector,
     parseNoteLine: parseNoteLine,
     drawActorStickFigure: drawActorStickFigure,
@@ -6312,7 +6346,7 @@
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
       svg.push('<line class="uml-node-shadow" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
-        '" stroke="' + colors.line + '" stroke-width="1" stroke-dasharray="' + CFG.lifelineDash + '"/>');
+        '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="' + CFG.lifelineDash + '"/>');
     }
 
     // ── Draw activation bars (execution specifications) ──
@@ -6354,7 +6388,7 @@
       // Fragment border
       svg.push('<rect x="' + fragL + '" y="' + frag.startY + '" width="' + fragW +
         '" height="' + (frag.endY - frag.startY) +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="1"/>');
+        '" fill="none" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
 
       // Fragment label — pentagon/tab shape with folded corner
       var labelW = UMLShared.textWidth(frag.fragType.toUpperCase(), true, CFG.fontSizeFragment) + 16;
@@ -6368,7 +6402,7 @@
         (lx + labelW) + ',' + (ly + lh - foldSize) + ' ' +
         (lx + labelW - foldSize) + ',' + (ly + lh) + ' ' +
         lx + ',' + (ly + lh) +
-        '" fill="' + colors.headerFill + '" stroke="' + colors.line + '" stroke-width="1"/>');
+        '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
       svg.push('<text x="' + (lx + 8) + '" y="' + (ly + lh - 7) +
         '" font-size="' + CFG.fontSizeFragment + '" font-weight="bold" fill="' + colors.text + '">' +
         UMLShared.escapeXml(frag.fragType.toUpperCase()) + '</text>');
