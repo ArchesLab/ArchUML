@@ -42,16 +42,25 @@
     if (!layoutMatch) return null;
 
     var value = layoutMatch[1].trim().toLowerCase();
+    var shadowMatch = value.match(/^shadows?\s+(on|off)$/);
+    if (shadowMatch) {
+      return {
+        direction: null,
+        layoutPreference: null,
+        shadowEnabled: shadowMatch[1] === 'on'
+      };
+    }
     if (value === 'horizontal' || value === 'left-to-right' || value === 'lr') {
-      return { direction: 'LR', layoutPreference: null };
+      return { direction: 'LR', layoutPreference: null, shadowEnabled: null };
     }
     if (value === 'vertical' || value === 'top-to-bottom' || value === 'tb') {
-      return { direction: 'TB', layoutPreference: null };
+      return { direction: 'TB', layoutPreference: null, shadowEnabled: null };
     }
     if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'auto' || value === 'default' || value === 'none') {
       return {
         direction: null,
-        layoutPreference: (value === 'default' || value === 'none') ? 'auto' : value
+        layoutPreference: (value === 'default' || value === 'none') ? 'auto' : value,
+        shadowEnabled: null
       };
     }
     return null;
@@ -73,11 +82,19 @@
 
   // ─── SVG Wrapper ────────────────────────────────────────────────
 
-  function svgOpen(w, h, ox, oy, fontFamily) {
+  function svgOpen(w, h, ox, oy, fontFamily, options) {
     var ff = fontFamily || BASE_CFG.fontFamily;
+    var shadowEnabled = !options || options.shadowEnabled !== false;
+    var shadowFilter = shadowEnabled ? 'url(#uml-node-shadow)' : 'none';
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" ' +
       'viewBox="0 0 ' + w + ' ' + h + '" ' +
       'style="font-family: ' + ff + '; max-width: 100%; height: auto;">' +
+      '<defs>' +
+      '<filter id="uml-node-shadow" x="-14%" y="-14%" width="144%" height="156%" color-interpolation-filters="sRGB">' +
+      '<feDropShadow dx="0" dy="2.5" stdDeviation="2.6" flood-color="#000" flood-opacity="0.22"/>' +
+      '</filter>' +
+      '</defs>' +
+      '<style>.uml-node-shadow{filter:' + shadowFilter + ';}</style>' +
       '<g transform="translate(' + ox + ',' + oy + ')">';
   }
 
@@ -461,7 +478,7 @@
   function drawNoteBox(svg, x, y, w, h, colors) {
     var f = NOTE_CFG.foldSize;
     // Main body polygon (6 points: skip the top-right corner for the fold)
-    svg.push('<polygon class="uml-note-box" points="' +
+    svg.push('<polygon class="uml-node-shadow uml-note-box" points="' +
       x + ',' + y + ' ' +
       (x + w - f) + ',' + y + ' ' +
       (x + w) + ',' + (y + f) + ' ' +
@@ -469,7 +486,7 @@
       x + ',' + (y + h) +
       '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="1"/>');
     // Fold triangle
-    svg.push('<polyline class="uml-note-fold" points="' +
+    svg.push('<polyline class="uml-node-shadow uml-note-fold" points="' +
       (x + w - f) + ',' + y + ' ' +
       (x + w - f) + ',' + (y + f) + ' ' +
       (x + w) + ',' + (y + f) +
@@ -1957,6 +1974,7 @@
     var bodyBot = bodyTop + bodyLen;
     var armBaseY = bodyTop + armY;
 
+    svg.push('<g class="uml-node-shadow">');
     svg.push('<circle cx="' + cx + '" cy="' + headCy + '" r="' + headR +
       '" fill="none" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
     svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot +
@@ -1967,6 +1985,7 @@
       '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
     svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx + legSpan) + '" y2="' + (bodyBot + legLen) +
       '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
+    svg.push('</g>');
     return bodyBot + legLen - topY; // total height
   }
 
@@ -3080,6 +3099,7 @@
     var braceDepth = 0;
     var direction = 'TB';
     var layoutPreference = null;
+    var shadowEnabled = true;
     var directionLocked = false;
 
     for (var i = 0; i < lines.length; i++) {
@@ -3089,7 +3109,9 @@
       // Layout directive
       var layoutDirective = UMLShared.parseLayoutDirective(line);
       if (layoutDirective && inClass === null) {
-        if (layoutDirective.direction) {
+        if (layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
+          shadowEnabled = layoutDirective.shadowEnabled;
+        } else if (layoutDirective.direction) {
           direction = layoutDirective.direction;
           layoutPreference = null;
           directionLocked = true;
@@ -3186,6 +3208,7 @@
       notes: notes,
       direction: direction,
       layoutPreference: layoutPreference,
+      shadowEnabled: shadowEnabled,
       directionLocked: directionLocked
     };
   }
@@ -4723,6 +4746,8 @@
       var isInterface = cls.type === 'interface';
       var boxDash = '';  // All class boxes use solid borders (including interfaces)
 
+      svg.push('<g class="uml-node-shadow">');
+
       // Header compartment
       svg.push('<rect x="' + x + '" y="' + y + '" width="' + box.width + '" height="' + box.nameH +
         '" fill="' + colors.headerFill + '" stroke="none"/>');
@@ -4752,6 +4777,8 @@
         svg.push('<line x1="' + x + '" y1="' + (y + box.nameH + box.attrH) + '" x2="' + (x + box.width) + '" y2="' + (y + box.nameH + box.attrH) +
           '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' + boxDash + '/>');
       }
+
+      svg.push('</g>');
 
       // Stereotype text
       var textCx = x + box.width / 2;
@@ -4839,7 +4866,7 @@
     var oy = layout.offsetY + CFG.svgPad + extraTop;
     var svgW = layout.width + CFG.svgPad * 2 + extraLeft + extraRight;
     var svgH = layout.height + CFG.svgPad * 2 + extraTop + extraBottom;
-    svg.unshift(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+    svg.unshift(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
 
     // ── Draw notes (using pre-computed positions) ──
     for (var ni = 0; ni < notePositions.length; ni++) {
@@ -5720,10 +5747,17 @@
     var participantMap = {};    // id -> index
     var messages = [];          // Each item: message, fragment start/end, create, destroy
     var autoParticipants = {};  // Track implicitly declared participants
+    var shadowEnabled = true;
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
+
+      var layoutDirective = UMLShared.parseLayoutDirective(line);
+      if (layoutDirective && layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
+        shadowEnabled = layoutDirective.shadowEnabled;
+        continue;
+      }
 
       // Participant declaration
       var partMatch = line.match(/^participant\s+(.+)$/);
@@ -5901,7 +5935,7 @@
       }
     }
 
-    return { participants: participants, messages: messages };
+    return { participants: participants, messages: messages, shadowEnabled: shadowEnabled };
   }
 
   function ensureParticipant(id, participants, participantMap, auto) {
@@ -6261,7 +6295,7 @@
 
     // ── Build SVG ──
     var svg = [];
-    svg.push(UMLShared.svgOpen(totalW, totalH, 0, 0, CFG.fontFamily));
+    svg.push(UMLShared.svgOpen(totalW, totalH, 0, 0, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
     // ── Collect destroy Y positions per participant ──
     var destroyYs = {};
     for (var dsi = 0; dsi < messages.length; dsi++) {
@@ -6277,7 +6311,7 @@
       var pid = participants[li].id;
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
-      svg.push('<line x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
+      svg.push('<line class="uml-node-shadow" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.line + '" stroke-width="1" stroke-dasharray="' + CFG.lifelineDash + '"/>');
     }
 
@@ -6287,7 +6321,7 @@
     for (var abi = 0; abi < activationBars.length; abi++) {
       var ab = activationBars[abi];
       var abx = partX[ab.pIdx] - CFG.activationW / 2 + (ab.depth || 0) * CFG.activationOffset;
-      svg.push('<rect x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
+      svg.push('<rect class="uml-node-shadow" x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
         '" height="' + (ab.endY - ab.startY) +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     }
@@ -6430,7 +6464,7 @@
         var cIdx = findPIdx(m.target);
         var cpx = partX[cIdx] - partWidths[cIdx] / 2;
         var cpart = participants[cIdx];
-        svg.push('<rect x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
+        svg.push('<rect class="uml-node-shadow" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         pushSequenceRectObstacle(cpx, my, partWidths[cIdx], partH);
         var cDispText = (cpart.id !== cpart.label) ? cpart.id + ': ' + cpart.label : cpart.label;
@@ -6593,7 +6627,7 @@
           UMLShared.escapeXml(displayText) + '</text>');
       } else {
         // Rectangle participant
-        svg.push('<rect x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
+        svg.push('<rect class="uml-node-shadow" x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         var textY = y + partH / 2 + CFG.fontSize * 0.35;
         svg.push('<text x="' + partX[i] + '" y="' + textY +
@@ -6695,6 +6729,7 @@
     var braceDepth = 0;
     var direction = 'TB';
     var layoutPreference = null;
+    var shadowEnabled = true;
 
     // Ensure [*] pseudo-states exist
     function ensureState(name) {
@@ -6712,7 +6747,9 @@
       // Layout directive
       var layoutDirective = UMLShared.parseLayoutDirective(line);
       if (layoutDirective && inState === null) {
-        if (layoutDirective.direction) {
+        if (layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
+          shadowEnabled = layoutDirective.shadowEnabled;
+        } else if (layoutDirective.direction) {
           direction = layoutDirective.direction;
           layoutPreference = null;
         } else {
@@ -6858,7 +6895,7 @@
     var stateList = [];
     for (var sn in states) stateList.push(states[sn]);
 
-    return { states: stateList, transitions: transitions, notes: notes, direction: direction, layoutPreference: layoutPreference };
+    return { states: stateList, transitions: transitions, notes: notes, direction: direction, layoutPreference: layoutPreference, shadowEnabled: shadowEnabled };
   }
 
   // ─── Text Measurement (delegated to UMLShared) ────────────────────
@@ -7227,7 +7264,7 @@
       var se0 = entries[sen];
       stateObstacles.push({ x: se0.x, y: se0.y, w: se0.box.width, h: se0.box.height });
     }
-    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
 
     // ── Draw transitions (behind states) ──
     for (var ti = 0; ti < transitions.length; ti++) {
@@ -7401,6 +7438,7 @@
     for (var cen in entries) {
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
+      svg.push('<g class="uml-node-shadow">');
       // Large rounded rectangle
       svg.push('<rect x="' + ce.x + '" y="' + ce.y + '" width="' + ce.box.width + '" height="' + ce.box.height +
         '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
@@ -7414,6 +7452,7 @@
       var cdY = ce.y + CFG.padY * 2 + CFG.lineHeight;
       svg.push('<line x1="' + ce.x + '" y1="' + cdY + '" x2="' + (ce.x + ce.box.width) + '" y2="' + cdY +
         '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+      svg.push('</g>');
     }
 
     // ── Draw states (non-composite) ──
@@ -7435,14 +7474,14 @@
       } else if (s.type === 'choice') {
         // Diamond (rotated square)
         var dh = e.box.width / 2;
-        svg.push('<polygon points="' +
+        svg.push('<polygon class="uml-node-shadow" points="' +
           cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
       } else {
         // Regular state: rounded rectangle
-        svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+        svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
@@ -10459,7 +10498,7 @@
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
 
       // Main rectangle
-      svg.push('<rect class="uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
+      svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
         '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
       // Component icon (top-right): small rectangle with two tabs
@@ -11301,6 +11340,8 @@
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
       var d = CFG.node3dDepth;
 
+      svg.push('<g class="uml-node-shadow">');
+
       // 3D effect: top face (parallelogram)
       svg.push('<polygon points="' +
         bx + ',' + by + ' ' +
@@ -11320,6 +11361,8 @@
       // Front face (main rectangle)
       svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+
+      svg.push('</g>');
 
       // Node name (top area) — bold for classifier, underlined for instance (name:Type per UML spec Fig 9-3)
       var nameAttrs = ' font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"';
@@ -12174,7 +12217,7 @@
       var cy = e.y + e.box.height / 2;
       var rx = e.box.width / 2;
       var ry = e.box.height / 2;
-      svg.push('<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
+      svg.push('<ellipse class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
         '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
@@ -13153,7 +13196,7 @@
         // Diamond shape
         var dh = e.box.height / 2;
         var dw = e.box.width / 2;
-        svg.push('<polygon points="' +
+        svg.push('<polygon class="uml-node-shadow" points="' +
           cx + ',' + (cy - dh) + ' ' + (cx + dw) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dw) + ',' + cy +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
@@ -13170,7 +13213,7 @@
           '" rx="2" ry="2" fill="' + colors.line + '" stroke="none"/>');
       } else {
         // Action node: rounded rectangle
-        svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+        svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.actionRx + '" ry="' + CFG.actionRx +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         // Action name centered
