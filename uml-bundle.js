@@ -6286,8 +6286,9 @@
         activationBars.push({ pIdx: findPIdx(openId), startY: oEntry.y, endY: totalH - 20, depth: oEntry.depth });
       }
     }
-    // Helper to find the visible connection edge (lifeline stroke edge or activation border)
-    function getEdgeX(pIdx, y, side) {
+    // Helper to find the visible connection anchor.
+    // Bare lifelines attach on the centerline; activation boxes attach on their painted border.
+    function getEdgeX(pIdx, y, side, role, msgType) {
       if (pIdx === undefined) return 0;
       var center = partX[pIdx];
       var bestDepth = -1;
@@ -6300,10 +6301,12 @@
         }
       }
       var sideSign = side === 'right' ? 1 : -1;
-      if (bestDepth === -1) return center + sideSign * (CFG.lifelineStrokeWidth / 2);
+      if (bestDepth === -1) return center;
       var abx = center - CFG.activationW / 2 + bestDepth * CFG.activationOffset;
       var edge = (side === 'right') ? (abx + CFG.activationW) : abx;
-      return edge + sideSign * 0.5;
+      if (role === 'source') return edge + sideSign * 0.5;
+      if (msgType !== 'response') return edge + sideSign * 0.5;
+      return edge;
     }
 
     var sequenceNoteObstacles = [];
@@ -6450,25 +6453,25 @@
           if (participants[p].id === m.to) toIdx = p;
         }
         var isLeft = partX[toIdx] < partX[fromIdx];
-        var x1 = getEdgeX(fromIdx, my, isLeft ? 'left' : 'right');
+        var x1 = getEdgeX(fromIdx, my, isLeft ? 'left' : 'right', 'source', m.msgType);
         var x2;
         // Create messages: arrow points to the participant box edge (UML 2.0 G179)
         if (createYs.hasOwnProperty(m.to) && my <= createYs[m.to] + partH) {
           x2 = isLeft
-            ? partX[toIdx] + partWidths[toIdx] / 2 + CFG.strokeWidth / 2   // right edge of box
-            : partX[toIdx] - partWidths[toIdx] / 2 - CFG.strokeWidth / 2;  // left edge of box
+            ? partX[toIdx] + partWidths[toIdx] / 2   // right edge of box
+            : partX[toIdx] - partWidths[toIdx] / 2;  // left edge of box
         } else {
-          x2 = getEdgeX(toIdx, my, isLeft ? 'right' : 'left');
+          x2 = getEdgeX(toIdx, my, isLeft ? 'right' : 'left', 'target', m.msgType);
         }
 
         // Self-message
         if (fromIdx === toIdx) {
           var selfW = 40;
-          var selfX = getEdgeX(fromIdx, my, 'right');
+          var selfX = getEdgeX(fromIdx, my, 'right', 'target', m.msgType);
           svg.push('<polyline points="' + selfX + ',' + my + ' ' + (selfX + selfW) + ',' + my + ' ' +
             (selfX + selfW) + ',' + (my + 20) + ' ' + selfX + ',' + (my + 20) +
             '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
-            '"' + (m.isDashed ? ' stroke-dasharray="6,4"' : '') + '/>');
+            '" stroke-linecap="butt" stroke-linejoin="miter"' + (m.isDashed ? ' stroke-dasharray="6,4"' : '') + '/>');
           drawMsgArrow(svg, selfX, my + 20, 1, m.msgType, colors);
           if (m.label) {
             var selfLabelX = selfX + selfW + 6;
@@ -6482,7 +6485,7 @@
           // Line
           var dashAttr = m.isDashed ? ' stroke-dasharray="6,4"' : '';
           svg.push('<line x1="' + x1 + '" y1="' + my + '" x2="' + x2 + '" y2="' + my +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt"' + dashAttr + '/>');
 
           // Arrowhead at target end
           var arrowDir = isLeft ? 1 : -1;
