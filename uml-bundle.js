@@ -4466,6 +4466,7 @@
       var side = endpoint.side || 'right';
       var primaryOffset = endpoint.count > 1 ? (10 + Math.min(12, Math.abs(endpoint.centered || 0) * 0.35)) : 6;
       var secondaryOffset = primaryOffset + 8;
+      var markerLaneOffset = Math.max(CFG.diamondW + 8, CFG.diamondH * 0.65, CFG.arrowSize + 4);
       var rowOffset = CFG.fontSizeStereotype + 8;
       var sourceInheritOffset = isSource && endpoint.dy > 0 && hasInheritAtBottom[routeInfo.rel.from]
         ? CFG.triangleH + CFG.junctionGap + 4
@@ -4489,10 +4490,11 @@
 
       if (side === 'right') {
         if (ownHasMarker) {
-          directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
-          directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
-          directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
-          directCandidates.push({ x: endpoint.point.x - secondaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
+          directCandidates.push({ x: endpoint.point.x + markerLaneOffset, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + markerLaneOffset, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + markerLaneOffset + 6, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + markerLaneOffset + 6, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x + markerLaneOffset, y: endpoint.point.y - horizMultLane, anchor: 'start' });
         } else {
           directCandidates.push({ x: endpoint.point.x + 10, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
           directCandidates.push({ x: endpoint.point.x + 10, y: endpoint.point.y + rowOffset, anchor: 'middle' });
@@ -4505,6 +4507,12 @@
         if (!ownHasMarker) {
           directCandidates.push({ x: endpoint.point.x - 10, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
           directCandidates.push({ x: endpoint.point.x - 10, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+        } else {
+          directCandidates.push({ x: endpoint.point.x - markerLaneOffset, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x - markerLaneOffset, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x - markerLaneOffset - 6, y: endpoint.point.y - horizMultLane, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x - markerLaneOffset - 6, y: endpoint.point.y + rowOffset, anchor: 'middle' });
+          directCandidates.push({ x: endpoint.point.x - markerLaneOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
         }
         directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y - horizMultLane, anchor: 'end' });
         directCandidates.push({ x: endpoint.point.x - primaryOffset, y: endpoint.point.y + rowOffset, anchor: 'end' });
