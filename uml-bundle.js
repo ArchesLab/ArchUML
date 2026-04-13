@@ -1308,13 +1308,43 @@
     return isFinite(min) ? min : 120;
   }
 
+  function polylinePointAtFraction(points, fraction) {
+    if (!points || !points.length) return { x: 0, y: 0 };
+    if (points.length === 1) return { x: points[0].x, y: points[0].y };
+
+    var totalLen = 0;
+    for (var i = 1; i < points.length; i++) {
+      totalLen += Math.abs(points[i].x - points[i - 1].x) + Math.abs(points[i].y - points[i - 1].y);
+    }
+    if (totalLen <= 0) return { x: points[0].x, y: points[0].y };
+
+    var targetLen = totalLen * Math.max(0, Math.min(1, fraction));
+    var acc = 0;
+    for (var j = 1; j < points.length; j++) {
+      var p0 = points[j - 1];
+      var p1 = points[j];
+      var segLen = Math.abs(p1.x - p0.x) + Math.abs(p1.y - p0.y);
+      if (acc + segLen >= targetLen && segLen > 0) {
+        var local = (targetLen - acc) / segLen;
+        return {
+          x: p0.x + (p1.x - p0.x) * local,
+          y: p0.y + (p1.y - p0.y) * local
+        };
+      }
+      acc += segLen;
+    }
+
+    var last = points[points.length - 1];
+    return { x: last.x, y: last.y };
+  }
+
   function placeOrthogonalLabel(label, points, obstacles, placedLabels, options) {
     var opts = options || {};
     var fontSize = opts.fontSize || 14;
     var labelW = textWidth(label, false, fontSize);
     var labelH = fontSize + 6;
     var segments = buildOrthogonalSegments(points);
-    var fractions = opts.fractions || [0.5, 0.34, 0.66, 0.2, 0.8];
+    var fractions = opts.fractions || [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82];
     var otherSegments = opts.otherSegments || [];
 
     if (!segments.length) return null;
@@ -1327,21 +1357,25 @@
 
     var best = null;
     var bestSoft = null;
+    var preferredGap = opts.preferredGap || 7;
+    var maxComfortGap = opts.maxComfortGap || 18;
+    var preferredPoint = opts.preferredPoint || polylinePointAtFraction(points, 0.5);
+    var preferredPointWeight = opts.preferredPointWeight || 0.12;
 
     for (var gi = 0; gi < segments.length; gi++) {
       var segment = segments[gi];
       var placements = segment.isH
         ? (opts.horizontalPlacements || [
-            { anchor: 'middle', dx: 0, dy: -10, penalty: 0 },
-            { anchor: 'middle', dx: 0, dy: labelH + 4, penalty: 8 },
-            { anchor: 'middle', dx: 0, dy: -(labelH + 8), penalty: 14 },
-            { anchor: 'middle', dx: 0, dy: labelH * 2 + 8, penalty: 18 }
+            { anchor: 'middle', dx: 0, dy: -8, penalty: 0 },
+            { anchor: 'middle', dx: 0, dy: labelH + 2, penalty: 8 },
+            { anchor: 'middle', dx: 0, dy: -(labelH + 6), penalty: 14 },
+            { anchor: 'middle', dx: 0, dy: labelH * 2 + 4, penalty: 18 }
           ])
         : (opts.verticalPlacements || [
-            { anchor: 'start', dx: 12, dy: 0, penalty: 2 },
-            { anchor: 'end', dx: -12, dy: 0, penalty: 4 },
-            { anchor: 'start', dx: labelW + 16, dy: 0, penalty: 18 },
-            { anchor: 'end', dx: -(labelW + 16), dy: 0, penalty: 18 }
+            { anchor: 'start', dx: 8, dy: 0, penalty: 2 },
+            { anchor: 'end', dx: -8, dy: 0, penalty: 4 },
+            { anchor: 'start', dx: labelW + 12, dy: 0, penalty: 18 },
+            { anchor: 'end', dx: -(labelW + 12), dy: 0, penalty: 18 }
           ]);
 
       var endpointInset = segment.length > 0
@@ -1369,8 +1403,12 @@
           var hitsSegments = labelRectHitsSegments(rect, segments, segment.segmentIndex, opts.segmentPad || 3) ||
             labelRectHitsSegments(rect, otherSegments, null, opts.segmentPad || 3);
           var clearance = minLabelClearance(rect, obstacles, placedLabels, segments, segment.segmentIndex, otherSegments);
+          var gapToOwnSegment = segmentDistanceToRect(segment, rect);
+          var opticalGapPenalty = Math.abs(gapToOwnSegment - preferredGap) * 8;
+          if (gapToOwnSegment > maxComfortGap) opticalGapPenalty += (gapToOwnSegment - maxComfortGap) * 4;
+          var preferredPointPenalty = (Math.abs(lx - preferredPoint.x) + Math.abs(ly - preferredPoint.y)) * preferredPointWeight;
           var score = segment.length * 2 + (segment.isH ? 24 : 0) + Math.min(clearance, 80) -
-            Math.abs(fraction - 0.5) * 30 - placement.penalty;
+            Math.abs(fraction - 0.5) * 30 - placement.penalty - opticalGapPenalty - preferredPointPenalty;
 
           if (typeof opts.scoreCandidate === 'function') {
             score += opts.scoreCandidate(segment, placement, fraction, rect) || 0;
@@ -1912,6 +1950,148 @@
       : verticalFirst;
   }
 
+  function anchorSlideAxis(side) {
+    return side === 'top' || side === 'bottom' ? 'x' : 'y';
+  }
+
+  function canSlideAnchor(anchor) {
+    return !!(anchor &&
+      (anchor.side === 'top' || anchor.side === 'bottom' || anchor.side === 'left' || anchor.side === 'right') &&
+      anchor.slideMin != null && anchor.slideMax != null);
+  }
+
+  function cloneAnchorWithCoord(anchor, coord) {
+    if (!canSlideAnchor(anchor)) return anchor;
+    var axis = anchorSlideAxis(anchor.side);
+    var clamped = Math.max(anchor.slideMin, Math.min(anchor.slideMax, coord));
+    var updated = {
+      x: anchor.x,
+      y: anchor.y,
+      side: anchor.side,
+      stub: anchor.stub,
+      slideMin: anchor.slideMin,
+      slideMax: anchor.slideMax,
+      penalty: anchor.penalty || 0
+    };
+    if (axis === 'x') updated.x = clamped;
+    else updated.y = clamped;
+    return updated;
+  }
+
+  function segmentLeavesAnchorOutward(anchorPoint, nextPoint, side) {
+    if (!anchorPoint || !nextPoint) return false;
+    var tol = 1.5;
+    if (side === 'left') return Math.abs(anchorPoint.y - nextPoint.y) <= tol && nextPoint.x <= anchorPoint.x - tol;
+    if (side === 'right') return Math.abs(anchorPoint.y - nextPoint.y) <= tol && nextPoint.x >= anchorPoint.x + tol;
+    if (side === 'top') return Math.abs(anchorPoint.x - nextPoint.x) <= tol && nextPoint.y <= anchorPoint.y - tol;
+    if (side === 'bottom') return Math.abs(anchorPoint.x - nextPoint.x) <= tol && nextPoint.y >= anchorPoint.y + tol;
+    return false;
+  }
+
+  function orthogonalRouteScore(points) {
+    return measureOrthogonalRoute(points) + countOrthogonalBends(points) * 36;
+  }
+
+  function optimizeEndpointSlides(points, startAnchor, endAnchor, obstacles, skipNames, occupied) {
+    if (!points || points.length < 4) return points;
+
+    function trySlideStart(pointsIn, anchor) {
+      if (!canSlideAnchor(anchor) || pointsIn.length < 4) return null;
+      var axis = anchorSlideAxis(anchor.side);
+      var baseScore = orthogonalRouteScore(pointsIn);
+      var best = null;
+
+      for (var i = 2; i < pointsIn.length - 1; i++) {
+        var pivot = pointsIn[i];
+        var coord = axis === 'x' ? pivot.x : pivot.y;
+        if (coord < anchor.slideMin - 0.75 || coord > anchor.slideMax + 0.75) continue;
+
+        var movedAnchor = cloneAnchorWithCoord(anchor, coord);
+        if (Math.abs(movedAnchor.x - pointsIn[0].x) < 0.75 && Math.abs(movedAnchor.y - pointsIn[0].y) < 0.75) continue;
+        if (!segmentLeavesAnchorOutward(movedAnchor, pivot, anchor.side)) continue;
+
+        var candidate = simplifyOrthogonalPath([{ x: movedAnchor.x, y: movedAnchor.y }].concat(pointsIn.slice(i)));
+        if (candidate.length < 2) continue;
+        if (routeHitsObstacle(candidate, obstacles, skipNames, occupied)) continue;
+
+        var candidateScore = orthogonalRouteScore(candidate);
+        if (candidateScore >= baseScore - 0.5) continue;
+
+        if (!best || candidateScore < best.score - 0.5 ||
+            (Math.abs(candidateScore - best.score) <= 0.5 && countOrthogonalBends(candidate) < countOrthogonalBends(best.points))) {
+          best = {
+            anchor: movedAnchor,
+            points: candidate,
+            score: candidateScore
+          };
+        }
+      }
+
+      return best;
+    }
+
+    function trySlideEnd(pointsIn, anchor) {
+      if (!canSlideAnchor(anchor) || pointsIn.length < 4) return null;
+      var axis = anchorSlideAxis(anchor.side);
+      var baseScore = orthogonalRouteScore(pointsIn);
+      var lastIndex = pointsIn.length - 1;
+      var best = null;
+
+      for (var i = lastIndex - 2; i >= 1; i--) {
+        var pivot = pointsIn[i];
+        var coord = axis === 'x' ? pivot.x : pivot.y;
+        if (coord < anchor.slideMin - 0.75 || coord > anchor.slideMax + 0.75) continue;
+
+        var movedAnchor = cloneAnchorWithCoord(anchor, coord);
+        if (Math.abs(movedAnchor.x - pointsIn[lastIndex].x) < 0.75 && Math.abs(movedAnchor.y - pointsIn[lastIndex].y) < 0.75) continue;
+        if (!segmentLeavesAnchorOutward(movedAnchor, pivot, anchor.side)) continue;
+
+        var candidate = simplifyOrthogonalPath(pointsIn.slice(0, i + 1).concat([{ x: movedAnchor.x, y: movedAnchor.y }]));
+        if (candidate.length < 2) continue;
+        if (routeHitsObstacle(candidate, obstacles, skipNames, occupied)) continue;
+
+        var candidateScore = orthogonalRouteScore(candidate);
+        if (candidateScore >= baseScore - 0.5) continue;
+
+        if (!best || candidateScore < best.score - 0.5 ||
+            (Math.abs(candidateScore - best.score) <= 0.5 && countOrthogonalBends(candidate) < countOrthogonalBends(best.points))) {
+          best = {
+            anchor: movedAnchor,
+            points: candidate,
+            score: candidateScore
+          };
+        }
+      }
+
+      return best;
+    }
+
+    var bestPoints = simplifyOrthogonalPath(points);
+    var currentStartAnchor = startAnchor;
+    var currentEndAnchor = endAnchor;
+
+    for (var pass = 0; pass < 3; pass++) {
+      var changed = false;
+      var startResult = trySlideStart(bestPoints, currentStartAnchor);
+      if (startResult) {
+        bestPoints = startResult.points;
+        currentStartAnchor = startResult.anchor;
+        changed = true;
+      }
+
+      var endResult = trySlideEnd(bestPoints, currentEndAnchor);
+      if (endResult) {
+        bestPoints = endResult.points;
+        currentEndAnchor = endResult.anchor;
+        changed = true;
+      }
+
+      if (!changed) break;
+    }
+
+    return bestPoints;
+  }
+
   function routeOrthogonalConnector(startAnchor, endAnchor, obstacles, options) {
     var opts = options || {};
     var skipNames = opts.skipNames || null;
@@ -2037,6 +2217,7 @@
     reserveOrthogonalRoute: reserveOrthogonalRoute,
     spreadRouteToFreeLanes: spreadRouteToFreeLanes,
     routeOrthogonalConnector: routeOrthogonalConnector,
+    optimizeEndpointSlides: optimizeEndpointSlides,
 
     // ─── Drawing Utilities ───────────────────────────────────────
     drawArrow: function(svg, x, y, ux, uy, color, size, sw) {
@@ -3805,6 +3986,44 @@
         return entry.y + entry.box.height / 2;
       }
 
+      function sharesNudgeCorridor(entryA, entryB) {
+        if (!entryA || !entryB) return false;
+        return fixedStart(entryA) <= fixedEnd(entryB) + fixedThreshold &&
+          fixedEnd(entryA) >= fixedStart(entryB) - fixedThreshold;
+      }
+
+      function entryRect(entry) {
+        return {
+          x: entry.x,
+          y: entry.y,
+          w: entry.box.width,
+          h: entry.box.height
+        };
+      }
+
+      function entryRectsOverlap(a, b, pad) {
+        var gap = pad || 0;
+        return a.x + a.w + gap > b.x && a.x - gap < b.x + b.w &&
+          a.y + a.h + gap > b.y && a.y - gap < b.y + b.h;
+      }
+
+      function overlapPenalty(name, delta) {
+        var movedEntry = cloneEntryWithDelta(entries[name], delta);
+        var movedRect = entryRect(movedEntry);
+        var penalty = 0;
+
+        for (var otherName in entries) {
+          if (!Object.prototype.hasOwnProperty.call(entries, otherName) || otherName === name) continue;
+          var otherEntry = entries[otherName];
+          if (!sharesNudgeCorridor(movedEntry, otherEntry)) continue;
+          var otherRect = entryRect(otherEntry);
+          if (!entryRectsOverlap(movedRect, otherRect, minGap)) continue;
+          penalty += 100000000;
+        }
+
+        return penalty;
+      }
+
       function relationRouteScore(rel, movedName, delta) {
         var fromEntryBase = entries[rel.from];
         var toEntryBase = entries[rel.to];
@@ -3865,7 +4084,7 @@
           count++;
         }
         if (!count) return Number.POSITIVE_INFINITY;
-        return total + Math.abs(delta) * 0.15;
+        return total + Math.abs(delta) * 0.15 + overlapPenalty(name, delta);
       }
 
       function collectShiftCandidates(name) {
@@ -3899,6 +4118,19 @@
           candidates.push(partnerCenter - ownCenter);
           candidates.push((partnerCenter - ownCenter) * 0.5);
         }
+
+        for (var otherName in entries) {
+          if (!Object.prototype.hasOwnProperty.call(entries, otherName) || otherName === name) continue;
+          var otherEntry = entries[otherName];
+          if (!sharesNudgeCorridor(entry, otherEntry)) continue;
+
+          if (otherEntry[moveAxis] <= entry[moveAxis]) {
+            candidates.push(otherEntry[moveAxis] + otherEntry.box[sizeKey] + minGap - entry[moveAxis]);
+          } else {
+            candidates.push(otherEntry[moveAxis] - entry.box[sizeKey] - minGap - entry[moveAxis]);
+          }
+        }
+
         return candidates;
       }
 
@@ -4022,6 +4254,7 @@
     var classOccupiedSegments = { h: [], v: [] };
     var noteRouteSegments = [];
     var noteMarkerObstacles = [];
+    var classRelationTextQueue = [];
     var classObstacles = [];
     for (var obstacleName in entries) {
       if (!Object.prototype.hasOwnProperty.call(entries, obstacleName)) continue;
@@ -4047,6 +4280,171 @@
         x: x + ux * shift,
         y: y + uy * shift
       };
+    }
+
+    function classTextRect(text, x, y, anchor, fontSize) {
+      var textW = UMLShared.textWidth(text, false, fontSize || CFG.fontSizeStereotype);
+      var textH = (fontSize || CFG.fontSizeStereotype) + 6;
+      var left = anchor === 'middle' ? x - textW / 2 : (anchor === 'end' ? x - textW : x);
+      return {
+        left: left,
+        right: left + textW,
+        top: y - textH,
+        bottom: y + 4
+      };
+    }
+
+    function pushClassTextSvg(target, text, placement, fontSize, fontStyle) {
+      if (!placement) return;
+      target.push('<text x="' + placement.x + '" y="' + placement.y +
+        '" text-anchor="' + placement.anchor + '" font-size="' + fontSize + '" fill="' + colors.text + '" ' +
+        'stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"' +
+        (fontStyle ? ' font-style="' + fontStyle + '"' : '') + '>' +
+        UMLShared.escapeXml(text) + '</text>');
+    }
+
+    function classPointAlongSegment(p0, p1, fraction) {
+      return {
+        x: p0.x + (p1.x - p0.x) * fraction,
+        y: p0.y + (p1.y - p0.y) * fraction
+      };
+    }
+
+    function classOtherRouteSegments(allSegments, routeIndex) {
+      var filtered = [];
+      for (var i = 0; i < allSegments.length; i++) {
+        if (allSegments[i].routeIndex === routeIndex) continue;
+        filtered.push(allSegments[i]);
+      }
+      return filtered;
+    }
+
+    function classRouteSegmentsExcept(allSegments, routeIndex, segmentIndex) {
+      var filtered = [];
+      for (var i = 0; i < allSegments.length; i++) {
+        var segment = allSegments[i];
+        if (segment.routeIndex === routeIndex && segment.segmentIndex === segmentIndex) continue;
+        filtered.push(segment);
+      }
+      return filtered;
+    }
+
+    function placeClassMultiplicityLabel(routeInfo, endpointKey) {
+      var isSource = endpointKey === 'source';
+      var text = isSource ? routeInfo.rel.fromMult : routeInfo.rel.toMult;
+      if (!text) return null;
+
+      var endpoint = isSource ? routeInfo.source : routeInfo.target;
+      var entry = isSource ? routeInfo.fromEntry : routeInfo.toEntry;
+      var partner = isSource ? routeInfo.toEntry : routeInfo.fromEntry;
+      var points = null;
+      var segmentIndex = endpoint.segmentIndex;
+      var fractions = [0.22, 0.34, 0.46, 0.58];
+      var preferredFraction = 0.28;
+      var options = {
+        fontSize: CFG.fontSizeStereotype,
+        obstaclePad: 6,
+        labelPad: 8,
+        segmentPad: 3,
+        endpointPad: 6,
+        preferredGap: 8,
+        maxComfortGap: 16,
+        preferredPointWeight: 0.08
+      };
+
+      if (!isSource &&
+          endpoint.count > 1 &&
+          endpoint.prevPrevPoint &&
+          Math.abs(endpoint.prevPrevPoint.y - endpoint.prevPoint.y) < 1) {
+        points = [endpoint.prevPrevPoint, endpoint.prevPoint];
+        segmentIndex = endpoint.prevSegmentIndex;
+        fractions = [0.5, 0.38, 0.62, 0.26, 0.74];
+        preferredFraction = 0.5;
+      } else if (isSource) {
+        points = [endpoint.point, endpoint.nextPoint];
+      } else {
+        points = [endpoint.point, endpoint.prevPoint];
+      }
+
+      if (!points || points.length < 2) return null;
+
+      options.otherSegments = classRouteSegmentsExcept(noteRouteSegments, routeInfo.routeIndex, segmentIndex);
+
+      if (Math.abs(points[0].y - points[1].y) < 1) {
+        var horizMultLane = Math.max(5, Math.round(CFG.labelOffset * 0.75));
+        options.fractions = fractions;
+        options.preferredPoint = classPointAlongSegment(points[0], points[1], preferredFraction);
+        options.horizontalPlacements = [
+          { anchor: 'middle', dx: 0, dy: -horizMultLane, penalty: 0, vSide: 'above' },
+          { anchor: 'middle', dx: 0, dy: CFG.fontSizeStereotype + 8, penalty: 10, vSide: 'below' },
+          { anchor: 'middle', dx: 0, dy: -(CFG.fontSizeStereotype + 10), penalty: 14, vSide: 'above' }
+        ];
+        options.scoreCandidate = function(segment, placement, fraction) {
+          var bonus = placement.vSide === 'above' ? 10 : -6;
+          bonus -= Math.abs(fraction - preferredFraction) * 48;
+          return bonus;
+        };
+      } else {
+        var entryCx = entry.x + entry.box.width / 2;
+        var partnerCx = partner.x + partner.box.width / 2;
+        var sideBias = endpoint.point.x < entryCx - 1 ? -1 : (endpoint.point.x > entryCx + 1 ? 1 : 0);
+        if (sideBias === 0) sideBias = partnerCx >= entryCx ? 1 : -1;
+        var nearOffset = endpoint.count > 1 ? (18 + Math.abs(endpoint.centered)) : 8;
+        var farOffset = UMLShared.textWidth(text, false, CFG.fontSizeStereotype) + nearOffset + 10;
+        var preferredSide = sideBias < 0 ? 'left' : 'right';
+
+        options.fractions = fractions;
+        options.preferredPoint = classPointAlongSegment(points[0], points[1], preferredFraction);
+        if (preferredSide === 'left') {
+          options.verticalPlacements = [
+            { anchor: 'end', dx: -nearOffset, dy: 0, penalty: 0, hSide: 'left' },
+            { anchor: 'start', dx: nearOffset, dy: 0, penalty: 10, hSide: 'right' },
+            { anchor: 'end', dx: -farOffset, dy: 0, penalty: 14, hSide: 'left' },
+            { anchor: 'start', dx: farOffset, dy: 0, penalty: 22, hSide: 'right' }
+          ];
+        } else {
+          options.verticalPlacements = [
+            { anchor: 'start', dx: nearOffset, dy: 0, penalty: 0, hSide: 'right' },
+            { anchor: 'end', dx: -nearOffset, dy: 0, penalty: 10, hSide: 'left' },
+            { anchor: 'start', dx: farOffset, dy: 0, penalty: 14, hSide: 'right' },
+            { anchor: 'end', dx: -farOffset, dy: 0, penalty: 22, hSide: 'left' }
+          ];
+        }
+        options.scoreCandidate = function(segment, placement, fraction) {
+          var bonus = placement.hSide === preferredSide ? 10 : -6;
+          bonus -= Math.abs(fraction - preferredFraction) * 48;
+          return bonus;
+        };
+      }
+
+      return UMLShared.placeOrthogonalLabel(
+        text,
+        points,
+        classObstacles.concat(noteMarkerObstacles),
+        placedLabels,
+        options
+      );
+    }
+
+    function placeClassRelationLabel(routeInfo) {
+      if (!routeInfo.rel.label) return null;
+      return UMLShared.placeOrthogonalLabel(routeInfo.rel.label, routeInfo.points, classObstacles.concat(noteMarkerObstacles), placedLabels, {
+        fontSize: CFG.fontSizeStereotype,
+        otherSegments: classOtherRouteSegments(noteRouteSegments, routeInfo.routeIndex),
+        endpointPad: 20,
+        preferredGap: 8,
+        maxComfortGap: 18,
+        preferredPointWeight: 0.14,
+        scoreCandidate: function(segment, placement) {
+          var bonus = segment.isH ? 10 : -4;
+          if (placement.anchor === 'middle') bonus += 2;
+          if ((segment.segmentIndex === 0 && routeInfo.rel.fromMult) ||
+              (segment.segmentIndex === routeInfo.points.length - 2 && routeInfo.rel.toMult)) {
+            bonus -= 10;
+          }
+          return bonus;
+        }
+      });
     }
 
     // Group generalization/realization by target for shared-target rendering
@@ -4572,6 +4970,19 @@
       }
       // Eliminate unnecessary detours/corners by simplifying U-shaped bends
       pathPoints = eliminateUnnecessaryCorners(pathPoints, classObstacles, fromE, toE);
+      if (pathPoints.length >= 4) {
+        var classSkipNames = {};
+        classSkipNames[orel.from] = true;
+        classSkipNames[orel.to] = true;
+        pathPoints = UMLShared.optimizeEndpointSlides(
+          pathPoints,
+          buildClassEndpointSlideAnchor(fromE, pathPoints[0], sourceSide),
+          buildClassEndpointSlideAnchor(toE, pathPoints[pathPoints.length - 1], tgtSide),
+          classObstacles,
+          classSkipNames,
+          classOccupiedSegments
+        );
+      }
 
       // Eliminate tiny H-V-H doglegs: when the middle segment is small,
       // snap the shorter end to the longer end's coordinate for a cleaner look.
@@ -4605,6 +5016,7 @@
 
       var visiblePathPoints = pathPoints;
       var routeSegments = UMLShared.buildOrthogonalSegments(visiblePathPoints);
+      for (var rsi = 0; rsi < routeSegments.length; rsi++) routeSegments[rsi].routeIndex = oi;
 
       // Build polyline points string
       var pointsStr = '';
@@ -4684,95 +5096,67 @@
         noteMarkerObstacles.push(pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6));
       }
 
-      // Determine if the first/last segment is horizontal or vertical
-      var isFirstHoriz = (Math.abs(startDy) < 0.1);
-      var isLastHoriz = (Math.abs(endDy) < 0.1);
-      var horizMultLane = Math.max(5, Math.round(CFG.labelOffset * 0.75));
-
-      // Place relationship labels away from boxes and previously routed edges.
-      if (orel.label) {
-        var labelPlacement = UMLShared.placeOrthogonalLabel(orel.label, visiblePathPoints, classObstacles, placedLabels, {
-          fontSize: CFG.fontSizeStereotype,
-          otherSegments: placedRouteSegments,
-          endpointPad: 20,
-          scoreCandidate: function(segment, placement) {
-            var bonus = segment.isH ? 10 : -4;
-            if (placement.anchor === 'middle') bonus += 2;
-            if ((segment.segmentIndex === 0 && orel.fromMult) ||
-                (segment.segmentIndex === pathPoints.length - 2 && orel.toMult)) {
-              bonus -= 10;
-            }
-            return bonus;
-          }
-        });
-        if (labelPlacement) {
-          placedLabels.push(labelPlacement.rect);
-          labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
-            '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '" ' +
-            'stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke" font-style="italic">' +
-            UMLShared.escapeXml(orel.label) + '</text>');
+      classRelationTextQueue.push({
+        routeIndex: oi,
+        rel: orel,
+        points: visiblePathPoints,
+        routeSegments: routeSegments,
+        fromEntry: fromE,
+        toEntry: toE,
+        source: {
+          point: p0,
+          nextPoint: p1,
+          dx: startDx,
+          dy: startDy,
+          side: actualSourceSide,
+          segmentIndex: 0,
+          count: srcCount,
+          centered: srcCentered
+        },
+        target: {
+          point: pLast,
+          prevPoint: pPrev,
+          prevPrevPoint: visiblePathPoints.length >= 3 ? visiblePathPoints[visiblePathPoints.length - 3] : null,
+          dx: endDx,
+          dy: endDy,
+          side: actualTargetSide,
+          segmentIndex: visiblePathPoints.length - 2,
+          prevSegmentIndex: visiblePathPoints.length >= 3 ? visiblePathPoints.length - 3 : null,
+          count: tgtCount,
+          centered: tgtCentered
         }
-      }
-
-      // Draw multiplicities near their respective endpoints, well clear of the box
-      if (orel.fromMult) {
-        var fmx, fmy, fmAnchor = 'start';
-        if (isFirstHoriz) {
-          // Horizontal exit: place multiplicity above the line, near source box edge
-          fmx = p0.x + startDx * 6;
-          fmy = p0.y - horizMultLane;
-          fmAnchor = (startDx < 0) ? 'end' : 'start';
-        } else {
-          // Vertical exit: place to the right of the lifeline
-          // If there's an inheritance triangle at the bottom, offset further to avoid overlap
-          var fromInheritOffset = (startDy > 0 && hasInheritAtBottom[orel.from]) ? CFG.triangleH + CFG.junctionGap + 4 : 0;
-          var fromCx0 = fromE.x + fromE.box.width / 2;
-          var fromSideBias = (p0.x < fromCx0 - 1) ? -1 : ((p0.x > fromCx0 + 1) ? 1 : 0);
-          if (fromSideBias === 0) fromSideBias = (toE.x + toE.box.width / 2 >= fromCx0) ? 1 : -1;
-          var fromLabelOffset = srcCount > 1 ? (18 + Math.abs(srcCentered)) : 8;
-          fmx = p0.x + fromSideBias * fromLabelOffset;
-          fmy = p0.y + startDy * 14 + fromInheritOffset;
-          fmAnchor = (fromSideBias < 0) ? 'end' : 'start';
-        }
-        svg.push('<text x="' + fmx + '" y="' + fmy + '" text-anchor="' + fmAnchor + '" ' +
-          'font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '" ' +
-          'stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-          UMLShared.escapeXml(orel.fromMult) + '</text>');
-      }
-      if (orel.toMult) {
-        var tmx, tmy;
-        if (isLastHoriz) {
-          // Horizontal entry: place multiplicity above the line, near target box edge
-          tmx = pLast.x + endDx * 6;
-          tmy = pLast.y - horizMultLane;
-          // Anchor toward the target box
-          var tmAnchor = (endDx < 0) ? 'end' : 'start';
-        } else {
-          var prevSegStart = pathPoints.length >= 3 ? pathPoints[pathPoints.length - 3] : null;
-          var prevSegIsHoriz = prevSegStart && Math.abs(prevSegStart.y - pPrev.y) < 1;
-          if (tgtCount > 1 && prevSegIsHoriz) {
-            tmx = (prevSegStart.x + pPrev.x) / 2;
-            tmy = pPrev.y - horizMultLane;
-            tmAnchor = 'middle';
-          } else {
-            var toCx0 = toE.x + toE.box.width / 2;
-            var toSideBias = (pLast.x < toCx0 - 1) ? -1 : ((pLast.x > toCx0 + 1) ? 1 : 0);
-            if (toSideBias === 0) toSideBias = (fromE.x + fromE.box.width / 2 <= toCx0) ? -1 : 1;
-            var toLabelOffset = tgtCount > 1 ? (18 + Math.abs(tgtCentered)) : 8;
-            tmx = pLast.x + toSideBias * toLabelOffset;
-            tmy = pLast.y + endDy * 14;
-            tmAnchor = (toSideBias < 0) ? 'end' : 'start';
-          }
-        }
-        svg.push('<text x="' + tmx + '" y="' + tmy + '" text-anchor="' + (tmAnchor || 'start') + '" ' +
-          'font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '" ' +
-          'stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-          UMLShared.escapeXml(orel.toMult) + '</text>');
-      }
+      });
 
       UMLShared.reserveOrthogonalRoute(pathPoints, classOccupiedSegments);
       placedRouteSegments = placedRouteSegments.concat(routeSegments);
       noteRouteSegments = noteRouteSegments.concat(routeSegments);
+    }
+
+    for (var cti = 0; cti < classRelationTextQueue.length; cti++) {
+      var routeInfo = classRelationTextQueue[cti];
+      if (routeInfo.rel.fromMult) {
+        routeInfo.fromMultPlacement = placeClassMultiplicityLabel(routeInfo, 'source');
+        if (routeInfo.fromMultPlacement) {
+          placedLabels.push(routeInfo.fromMultPlacement.rect);
+          pushClassTextSvg(labelSvg, routeInfo.rel.fromMult, routeInfo.fromMultPlacement, CFG.fontSizeStereotype);
+        }
+      }
+      if (routeInfo.rel.toMult) {
+        routeInfo.toMultPlacement = placeClassMultiplicityLabel(routeInfo, 'target');
+        if (routeInfo.toMultPlacement) {
+          placedLabels.push(routeInfo.toMultPlacement.rect);
+          pushClassTextSvg(labelSvg, routeInfo.rel.toMult, routeInfo.toMultPlacement, CFG.fontSizeStereotype);
+        }
+      }
+    }
+
+    for (var cli = 0; cli < classRelationTextQueue.length; cli++) {
+      var labelRouteInfo = classRelationTextQueue[cli];
+      var labelPlacement = placeClassRelationLabel(labelRouteInfo);
+      if (labelPlacement) {
+        placedLabels.push(labelPlacement.rect);
+        pushClassTextSvg(labelSvg, labelRouteInfo.rel.label, labelPlacement, CFG.fontSizeStereotype, 'italic');
+      }
     }
 
     // ── Draw class boxes (on top of lines) ──
@@ -5056,6 +5440,8 @@
           y: horizontalSide ? (side === 'top' ? entry.y : entry.y + entry.box.height) : pos,
           side: side,
           stub: opts.stub,
+          slideMin: min,
+          slideMax: max,
           penalty: si * 12 + pi * 4 + Math.abs(pos - clampedPreferred) * 0.5
         });
       }
@@ -5480,6 +5866,20 @@
     var exitPoint = points[outsideIndex];
     var rebuilt = [{ x: exitPoint.x, y: boundaryY }].concat(points.slice(outsideIndex));
     return UMLShared.simplifyOrthogonalPath(rebuilt);
+  }
+
+  function buildClassEndpointSlideAnchor(entry, point, fallbackSide) {
+    var side = classEdgeForPoint(point, entry, fallbackSide);
+    if (side !== 'top' && side !== 'bottom' && side !== 'left' && side !== 'right') {
+      return { x: point.x, y: point.y, side: fallbackSide };
+    }
+    return {
+      x: point.x,
+      y: point.y,
+      side: side,
+      slideMin: (side === 'top' || side === 'bottom') ? entry.x + 12 : entry.y + 12,
+      slideMax: (side === 'top' || side === 'bottom') ? entry.x + entry.box.width - 12 : entry.y + entry.box.height - 12
+    };
   }
 
   function enforceMinimumArrowheadStub(points, fromE, toE, sourceSide, targetSide, enforceSource, enforceTarget) {
@@ -11210,7 +11610,9 @@
           anchors.push({
             x: clamp(values[xi], left + insetX, right - insetX),
             y: side === 'top' ? top : bottom,
-            side: side
+            side: side,
+            slideMin: left + insetX,
+            slideMax: right - insetX
           });
         }
         return anchors;
@@ -11227,10 +11629,42 @@
         anchors.push({
           x: side === 'left' ? left : right,
           y: clamp(values[yi], top + insetY, bottom - insetY),
-          side: side
+          side: side,
+          slideMin: top + insetY,
+          slideMax: bottom - insetY
         });
       }
       return anchors;
+    }
+
+    function deploymentEdgeForPoint(point, entry, fallback) {
+      if (!point || !entry || !entry.box) return fallback;
+      var tol = 1.5;
+      var left = entry.x;
+      var right = entry.x + entry.box.width;
+      var top = entry.y;
+      var bottom = entry.y + entry.box.height;
+      if (Math.abs(point.y - top) <= tol && point.x >= left - tol && point.x <= right + tol) return 'top';
+      if (Math.abs(point.y - bottom) <= tol && point.x >= left - tol && point.x <= right + tol) return 'bottom';
+      if (Math.abs(point.x - left) <= tol && point.y >= top - tol && point.y <= bottom + tol) return 'left';
+      if (Math.abs(point.x - right) <= tol && point.y >= top - tol && point.y <= bottom + tol) return 'right';
+      return fallback;
+    }
+
+    function buildDeploymentEndpointSlideAnchor(entry, point, fallbackSide) {
+      var side = deploymentEdgeForPoint(point, entry, fallbackSide);
+      if (side !== 'top' && side !== 'bottom' && side !== 'left' && side !== 'right') {
+        return { x: point.x, y: point.y, side: fallbackSide };
+      }
+      var insetX = Math.max(16, Math.min(32, entry.box.width * 0.18));
+      var insetY = Math.max(16, Math.min(28, entry.box.height * 0.18));
+      return {
+        x: point.x,
+        y: point.y,
+        side: side,
+        slideMin: (side === 'top' || side === 'bottom') ? entry.x + insetX : entry.y + insetY,
+        slideMax: (side === 'top' || side === 'bottom') ? entry.x + entry.box.width - insetX : entry.y + entry.box.height - insetY
+      };
     }
 
     // ── Draw links ──
@@ -11314,7 +11748,9 @@
               points: routed.points,
               score: score,
               bends: routed.bends,
-              length: routed.length
+              length: routed.length,
+              sourceSide: sourceCandidate.anchor.side,
+              targetSide: targetCandidate.anchor.side
             };
           }
         }
@@ -11330,6 +11766,16 @@
           extraYs: routeExtraYs
         }
       ).points;
+      if (points.length >= 4) {
+        points = UMLShared.optimizeEndpointSlides(
+          points,
+          buildDeploymentEndpointSlideAnchor(fromE, points[0], bestRoute ? bestRoute.sourceSide : sourceSideOrder[0]),
+          buildDeploymentEndpointSlideAnchor(toE, points[points.length - 1], bestRoute ? bestRoute.targetSide : targetSideOrder[0]),
+          obstacles,
+          skipN,
+          occupiedSegments
+        );
+      }
       UMLShared.reserveOrthogonalRoute(points, occupiedSegments);
 
       var pStr = '';
