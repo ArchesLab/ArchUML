@@ -2421,13 +2421,19 @@
 
     if (layoutPreference === 'compact') {
       // Compact: try tight gaps in both directions, pick smallest area
+      // Symmetric reductions
       addCandidate(direction, gapX, gapY);
       addCandidate(direction, gapX * 0.85, gapY * 0.85);
       addCandidate(direction, gapX * 0.7, gapY * 0.7);
+      // Landscape-biased: wider horizontal, tighter vertical
+      addCandidate(direction, gapX * 1.1, gapY * 0.6);
+      addCandidate(direction, gapX * 0.9, gapY * 0.6);
       if (!directionLocked) {
         addCandidate(otherDirection, gapX, gapY);
         addCandidate(otherDirection, gapX * 0.85, gapY * 0.85);
         addCandidate(otherDirection, gapX * 0.7, gapY * 0.7);
+        addCandidate(otherDirection, gapX * 1.1, gapY * 0.6);
+        addCandidate(otherDirection, gapX * 0.9, gapY * 0.6);
       }
       return candidates;
     }
@@ -2499,12 +2505,12 @@
     var aspectWeight = 55;
 
     if (layoutPreference === 'compact') {
-      // Compact: minimize total area above all else
+      // Compact: minimize total area, favor landscape for slides/small containers
       var score = Math.log(Math.max(bounds.area, 1)) * 18;
       score += Math.log(Math.max(bounds.width, bounds.height) + 1) * 6;
-      // Mild aspect preference toward slightly-landscape for readability
-      score += Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / 1.2)) * 15;
-      if (candidate.direction !== fallbackDirection) score += 2;
+      // Favor landscape aspect (target 1.5) — compact is for landscape containers
+      score += Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / 1.5)) * 25;
+      // No direction penalty — let area and aspect drive the choice
       return score;
     }
 
@@ -2534,7 +2540,7 @@
     if (layoutPreference === 'square') return 1;
     if (layoutPreference === 'landscape') return 1.6;
     if (layoutPreference === 'portrait') return 0.625;
-    if (layoutPreference === 'compact') return 1.2;
+    if (layoutPreference === 'compact') return 1.5;
     return direction === 'LR' ? 1.6 : 0.8;
   }
 
@@ -3914,10 +3920,12 @@
 
     var layoutPreference = parsed.layoutPreference || null;
     var effectiveDirection = parsed.direction || 'TB';
-    if (hasHierarchyEdges) {
+    if (hasHierarchyEdges && layoutPreference !== 'compact') {
       // UML inheritance hierarchies should read top-to-bottom regardless of
       // footprint preference, so keep the hierarchy vertical and use spacing
       // changes rather than rotating the graph sideways.
+      // Exception: compact mode lets the engine explore both directions to
+      // find the layout with minimal area (for landscape containers/slides).
       effectiveDirection = 'TB';
     }
 
