@@ -56,7 +56,7 @@
     if (value === 'vertical' || value === 'top-to-bottom' || value === 'tb') {
       return { direction: 'TB', layoutPreference: null, shadowEnabled: null };
     }
-    if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'auto' || value === 'default' || value === 'none') {
+    if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'compact' || value === 'auto' || value === 'default' || value === 'none') {
       return {
         direction: null,
         layoutPreference: (value === 'default' || value === 'none') ? 'auto' : value,
@@ -2403,9 +2403,11 @@
     var seen = {};
     var otherDirection = direction === 'LR' ? 'TB' : 'LR';
 
+    var minGapFloor = layoutPreference === 'compact' ? 14 : 24;
+
     function addCandidate(candidateDirection, candidateGapX, candidateGapY) {
-      var gx = Math.max(24, Math.round(candidateGapX));
-      var gy = Math.max(24, Math.round(candidateGapY));
+      var gx = Math.max(minGapFloor, Math.round(candidateGapX));
+      var gy = Math.max(minGapFloor, Math.round(candidateGapY));
       var key = candidateDirection + '|' + gx + '|' + gy;
       if (seen[key]) return;
       seen[key] = true;
@@ -2414,6 +2416,19 @@
 
     if (!layoutPreference) {
       addCandidate(direction, gapX, gapY);
+      return candidates;
+    }
+
+    if (layoutPreference === 'compact') {
+      // Compact: try tight gaps in both directions, pick smallest area
+      addCandidate(direction, gapX, gapY);
+      addCandidate(direction, gapX * 0.85, gapY * 0.85);
+      addCandidate(direction, gapX * 0.7, gapY * 0.7);
+      if (!directionLocked) {
+        addCandidate(otherDirection, gapX, gapY);
+        addCandidate(otherDirection, gapX * 0.85, gapY * 0.85);
+        addCandidate(otherDirection, gapX * 0.7, gapY * 0.7);
+      }
       return candidates;
     }
 
@@ -2483,6 +2498,16 @@
     var targetAspect = 1.2;
     var aspectWeight = 55;
 
+    if (layoutPreference === 'compact') {
+      // Compact: minimize total area above all else
+      var score = Math.log(Math.max(bounds.area, 1)) * 18;
+      score += Math.log(Math.max(bounds.width, bounds.height) + 1) * 6;
+      // Mild aspect preference toward slightly-landscape for readability
+      score += Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / 1.2)) * 15;
+      if (candidate.direction !== fallbackDirection) score += 2;
+      return score;
+    }
+
     if (layoutPreference === 'square') {
       targetAspect = 1;
       aspectWeight = 120;
@@ -2509,6 +2534,7 @@
     if (layoutPreference === 'square') return 1;
     if (layoutPreference === 'landscape') return 1.6;
     if (layoutPreference === 'portrait') return 0.625;
+    if (layoutPreference === 'compact') return 1.2;
     return direction === 'LR' ? 1.6 : 0.8;
   }
 
@@ -2675,6 +2701,7 @@
       if (layoutPreference === 'portrait') score += packing.width * 0.025;
       if (layoutPreference === 'landscape') score += packing.height * 0.025;
       if (layoutPreference === 'square') score += Math.abs(packing.width - packing.height) * 0.035;
+      if (layoutPreference === 'compact') score += Math.log(Math.max(packing.area, 1)) * 8;
 
       return score;
     }
@@ -3895,7 +3922,10 @@
     }
 
     var effectiveGapY = CFG.gapY;
-    if (hasHierarchyEdges && layoutPreference === 'landscape') {
+    if (layoutPreference === 'compact') {
+      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
+      effectiveGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+    } else if (hasHierarchyEdges && layoutPreference === 'landscape') {
       effectiveGapX = Math.max(effectiveGapX, Math.round(effectiveGapX * 1.35));
       effectiveGapY = Math.max(36, Math.round(CFG.gapY * 0.82));
     } else if (hasHierarchyEdges && layoutPreference === 'portrait') {
@@ -3910,7 +3940,7 @@
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: effectiveDirection,
-      layoutPreference: hasHierarchyEdges ? null : layoutPreference,
+      layoutPreference: (hasHierarchyEdges && layoutPreference !== 'compact') ? null : layoutPreference,
       directionLocked: !hasHierarchyEdges && !!parsed.directionLocked
     });
 
@@ -6442,14 +6472,20 @@
     var messages = [];          // Each item: message, fragment start/end, create, destroy
     var autoParticipants = {};  // Track implicitly declared participants
     var shadowEnabled = true;
+    var layoutPreference = null;
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
 
       var layoutDirective = UMLShared.parseLayoutDirective(line);
-      if (layoutDirective && layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
-        shadowEnabled = layoutDirective.shadowEnabled;
+      if (layoutDirective) {
+        if (layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
+          shadowEnabled = layoutDirective.shadowEnabled;
+        }
+        if (layoutDirective.layoutPreference) {
+          layoutPreference = layoutDirective.layoutPreference;
+        }
         continue;
       }
 
@@ -6629,7 +6665,7 @@
       }
     }
 
-    return { participants: participants, messages: messages, shadowEnabled: shadowEnabled };
+    return { participants: participants, messages: messages, shadowEnabled: shadowEnabled, layoutPreference: layoutPreference };
   }
 
   function ensureParticipant(id, participants, participantMap, auto) {
@@ -6697,6 +6733,14 @@
     var messages = parsed.messages;
     var spacing = computeSequenceSpacing(participants);
 
+    // Compact mode: tighten all spacing
+    if (parsed.layoutPreference === 'compact') {
+      spacing.participantGap = Math.max(16, Math.round(spacing.participantGap * 0.5));
+      spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.6));
+      spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.7));
+    }
+    var messageGapY = parsed.layoutPreference === 'compact' ? Math.max(18, Math.round(CFG.messageGapY * 0.55)) : CFG.messageGapY;
+
     // ── Measure participant boxes ──
     var partWidths = [];
     var partMaxW = 0;
@@ -6749,7 +6793,7 @@
       if (msg.type === 'message') {
         lastMsgY = curY;
         msgYs.push(curY);
-        curY += CFG.messageGapY;
+        curY += messageGapY;
         // Track which participants are involved in ALL open fragments (not just innermost)
         if (fragmentStack.length > 0) {
           var fpi1 = findPIdxByName(msg.from);
@@ -6789,11 +6833,11 @@
             }
           }
         }
-        curY = frag ? frag.endY + CFG.messageGapY / 2 : curY + 20;
+        curY = frag ? frag.endY + messageGapY / 2 : curY + 20;
         msgYs.push(curY);
       } else if (msg.type === 'lost' || msg.type === 'found') {
         msgYs.push(curY);
-        curY += CFG.messageGapY;
+        curY += messageGapY;
         if (fragmentStack.length > 0) {
           var lfIdx = findPIdxByName(msg.from || msg.to);
           for (var fsi2 = 0; fsi2 < fragmentStack.length; fsi2++) {
@@ -6807,11 +6851,11 @@
         msgYs.push(lastMsgY); // bar ends at the preceding message's Y
       } else if (msg.type === 'destroy') {
         msgYs.push(curY);
-        curY += CFG.messageGapY;
+        curY += messageGapY;
       } else if (msg.type === 'note') {
         msgYs.push(curY);
         var noteH = UMLShared.measureNote(msg.lines || [msg.text || '']).height;
-        curY += Math.max(noteH + 10, CFG.messageGapY);
+        curY += Math.max(noteH + 10, messageGapY);
       } else if (msg.type === 'create') {
         createYs[msg.target] = curY;
         msgYs.push(curY);
@@ -6819,7 +6863,7 @@
         curY += partH / 2;
       } else {
         msgYs.push(curY);
-        curY += CFG.messageGapY / 2;
+        curY += messageGapY / 2;
       }
     }
 
@@ -7664,9 +7708,10 @@
         }
       }
       if (subNodes.length > 0) {
+        var subGapScale = parsed.layoutPreference === 'compact' ? 0.35 : 0.7;
         var subResult = window.UMLAdvancedLayout.compute(subNodes, subEdges, {
-          gapX: CFG.gapX * 0.7,
-          gapY: CFG.gapY * 0.7,
+          gapX: Math.max(14, Math.round(CFG.gapX * subGapScale)),
+          gapY: Math.max(14, Math.round(CFG.gapY * subGapScale)),
           direction: parsed.direction || 'TB',
           layoutPreference: parsed.layoutPreference || null
         });
@@ -7703,9 +7748,15 @@
       layoutEdges.push({ source: tr.from, target: tr.to, type: 'navigable', data: tr });
     }
 
+    var stateGapX = CFG.gapX;
+    var stateGapY = CFG.gapY;
+    if (parsed.layoutPreference === 'compact') {
+      stateGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
+      stateGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+    }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
-      gapX: CFG.gapX,
-      gapY: CFG.gapY,
+      gapX: stateGapX,
+      gapY: stateGapY,
       direction: parsed.direction || 'TB',
       layoutPreference: parsed.layoutPreference || null
     });
@@ -8571,6 +8622,10 @@
     var ifaceGapExtra = hasIface ? (CFG.ifaceStick + CFG.ifaceRadius) * 2 : 0;
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40 + ifaceGapExtra);
     var effectiveGapY = CFG.gapY;
+    if (parsed.layoutPreference === 'compact') {
+      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
+      effectiveGapY = Math.max(20, Math.round(effectiveGapY * 0.5));
+    }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
@@ -11628,10 +11683,15 @@
       if (links[li].label) maxLabelW = Math.max(maxLabelW, UMLShared.textWidth(links[li].label, false, CFG.fontSize));
     }
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40);
+    var deployGapY = CFG.gapY;
+    if (parsed.layoutPreference === 'compact') {
+      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
+      deployGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+    }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
-      gapY: CFG.gapY,
+      gapY: deployGapY,
       direction: parsed.direction || 'TB',
       layoutPreference: parsed.layoutPreference || null
     });
@@ -12511,6 +12571,7 @@
   }
 
   function applyUseCaseLayoutConventions(entries, parsed) {
+    var ucCompactScale = parsed.layoutPreference === 'compact' ? 0.5 : 1;
     var includeGroups = {};
     var extendGroups = {};
     var usecaseGeneralizations = {};
@@ -12564,7 +12625,7 @@
         rightMost = Math.max(rightMost, sourceEntry.x + sourceEntry.box.width);
         sumCenterY += entryCenterY(sourceEntry);
       }
-      targetEntry.x = rightMost + CFG.gapX * 0.7;
+      targetEntry.x = rightMost + CFG.gapX * 0.7 * ucCompactScale;
       setEntryCenterY(targetEntry, sumCenterY / includeSources.length);
     }
 
@@ -12578,8 +12639,8 @@
       for (var ei = 0; ei < extenders.length; ei++) {
         var extenderEntry = entries[extenders[ei]];
         setEntryCenterX(extenderEntry, entryCenterX(baseEntry));
-        extenderEntry.y = baseEntry.y + baseEntry.box.height + CFG.gapY * 0.8 +
-          ei * (extenderEntry.box.height + CFG.gapY * 0.45);
+        extenderEntry.y = baseEntry.y + baseEntry.box.height + CFG.gapY * 0.8 * ucCompactScale +
+          ei * (extenderEntry.box.height + CFG.gapY * 0.45 * ucCompactScale);
       }
     }
 
@@ -12593,8 +12654,8 @@
       for (var ugi = 0; ugi < usecaseChildren.length; ugi++) {
         var childEntry = entries[usecaseChildren[ugi]];
         setEntryCenterX(childEntry, entryCenterX(parentEntry));
-        childEntry.y = parentEntry.y + parentEntry.box.height + CFG.gapY * 0.8 +
-          ugi * (childEntry.box.height + CFG.gapY * 0.45);
+        childEntry.y = parentEntry.y + parentEntry.box.height + CFG.gapY * 0.8 * ucCompactScale +
+          ugi * (childEntry.box.height + CFG.gapY * 0.45 * ucCompactScale);
       }
     }
 
@@ -12608,8 +12669,8 @@
       for (var agi = 0; agi < actorChildren.length; agi++) {
         var actorChildEntry = entries[actorChildren[agi]];
         setEntryCenterX(actorChildEntry, entryCenterX(actorParentEntry));
-        actorChildEntry.y = actorParentEntry.y + actorParentEntry.box.height + CFG.gapY * 0.55 +
-          agi * (actorChildEntry.box.height + CFG.gapY * 0.3);
+        actorChildEntry.y = actorParentEntry.y + actorParentEntry.box.height + CFG.gapY * 0.55 * ucCompactScale +
+          agi * (actorChildEntry.box.height + CFG.gapY * 0.3 * ucCompactScale);
       }
     }
 
@@ -12625,7 +12686,7 @@
         leftMost = Math.min(leftMost, usecaseEntry.x);
         totalCenterY += entryCenterY(usecaseEntry);
       }
-      actorEntry.x = leftMost - actorEntry.box.width - CFG.gapX * 0.7;
+      actorEntry.x = leftMost - actorEntry.box.width - CFG.gapX * 0.7 * ucCompactScale;
       setEntryCenterY(actorEntry, totalCenterY / associatedUsecases.length);
       actorIds.push(actorId);
     }
@@ -12636,7 +12697,7 @@
     // may land on top of another use case that sits between them (e.g. when an
     // include chain places the target use case to the right of an intermediate one).
     // Push the colliding actor further left (or to the right if that is closer).
-    var gap = CFG.gapX * 0.5;
+    var gap = CFG.gapX * 0.5 * ucCompactScale;
     for (var colActorId in entries) {
       var colActor = entries[colActorId];
       if (!colActor || colActor.type !== 'actor') continue;
@@ -12689,9 +12750,9 @@
             var aCenterX = actorCheckEntry.x + actorCheckEntry.box.width / 2;
             var sCenterX = (sb.minX + sb.maxX) / 2;
             if (aCenterX <= sCenterX) {
-              actorCheckEntry.x = sb.minX - actorCheckEntry.box.width - CFG.gapX * 0.7;
+              actorCheckEntry.x = sb.minX - actorCheckEntry.box.width - CFG.gapX * 0.7 * ucCompactScale;
             } else {
-              actorCheckEntry.x = sb.maxX + CFG.gapX * 0.7;
+              actorCheckEntry.x = sb.maxX + CFG.gapX * 0.7 * ucCompactScale;
             }
           }
         }
@@ -12747,9 +12808,15 @@
       layoutEdges.push({ source: fromId, target: toId, type: edgeType, data: rel });
     }
 
+    var ucGapX = CFG.gapX;
+    var ucGapY = CFG.gapY;
+    if (parsed.layoutPreference === 'compact') {
+      ucGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
+      ucGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+    }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
-      gapX: CFG.gapX,
-      gapY: CFG.gapY,
+      gapX: ucGapX,
+      gapY: ucGapY,
       direction: parsed.direction || 'LR',
       layoutPreference: parsed.layoutPreference || null,
     });
@@ -13548,9 +13615,15 @@
       layoutEdges.push({ source: edgeList[ei].from, target: edgeList[ei].to, type: 'navigable' });
     }
 
+    var actGapX = CFG.gapX;
+    var actGapY = CFG.gapY;
+    if (parsed.layoutPreference === 'compact') {
+      actGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
+      actGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+    }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
-      gapX: CFG.gapX,
-      gapY: CFG.gapY,
+      gapX: actGapX,
+      gapY: actGapY,
       direction: parsed.direction || 'TB',
       layoutPreference: parsed.layoutPreference || null,
     });
