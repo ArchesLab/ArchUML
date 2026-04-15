@@ -3920,19 +3920,24 @@
 
     var layoutPreference = parsed.layoutPreference || null;
     var effectiveDirection = parsed.direction || 'TB';
-    if (hasHierarchyEdges && layoutPreference !== 'compact') {
+    if (hasHierarchyEdges) {
       // UML inheritance hierarchies should read top-to-bottom regardless of
       // footprint preference, so keep the hierarchy vertical and use spacing
       // changes rather than rotating the graph sideways.
-      // Exception: compact mode lets the engine explore both directions to
-      // find the layout with minimal area (for landscape containers/slides).
       effectiveDirection = 'TB';
     }
 
     var effectiveGapY = CFG.gapY;
     if (layoutPreference === 'compact') {
-      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
-      effectiveGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      // Compact with hierarchy: widen horizontally, tighten vertically
+      // to produce a landscape footprint while keeping inheritance top-to-bottom.
+      if (hasHierarchyEdges) {
+        effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.75));
+        effectiveGapY = Math.max(28, Math.round(CFG.gapY * 0.45));
+      } else {
+        effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
+        effectiveGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      }
     } else if (hasHierarchyEdges && layoutPreference === 'landscape') {
       effectiveGapX = Math.max(effectiveGapX, Math.round(effectiveGapX * 1.35));
       effectiveGapY = Math.max(36, Math.round(CFG.gapY * 0.82));
@@ -3949,7 +3954,7 @@
       gapY: effectiveGapY,
       direction: effectiveDirection,
       layoutPreference: (hasHierarchyEdges && layoutPreference !== 'compact') ? null : layoutPreference,
-      directionLocked: !hasHierarchyEdges && !!parsed.directionLocked
+      directionLocked: hasHierarchyEdges || !!parsed.directionLocked
     });
 
     // Read back positions
@@ -7197,10 +7202,11 @@
           var arrowDir = isLeft ? 1 : -1;
           drawMsgArrow(svg, x2, my, arrowDir, m.msgType, colors);
 
-          // Label above the line
+          // Label above the line (above the created box if this is a create message)
           if (m.label) {
             var labelX = (x1 + x2) / 2;
-            var labelY = my - 6;
+            var isCreateTarget = createYs.hasOwnProperty(m.to) && my <= createYs[m.to] + partH;
+            var labelY = isCreateTarget ? my - partH / 2 - 6 : my - 6;
             svg.push('<text x="' + labelX + '" y="' + labelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
               '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
