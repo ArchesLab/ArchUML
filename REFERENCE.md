@@ -17,9 +17,11 @@ Each section shows the syntax as a code block followed by an HTML rendering div 
 7. [Deployment Diagrams](#deployment-diagrams)
 8. [Use Case Diagrams](#use-case-diagrams)
 9. [Activity Diagrams](#activity-diagrams)
-10. [Notes & Annotations](#notes--annotations)
-11. [CSS Theming](#css-theming)
-12. [CLI / Node.js API](#cli--nodejs-api)
+10. [Freeform Diagrams](#freeform-diagrams)
+11. [Git Commit Graphs](#git-commit-graphs)
+12. [Notes & Annotations](#notes--annotations)
+13. [CSS Theming](#css-theming)
+14. [CLI / Node.js API](#cli--nodejs-api)
 
 ---
 
@@ -48,8 +50,10 @@ Available class names:
 | `language-uml-deployment` | Deployment diagram |
 | `language-uml-usecase` | Use case diagram |
 | `language-uml-activity` | Activity diagram |
+| `diagram-freeform` | Freeform box-and-line (non-UML) |
+| `diagram-gitgraph` | Git commit graph (non-UML) |
 
-The `@startuml` / `@enduml` markers are optional but recommended for clarity.
+The `@startuml` / `@enduml` markers are optional but recommended for clarity. The last two types intentionally drop the `uml-` prefix since they are not UML — they cover visualisations that no formal UML diagram captures cleanly.
 
 ---
 
@@ -1499,6 +1503,234 @@ endif
 |Customer|
 "Ship" --> "Receive"
 "Receive" --> (*)
+@enduml
+</code></pre>
+
+---
+
+## Freeform Diagrams
+
+A deliberately informal diagram type for ad-hoc box-and-arrow visualisations that do **not** fit any formal UML category. Use it for things like memory layouts, tree structures, before/after conceptual pictures, or annotated boxes — the kind of thing you would otherwise draw in ASCII art.
+
+**When to use a different type instead:**
+
+| You are drawing… | Use this instead |
+|---|---|
+| A process or workflow with steps/decisions | [Activity diagram](#activity-diagrams) |
+| A state machine with named states and transitions | [State machine diagram](#state-machine-diagrams) |
+| Classes and their relationships | [Class diagram](#class-diagrams) |
+| Interactions between actors over time | [Sequence diagram](#sequence-diagrams) |
+| A Git commit DAG | [Git commit graph](#git-commit-graphs) |
+
+Freeform is the "none of the above" category. If a formal type fits, prefer it.
+
+### Syntax
+
+```
+@startuml
+layout horizontal
+
+box "Working Directory" as wd
+box "Stash\nWIP: power function" as st
+box "Restored" as r
+
+wd --> st : git stash
+st --> r  : git stash pop
+
+note bottom of wd : You edit files here
+@enduml
+```
+
+<pre><code class="diagram-freeform">
+@startuml
+layout horizontal
+
+box "Working Directory" as wd
+box "Stash\nWIP: power function" as st
+box "Restored" as r
+
+wd --> st : git stash
+st --> r  : git stash pop
+
+note bottom of wd : You edit files here
+@enduml
+</code></pre>
+
+### Box Shapes
+
+The optional keyword after `box` picks a shape. Default is `rect`.
+
+```
+box "Rectangle" as a
+box round "Rounded" as b
+box pill "Pill / stadium" as c
+box circle "Circle" as d
+box ellipse "Ellipse" as e
+box hex "Hexagon" as f
+box note "Dog-eared note" as g
+```
+
+<pre><code class="diagram-freeform">
+@startuml
+layout horizontal
+box "Rectangle" as a
+box round "Rounded" as b
+box pill "Pill" as c
+box circle "Circle" as d
+box ellipse "Ellipse" as e
+box hex "Hexagon" as f
+box note "Note" as g
+@enduml
+</code></pre>
+
+### Multi-Line Labels
+
+Use `\n` inside the quoted label string.
+
+```
+box "Line one\nLine two\nLine three" as ml
+```
+
+### Edge Operators
+
+| Operator | Meaning |
+|---|---|
+| `-->` | solid arrow, forward |
+| `<--` | solid arrow, reverse |
+| `<->` | solid arrow, both directions |
+| `--`  | solid line, no arrowhead |
+| `..>`, `<..`, `<..>`, `..` | dashed variants |
+| `==>`, `<==`, `<==>`, `==` | thick variants |
+
+Edge labels use `:` after the target; quotes around the label are optional.
+
+```
+wd --> st : "git stash"
+wd --> st : git stash       ← bare label also works
+```
+
+### Layered / Stacked Boxes
+
+To reproduce a vertical "stack" of labelled sections (e.g. a memory layout), declare the boxes top-to-bottom and use `layout vertical` (default). Connect them with plain `--` lines so they stay aligned:
+
+<pre><code class="diagram-freeform">
+@startuml
+layout vertical
+box "Stack (grows down)\nlocal variables" as stack
+box "Free space" as free
+box "Heap (grows up)\nmalloc'd memory" as heap
+box "Global / Static" as global
+box "Code (Text)" as code
+
+stack -- free
+free -- heap
+heap -- global
+global -- code
+
+note right of stack : High address
+note right of code : Low address
+@enduml
+</code></pre>
+
+### Tree-Style Hierarchies
+
+Trees are boxes connected by `--` edges, laid out horizontally (`layout horizontal`) so parents sit to the left of children:
+
+<pre><code class="diagram-freeform">
+@startuml
+layout horizontal
+box "main-repo/" as root
+box ".git/" as dotgit
+box ".gitmodules" as gm
+box "src/" as src
+box "vendor/" as vendor
+box "math-utils/" as mu
+
+root -- dotgit
+root -- gm
+root -- src
+root -- vendor
+vendor -- mu
+
+note right of gm : Tells Git where to fetch each submodule
+@enduml
+</code></pre>
+
+---
+
+## Git Commit Graphs
+
+For Git commit DAGs the freeform renderer would be a poor fit — commits, branches, and HEAD have rich semantics that benefit from a dedicated layout engine. The `diagram-gitgraph` type reuses the existing [`GitGraph`](../git-graph.js) renderer (normally driven by live `git log` output) via a compact text DSL.
+
+**Requires** `js/git-graph.js` to be loaded on the page.
+
+### Syntax
+
+```
+@startuml
+branch main:
+  A "Initial commit"
+  B "Add helper"
+  C "Refactor"
+
+branch feature from B:
+  α "Start feature"
+  β "Develop"
+  γ "Complete"
+
+head main
+@enduml
+```
+
+Commits are written **oldest → newest**, grouped by branch. `from X` attaches a branch to commit `X`. The renderer reorders them newest-first internally.
+
+### Branching
+
+```
+branch <name>[from <commit>]:
+  <id> ["message"]
+  ...
+```
+
+A commit's parent is the preceding commit on the same branch, or the `from` commit for the first one.
+
+### Merges
+
+```
+branch main:
+  C
+  M merge feature "Merge feature into main"
+
+branch feature from B:
+  γ
+```
+
+`<id> merge <branch>` creates a merge commit whose parents are the previous commit on the current branch and the tip of the named branch.
+
+### HEAD
+
+```
+head <branch>                  ← HEAD points at the named branch (default: first branch)
+head detached at <commit>      ← detached-HEAD state
+```
+
+### Example: Cherry-Pick (Before / After)
+
+Render two side-by-side blocks to show a before/after comparison:
+
+<pre><code class="diagram-gitgraph">
+@startuml
+branch main:
+  A "Initial"
+  B "Helper"
+  C "Refactor"
+
+branch experimental from B:
+  α "Feature start"
+  β "In progress"
+  γ "Done"
+
+head main
 @enduml
 </code></pre>
 

@@ -15,7 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 
-const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity'];
+const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
 
 function usage() {
@@ -56,6 +56,8 @@ async function main() {
       deployment: window.UMLDeploymentDiagram,
       usecase:    window.UMLUseCaseDiagram,
       activity:   window.UMLActivityDiagram,
+      freeform:   window.UMLFreeformDiagram,
+      gitgraph:   window.UMLGitGraphDiagram,
     };
     const R = RENDERERS[type];
     if (!R) return { error: 'Unknown renderer: ' + type };

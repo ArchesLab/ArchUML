@@ -302,7 +302,10 @@
     component: 'uml-component-diagram-container',
     deployment: 'uml-deployment-diagram-container',
     usecase: 'uml-usecase-diagram-container',
-    activity: 'uml-activity-diagram-container'
+    activity: 'uml-activity-diagram-container',
+    freeform: 'uml-freeform-diagram-container',
+    gitgraph: 'uml-gitgraph-diagram-container',
+    'folder-tree': 'uml-folder-tree-diagram-container'
   };
 
   function prepareDiagramContainer(container, type) {
@@ -355,7 +358,10 @@
         '.uml-component-diagram-container,' +
         '.uml-deployment-diagram-container,' +
         '.uml-usecase-diagram-container,' +
-        '.uml-activity-diagram-container'
+        '.uml-activity-diagram-container,' +
+        '.uml-freeform-diagram-container,' +
+        '.uml-gitgraph-diagram-container,' +
+        '.uml-folder-tree-diagram-container'
       );
     }
 
@@ -2312,6 +2318,9 @@
         deployment: function () { return window.UMLDeploymentDiagram; },
         usecase:    function () { return window.UMLUseCaseDiagram; },
         activity:   function () { return window.UMLActivityDiagram; },
+        freeform:   function () { return window.UMLFreeformDiagram; },
+        gitgraph:   function () { return window.UMLGitGraphDiagram; },
+        'folder-tree': function () { return window.UMLFolderTreeDiagram; },
       };
 
       // 1. Process data-uml-type attributes
@@ -2332,9 +2341,24 @@
         }
       }
 
-      // 2. Process Markdown fenced code blocks (e.g., ```uml-class)
+      // 2. Process fenced code blocks. Formal UML types use the Markdown-
+      // highlighter convention `language-uml-<type>` (from ```uml-<type>```
+      // fences); non-UML diagram types (freeform, gitgraph) use a plain
+      // `diagram-<type>` class since calling them "UML" would be misleading.
+      var DIAGRAM_SELECTORS = {
+        class:      'pre > code.language-uml-class',
+        sequence:   'pre > code.language-uml-sequence',
+        state:      'pre > code.language-uml-state',
+        component:  'pre > code.language-uml-component',
+        deployment: 'pre > code.language-uml-deployment',
+        usecase:    'pre > code.language-uml-usecase',
+        activity:   'pre > code.language-uml-activity',
+        freeform:   'pre > code.diagram-freeform, pre > code.language-freeform',
+        gitgraph:   'pre > code.diagram-gitgraph, pre > code.language-gitgraph',
+        'folder-tree': 'pre > code.diagram-folder-tree, pre > code.language-folder-tree',
+      };
       for (var key in RENDERERS) {
-        var selector = 'pre > code.language-uml-' + key;
+        var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
         var blocks = document.querySelectorAll(selector);
         for (var j = 0; j < blocks.length; j++) {
           var codeEl = blocks[j];
@@ -2357,6 +2381,592 @@
     }
   };
 })();
+/**
+ * UMLLayoutCore — robust, stage-based layout primitives
+ *
+ * A single, well-tested set of pure functions that the advanced layout engine
+ * and every diagram renderer can call. Replaces the ad-hoc `gap *= 0.5`
+ * duplication in each renderer and the hardcoded aspect target (1.5) that
+ * produced overlaps and orientation drift in compact mode.
+ *
+ * The module is defensive: it gracefully handles missing arguments, NaN/Infinity
+ * inputs, zero-sized nodes, empty graphs, and hostile call sites. Every public
+ * function is idempotent and side-effect free on its inputs.
+ *
+ * Stages exposed:
+ *   • measureEdgeRequirement — minimum X/Y space an edge needs for its labels
+ *   • computeMinGaps         — aggregate per-diagram minimums for compact packing
+ *   • containerAspect        — safe aspect-ratio measurement from DOM
+ *   • pickOrientation        — direction picker honoring hierarchy + container
+ *   • detectOverlaps         — O(n²) worst case, deterministic
+ *   • repairOverlaps         — fixed-point iterative separation with axis locks
+ *   • normalizeCoords        — strips NaN/Infinity, rounds to sane values
+ *   • resolveTargetAspect    — preference + container → target aspect
+ *   • boundsOf               — safe bounding box aggregation
+ */
+(function () {
+  'use strict';
+
+  // ───── Numeric guards ─────────────────────────────────────────────
+
+  function finiteOr(value, fallback) {
+    var n = Number(value);
+    return isFinite(n) ? n : fallback;
+  }
+
+  function clamp(value, lo, hi) {
+    var n = finiteOr(value, lo);
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function safeText(value) {
+    return value == null ? '' : String(value);
+  }
+
+  function approxTextWidth(text, fontSize, bold) {
+    var fs = finiteOr(fontSize, 13);
+    if (window.UMLShared && typeof window.UMLShared.textWidth === 'function') {
+      try {
+        var w = window.UMLShared.textWidth(safeText(text), !!bold, fs);
+        if (isFinite(w) && w > 0) return w;
+      } catch (e) { /* fall through */ }
+    }
+    return safeText(text).length * fs * (bold ? 0.62 : 0.55);
+  }
+
+  // ───── Edge requirement measurement ───────────────────────────────
+
+  /**
+   * Compute how much X/Y space this edge needs to comfortably fit its labels,
+   * multiplicities, and endpoint markers without colliding with anything.
+   * Works for any edge shape (class relationships, component connectors,
+   * state transitions, deployment links, use case relationships, activity flows).
+   *
+   * The function is defensive: missing edge fields are treated as absent labels.
+   *
+   * @param {object} edge — may carry `label`, `fromMult`, `toMult`, `guard`
+   * @param {object} [opts]
+   * @param {number} [opts.fontSize=13]
+   * @param {number} [opts.markerExtent=14] — size of arrowheads/diamonds
+   * @param {number} [opts.labelPadding=8]
+   * @returns {{ minX: number, minY: number }}
+   */
+  function measureEdgeRequirement(edge, opts) {
+    opts = opts || {};
+    var fs = finiteOr(opts.fontSize, 13);
+    var markerW = finiteOr(opts.markerExtent, 14);
+    var pad = finiteOr(opts.labelPadding, 8);
+
+    if (!edge) return { minX: 40, minY: 28 };
+
+    var labels = [];
+    // Accept multiple naming conventions used across diagram types.
+    if (edge.label) labels.push(edge.label);
+    if (edge.text) labels.push(edge.text);
+    if (edge.guard) labels.push('[' + edge.guard + ']');
+    if (edge.fromMult) labels.push(edge.fromMult);
+    if (edge.toMult) labels.push(edge.toMult);
+    if (edge.fromLabel) labels.push(edge.fromLabel);
+    if (edge.toLabel) labels.push(edge.toLabel);
+
+    var maxLabelW = 0;
+    var labelCount = 0;
+    for (var i = 0; i < labels.length; i++) {
+      var w = approxTextWidth(labels[i], fs, false);
+      if (w > maxLabelW) maxLabelW = w;
+      if (labels[i]) labelCount++;
+    }
+
+    // Horizontal requirement: enough room for the widest label to sit *next to*
+    // the line when the line runs vertically (target=below arrow), plus both
+    // endpoint markers can fully form without overlapping the nodes.
+    var minX = Math.max(40, maxLabelW + markerW * 2 + pad + 8);
+
+    // Vertical requirement: enough room to stack multiplicity + label above
+    // the line when the line runs horizontally, plus breathing room so arrows
+    // and diamonds don't touch the opposing node boundary.
+    var lineHeight = fs + 4;
+    var minY = Math.max(28, (labelCount > 1 ? 2 : 1) * lineHeight + markerW + pad);
+
+    return { minX: Math.round(minX), minY: Math.round(minY) };
+  }
+
+  // ───── Aggregate min-gap computation ──────────────────────────────
+
+  /**
+   * Walk every edge and return the diagram-wide floor for gap sizing.
+   * Used in compact mode so gaps never shrink below what the labels need.
+   *
+   * @param {Array} edges
+   * @param {object} [nodesById] — when provided, edges with missing endpoints are skipped
+   * @param {object} [opts]
+   * @returns {{ minX: number, minY: number }}
+   */
+  function computeMinGaps(edges, nodesById, opts) {
+    opts = opts || {};
+    var floorX = finiteOr(opts.floorX, 20);
+    var floorY = finiteOr(opts.floorY, 20);
+
+    if (!Array.isArray(edges) || edges.length === 0) {
+      return { minX: floorX, minY: floorY };
+    }
+
+    var minX = floorX;
+    var minY = floorY;
+
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      if (!e) continue;
+      if (nodesById) {
+        var srcId = e.source != null ? e.source : (e.from != null ? e.from : null);
+        var tgtId = e.target != null ? e.target : (e.to != null ? e.to : null);
+        if (srcId != null && tgtId != null) {
+          if (!Object.prototype.hasOwnProperty.call(nodesById, srcId)) continue;
+          if (!Object.prototype.hasOwnProperty.call(nodesById, tgtId)) continue;
+        }
+      }
+      var payload = e.data || e;
+      var req = measureEdgeRequirement(payload, opts);
+      if (req.minX > minX) minX = req.minX;
+      if (req.minY > minY) minY = req.minY;
+    }
+
+    return { minX: Math.round(minX), minY: Math.round(minY) };
+  }
+
+  // ───── Container aspect ratio (safe DOM measurement) ──────────────
+
+  /**
+   * Return container's effective aspect ratio, or null if it can't be trusted.
+   * Never throws. Handles: SSR (no DOM), hidden containers, zero sizing,
+   * transformed parents, viewport reshapes.
+   *
+   * @param {HTMLElement} container
+   * @returns {number | null}
+   */
+  function containerAspect(container) {
+    if (!container || typeof container !== 'object') return null;
+    if (typeof container.getBoundingClientRect !== 'function') return null;
+
+    try {
+      var rect = container.getBoundingClientRect();
+      if (!rect) return null;
+      var w = finiteOr(rect.width, 0);
+      var h = finiteOr(rect.height, 0);
+
+      // Prefer the owner's computed client width (handles CSS max-width).
+      if (typeof container.clientWidth === 'number' && container.clientWidth > 0) {
+        w = container.clientWidth;
+      }
+
+      // If the container is collapsed (no content yet) walk up to find a
+      // reliable ancestor width; fall back to the viewport.
+      if (w < 40) {
+        var parent = container.parentElement;
+        var guard = 0;
+        while (parent && guard++ < 8) {
+          var pw = parent.clientWidth || (parent.getBoundingClientRect && parent.getBoundingClientRect().width) || 0;
+          if (pw > 40) { w = pw; break; }
+          parent = parent.parentElement;
+        }
+      }
+      if (w < 40 && typeof window !== 'undefined' && window.innerWidth) {
+        w = window.innerWidth;
+      }
+
+      // For height, use viewport as a reasonable proxy if the container itself
+      // is not yet tall (SVG collapses before layout).
+      if (h < 40 && typeof window !== 'undefined' && window.innerHeight) {
+        h = window.innerHeight;
+      }
+
+      if (w < 40 || h < 40) return null;
+      var ratio = w / h;
+      if (!isFinite(ratio) || ratio <= 0) return null;
+      return clamp(ratio, 0.25, 4.0);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ───── Orientation picker ─────────────────────────────────────────
+
+  function resolveTargetAspect(preference, aspectFromContainer) {
+    // Explicit preferences pin specific targets
+    if (preference === 'landscape') return 1.6;
+    if (preference === 'portrait') return 0.625;
+    if (preference === 'square') return 1.0;
+    // Compact & auto follow the container
+    if (preference === 'compact' || preference === 'auto' || preference == null) {
+      if (aspectFromContainer && isFinite(aspectFromContainer)) {
+        return clamp(aspectFromContainer, 0.5, 2.4);
+      }
+      return preference === 'compact' ? 1.5 : 1.2;
+    }
+    if (aspectFromContainer && isFinite(aspectFromContainer)) return aspectFromContainer;
+    return 1.2;
+  }
+
+  /**
+   * Decide TB vs LR based on:
+   *   1. Explicit `userDirection` when locked (honor user intent first).
+   *   2. Hierarchy rules (inheritance reads top-to-bottom in most cases).
+   *   3. Container aspect (landscape → LR, portrait → TB).
+   *   4. Preference (landscape/portrait/square/compact).
+   *
+   * Always returns a definitive `direction`. Never returns null.
+   *
+   * @param {object} opts
+   * @returns {{ direction: 'TB' | 'LR', targetAspect: number, hierarchyMode: string }}
+   */
+  function pickOrientation(opts) {
+    opts = opts || {};
+    var userDirection = opts.userDirection === 'LR' || opts.userDirection === 'TB' ? opts.userDirection : null;
+    var directionLocked = !!opts.directionLocked;
+    var hasHierarchy = !!opts.hasHierarchy;
+    var hierarchyDepth = finiteOr(opts.hierarchyDepth, 0);
+    var hierarchyBreadth = finiteOr(opts.hierarchyBreadth, 0);
+    var preference = opts.preference || null;
+    var aspect = opts.containerAspect;
+    if (!isFinite(aspect)) aspect = null;
+
+    var targetAspect = resolveTargetAspect(preference, aspect);
+
+    // 1. Locked user direction wins
+    if (directionLocked && userDirection) {
+      return { direction: userDirection, targetAspect: targetAspect, hierarchyMode: userDirection === 'LR' ? 'lr' : 'tb' };
+    }
+
+    // 2. Hierarchy pulls toward TB unless explicitly landscape + shallow
+    if (hasHierarchy) {
+      var allowLR = (preference === 'landscape' || preference === 'horizontal') && hierarchyDepth <= 3 && hierarchyBreadth >= 2;
+      if (allowLR) return { direction: 'LR', targetAspect: targetAspect, hierarchyMode: 'lr' };
+      return { direction: userDirection || 'TB', targetAspect: targetAspect, hierarchyMode: 'tb' };
+    }
+
+    // 3. Explicit landscape / portrait preferences force direction
+    if (preference === 'landscape') return { direction: 'LR', targetAspect: targetAspect };
+    if (preference === 'portrait') return { direction: 'TB', targetAspect: targetAspect };
+
+    // 4. Compact / auto: follow container aspect
+    if ((preference === 'compact' || preference === 'auto' || preference == null) && aspect != null) {
+      return { direction: aspect >= 1.15 ? 'LR' : (aspect <= 0.85 ? 'TB' : (userDirection || 'TB')), targetAspect: targetAspect };
+    }
+
+    return { direction: userDirection || 'TB', targetAspect: targetAspect };
+  }
+
+  // ───── Overlap detection (sweep + broad phase) ────────────────────
+
+  /**
+   * Deterministically detect every overlapping pair of nodes.
+   * Expects nodes with `{x, y, width, height}`. Ignores nodes with
+   * non-finite or zero-size rectangles to keep the algorithm robust
+   * in the presence of corrupt inputs.
+   *
+   * @param {Array} nodeList
+   * @param {number} [padding=0]
+   * @returns {Array<{a, b, overlapX: number, overlapY: number}>}
+   */
+  function detectOverlaps(nodeList, padding) {
+    var pad = finiteOr(padding, 0);
+    if (!Array.isArray(nodeList) || nodeList.length < 2) return [];
+
+    // Filter to valid rectangles
+    var valid = [];
+    for (var i = 0; i < nodeList.length; i++) {
+      var n = nodeList[i];
+      if (!n) continue;
+      var x = finiteOr(n.x, NaN);
+      var y = finiteOr(n.y, NaN);
+      var w = finiteOr(n.width != null ? n.width : (n.w != null ? n.w : (n.box ? n.box.width : NaN)), NaN);
+      var h = finiteOr(n.height != null ? n.height : (n.h != null ? n.h : (n.box ? n.box.height : NaN)), NaN);
+      if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h) || w <= 0 || h <= 0) continue;
+      valid.push({ node: n, x: x, y: y, w: w, h: h });
+    }
+
+    // Broad-phase: sort by X and walk forward while rectangles overlap horizontally.
+    valid.sort(function (a, b) { return a.x - b.x; });
+
+    var overlaps = [];
+    for (var a = 0; a < valid.length; a++) {
+      var ra = valid[a];
+      for (var b = a + 1; b < valid.length; b++) {
+        var rb = valid[b];
+        if (rb.x > ra.x + ra.w + pad) break; // no further rectangles can overlap
+        if (ra.x + ra.w + pad <= rb.x) continue;
+        if (rb.x + rb.w + pad <= ra.x) continue;
+        if (ra.y + ra.h + pad <= rb.y) continue;
+        if (rb.y + rb.h + pad <= ra.y) continue;
+        var overlapX = Math.min(ra.x + ra.w, rb.x + rb.w) - Math.max(ra.x, rb.x) + pad;
+        var overlapY = Math.min(ra.y + ra.h, rb.y + rb.h) - Math.max(ra.y, rb.y) + pad;
+        overlaps.push({ a: ra.node, b: rb.node, overlapX: overlapX, overlapY: overlapY });
+      }
+    }
+    return overlaps;
+  }
+
+  // ───── Overlap repair (fixed-point with axis locks) ───────────────
+
+  function nodeCoord(node, key) {
+    if (node[key] != null) return node[key];
+    if (key === 'width' && node.box) return node.box.width;
+    if (key === 'height' && node.box) return node.box.height;
+    return null;
+  }
+
+  /**
+   * Repair overlaps by separating pairs iteratively. Safeguards:
+   *  • Hard iteration cap prevents infinite loops.
+   *  • `lockX` / `lockY` maps (node.id → true) keep specific axes immovable
+   *    so hierarchy-row Y positions or swimlane X positions survive repair.
+   *  • Moves are proportional to overlap so large overlaps don't oscillate.
+   *  • On non-convergence returns diagnostics instead of throwing.
+   *
+   * Mutates the node objects in place (setting node.x / node.y).
+   *
+   * @param {Array} nodeList
+   * @param {object} [opts]
+   * @returns {{ converged: boolean, iterations: number, remaining: number }}
+   */
+  function repairOverlaps(nodeList, opts) {
+    opts = opts || {};
+    var padding = finiteOr(opts.padding, 8);
+    var maxIter = Math.max(1, finiteOr(opts.maxIter, 14));
+    var lockX = opts.lockX || {};
+    var lockY = opts.lockY || {};
+    // Damping close to 1 converges in one step (at the cost of possibly
+    // over-shooting). Stay a little below so multi-pair cascades don't
+    // oscillate.
+    var damping = finiteOr(opts.damping, 0.9);
+    if (damping < 0.4) damping = 0.4;
+    if (damping > 1.0) damping = 1.0;
+    // Tolerance below which sub-pixel overlap is treated as resolved.
+    var tolerance = finiteOr(opts.tolerance, 0.5);
+
+    if (!Array.isArray(nodeList) || nodeList.length < 2) {
+      return { converged: true, iterations: 0, remaining: 0 };
+    }
+
+    for (var iter = 0; iter < maxIter; iter++) {
+      var overlaps = detectOverlaps(nodeList, padding);
+      // Treat sub-tolerance overlaps as resolved to avoid geometric-series
+      // convergence lag (the last few iterations halve a near-zero residual).
+      var significant = [];
+      for (var oi = 0; oi < overlaps.length; oi++) {
+        if (overlaps[oi].overlapX > tolerance && overlaps[oi].overlapY > tolerance) {
+          significant.push(overlaps[oi]);
+        }
+      }
+      if (significant.length === 0) {
+        return { converged: true, iterations: iter, remaining: 0 };
+      }
+
+      // Sort biggest overlaps first so one correction can cascade away several
+      significant.sort(function (p, q) {
+        return (q.overlapX * q.overlapY) - (p.overlapX * p.overlapY);
+      });
+
+      for (var k = 0; k < significant.length; k++) {
+        var pair = significant[k];
+        separatePair(pair.a, pair.b, padding, lockX, lockY, damping);
+      }
+    }
+
+    var finalOverlaps = detectOverlaps(nodeList, padding);
+    var remaining = 0;
+    for (var fi = 0; fi < finalOverlaps.length; fi++) {
+      if (finalOverlaps[fi].overlapX > tolerance && finalOverlaps[fi].overlapY > tolerance) remaining++;
+    }
+    return { converged: remaining === 0, iterations: maxIter, remaining: remaining };
+  }
+
+  function separatePair(a, b, pad, lockX, lockY, damping) {
+    if (!a || !b) return;
+    var ax = finiteOr(a.x, 0), ay = finiteOr(a.y, 0);
+    var bx = finiteOr(b.x, 0), by = finiteOr(b.y, 0);
+    var aw = finiteOr(nodeCoord(a, 'width'), 0), ah = finiteOr(nodeCoord(a, 'height'), 0);
+    var bw = finiteOr(nodeCoord(b, 'width'), 0), bh = finiteOr(nodeCoord(b, 'height'), 0);
+    if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return;
+
+    var overlapX = Math.min(ax + aw, bx + bw) - Math.max(ax, bx) + pad;
+    var overlapY = Math.min(ay + ah, by + bh) - Math.max(ay, by) + pad;
+    if (overlapX <= 0 || overlapY <= 0) return;
+
+    var idA = a.id != null ? a.id : (a.name || null);
+    var idB = b.id != null ? b.id : (b.name || null);
+    var canMoveXA = !(idA && lockX[idA]);
+    var canMoveXB = !(idB && lockX[idB]);
+    var canMoveYA = !(idA && lockY[idA]);
+    var canMoveYB = !(idB && lockY[idB]);
+
+    // Prefer separating along the smaller overlap direction — lower total
+    // displacement. But only if at least one node can move on that axis.
+    var preferX = overlapX <= overlapY && (canMoveXA || canMoveXB);
+    if (!preferX && !(canMoveYA || canMoveYB) && (canMoveXA || canMoveXB)) preferX = true;
+
+    var d = damping;
+    if (preferX) {
+      var movers = (canMoveXA ? 1 : 0) + (canMoveXB ? 1 : 0);
+      if (!movers) return;
+      var shiftX = (overlapX * d) / movers;
+      var leftFirstX = ax <= bx;
+      if (canMoveXA) a.x = ax + (leftFirstX ? -shiftX : shiftX);
+      if (canMoveXB) b.x = bx + (leftFirstX ? shiftX : -shiftX);
+    } else {
+      var moversY = (canMoveYA ? 1 : 0) + (canMoveYB ? 1 : 0);
+      if (!moversY) {
+        // Both Y-locked — fall back to any available X motion
+        var xm = (canMoveXA ? 1 : 0) + (canMoveXB ? 1 : 0);
+        if (!xm) return;
+        var shiftX2 = (overlapX * d) / xm;
+        var leftFirstX2 = ax <= bx;
+        if (canMoveXA) a.x = ax + (leftFirstX2 ? -shiftX2 : shiftX2);
+        if (canMoveXB) b.x = bx + (leftFirstX2 ? shiftX2 : -shiftX2);
+        return;
+      }
+      var shiftY = (overlapY * d) / moversY;
+      var topFirst = ay <= by;
+      if (canMoveYA) a.y = ay + (topFirst ? -shiftY : shiftY);
+      if (canMoveYB) b.y = by + (topFirst ? shiftY : -shiftY);
+    }
+  }
+
+  // ───── Coordinate hygiene ─────────────────────────────────────────
+
+  /**
+   * Strip NaN/Infinity and oversized values from a node map produced by the
+   * layout engine. Guarantees that downstream SVG generation never receives
+   * garbage coordinates (which would produce the "NaN|undefined" geometry
+   * bug the existing test suite checks for).
+   */
+  function normalizeCoords(nodes) {
+    if (!nodes) return nodes;
+    var ids = Object.keys(nodes);
+    for (var i = 0; i < ids.length; i++) {
+      var n = nodes[ids[i]];
+      if (!n) continue;
+      n.x = finiteOr(n.x, 0);
+      n.y = finiteOr(n.y, 0);
+      if (n.width != null) n.width = Math.max(1, finiteOr(n.width, 1));
+      if (n.height != null) n.height = Math.max(1, finiteOr(n.height, 1));
+    }
+    return nodes;
+  }
+
+  // ───── Bounds ─────────────────────────────────────────────────────
+
+  function boundsOf(nodes) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    var any = false;
+    var ids = nodes ? Object.keys(nodes) : [];
+    for (var i = 0; i < ids.length; i++) {
+      var n = nodes[ids[i]];
+      if (!n) continue;
+      var x = finiteOr(n.x, NaN);
+      var y = finiteOr(n.y, NaN);
+      var w = finiteOr(n.width, NaN);
+      var h = finiteOr(n.height, NaN);
+      if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h)) continue;
+      any = true;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x + w > maxX) maxX = x + w;
+      if (y + h > maxY) maxY = y + h;
+    }
+    if (!any) return { minX: 0, minY: 0, maxX: 0, maxY: 0, width: 0, height: 0, aspect: 1 };
+    var width = Math.max(1, maxX - minX);
+    var height = Math.max(1, maxY - minY);
+    return {
+      minX: minX, minY: minY, maxX: maxX, maxY: maxY,
+      width: width, height: height,
+      aspect: width / height
+    };
+  }
+
+  // ───── Hierarchy analysis ─────────────────────────────────────────
+
+  /**
+   * Quick topology inspection: does this graph have hierarchy edges, and if so
+   * how deep / broad is the hierarchy. Used by pickOrientation to decide
+   * whether LR rotation is safe for an inheritance diagram.
+   *
+   * Recognizes:
+   *   • class-diagram: `type === 'generalization'` or `'realization'`
+   *   • use-case:     `type === 'generalization'`
+   *   • state/activity: no intrinsic hierarchy → returns hasHierarchy=false
+   */
+  function analyzeHierarchy(edges) {
+    if (!Array.isArray(edges) || edges.length === 0) {
+      return { hasHierarchy: false, depth: 0, breadth: 0 };
+    }
+    var parentOf = {};
+    var childrenOf = {};
+    var anyHier = false;
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      if (!e) continue;
+      var t = e.type || (e.data && e.data.type);
+      if (t !== 'generalization' && t !== 'realization') continue;
+      anyHier = true;
+      var src = e.source != null ? e.source : e.from;
+      var tgt = e.target != null ? e.target : e.to;
+      if (src == null || tgt == null) continue;
+      parentOf[src] = tgt;
+      if (!childrenOf[tgt]) childrenOf[tgt] = [];
+      childrenOf[tgt].push(src);
+    }
+    if (!anyHier) return { hasHierarchy: false, depth: 0, breadth: 0 };
+
+    // Depth = longest parent chain; Breadth = max children of any node.
+    var depth = 0;
+    var breadth = 0;
+    var allNodes = {};
+    var n;
+    for (n in parentOf) allNodes[n] = true;
+    for (n in childrenOf) {
+      allNodes[n] = true;
+      if (childrenOf[n].length > breadth) breadth = childrenOf[n].length;
+    }
+    function chainLen(id, seen) {
+      if (seen[id]) return 0;
+      seen[id] = true;
+      var p = parentOf[id];
+      if (!p) return 1;
+      return 1 + chainLen(p, seen);
+    }
+    for (n in allNodes) {
+      var len = chainLen(n, {});
+      if (len > depth) depth = len;
+    }
+    return { hasHierarchy: true, depth: depth, breadth: breadth };
+  }
+
+  // ───── Export ─────────────────────────────────────────────────────
+
+  window.UMLLayoutCore = {
+    // measurement
+    measureEdgeRequirement: measureEdgeRequirement,
+    computeMinGaps: computeMinGaps,
+    // orientation
+    containerAspect: containerAspect,
+    resolveTargetAspect: resolveTargetAspect,
+    pickOrientation: pickOrientation,
+    analyzeHierarchy: analyzeHierarchy,
+    // overlap
+    detectOverlaps: detectOverlaps,
+    repairOverlaps: repairOverlaps,
+    separatePair: separatePair,
+    // hygiene
+    normalizeCoords: normalizeCoords,
+    boundsOf: boundsOf,
+    // internal helpers exposed for tests
+    _internal: { finiteOr: finiteOr, clamp: clamp, approxTextWidth: approxTextWidth }
+  };
+})();
+
 /**
  * Advanced Algorithmic Foundations for UML Visualization
  * Layout Engine utilizing Sugiyama Framework, Barycenter Heuristics,
@@ -2398,16 +3008,26 @@
     };
   }
 
-  function buildLayoutCandidates(gapX, gapY, direction, layoutPreference, directionLocked) {
+  function buildLayoutCandidates(gapX, gapY, direction, layoutPreference, directionLocked, measuredFloor) {
     var candidates = [];
     var seen = {};
     var otherDirection = direction === 'LR' ? 'TB' : 'LR';
 
+    // Measured floor = the minimum gap the labels/markers of this specific
+    // diagram need. Applied only in compact mode — non-compact layouts
+    // already size their effective gaps upstream to fit labels, and forcing
+    // the floor there would collapse the compact-vs-comfortable distinction
+    // the candidate search is meant to preserve.
+    var applyFloor = layoutPreference === 'compact';
+    var floorX = applyFloor && measuredFloor && isFinite(measuredFloor.minX) ? measuredFloor.minX : null;
+    var floorY = applyFloor && measuredFloor && isFinite(measuredFloor.minY) ? measuredFloor.minY : null;
     var minGapFloor = layoutPreference === 'compact' ? 14 : 24;
 
     function addCandidate(candidateDirection, candidateGapX, candidateGapY) {
       var gx = Math.max(minGapFloor, Math.round(candidateGapX));
       var gy = Math.max(minGapFloor, Math.round(candidateGapY));
+      if (floorX != null) gx = Math.max(gx, floorX);
+      if (floorY != null) gy = Math.max(gy, floorY);
       var key = candidateDirection + '|' + gx + '|' + gy;
       if (seen[key]) return;
       seen[key] = true;
@@ -2500,37 +3120,50 @@
     return candidates;
   }
 
-  function scoreLayoutCandidate(bounds, layoutPreference, candidate, fallbackDirection) {
+  function scoreLayoutCandidate(bounds, layoutPreference, candidate, fallbackDirection, containerAspect) {
     var targetAspect = 1.2;
     var aspectWeight = 55;
 
+    // Compact mode now targets the actual container aspect rather than the
+    // old hardcoded 1.5. That was the root cause of landscape/portrait drift.
     if (layoutPreference === 'compact') {
-      // Compact: minimize total area, favor landscape for slides/small containers
+      var compactTarget = (window.UMLLayoutCore && typeof window.UMLLayoutCore.resolveTargetAspect === 'function')
+        ? window.UMLLayoutCore.resolveTargetAspect('compact', containerAspect)
+        : (containerAspect && isFinite(containerAspect) ? Math.max(0.5, Math.min(2.4, containerAspect)) : 1.5);
       var score = Math.log(Math.max(bounds.area, 1)) * 18;
       score += Math.log(Math.max(bounds.width, bounds.height) + 1) * 6;
-      // Favor landscape aspect (target 1.5) — compact is for landscape containers
-      score += Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / 1.5)) * 25;
-      // No direction penalty — let area and aspect drive the choice
+      score += Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / compactTarget)) * 30;
       return score;
     }
 
+    // For landscape/portrait, direction is the user's PRIMARY commitment.
+    // A tiny aspect weight + large direction penalty ensures the chosen
+    // direction wins even when the graph shape produces an extreme aspect
+    // (e.g. a long chain is 14:1 wide in LR — still the right answer for
+    // `layout landscape`).
     if (layoutPreference === 'square') {
       targetAspect = 1;
-      aspectWeight = 120;
+      aspectWeight = 100;
     } else if (layoutPreference === 'landscape') {
       targetAspect = 1.6;
-      aspectWeight = 120;
+      aspectWeight = 40;
     } else if (layoutPreference === 'portrait') {
       targetAspect = 0.625;
-      aspectWeight = 120;
+      aspectWeight = 40;
+    } else if (containerAspect && isFinite(containerAspect)) {
+      targetAspect = Math.max(0.6, Math.min(2.2, containerAspect));
+      aspectWeight = 70;
     }
 
     var score = Math.abs(Math.log(Math.max(bounds.aspect, 0.01) / targetAspect)) * aspectWeight;
     score += Math.log(Math.max(bounds.area, 1)) * 2.5;
     score += Math.log(Math.max(bounds.width, bounds.height) + 1) * 3;
 
-    if (layoutPreference === 'landscape' && candidate.direction !== 'LR') score += 35;
-    if (layoutPreference === 'portrait' && candidate.direction !== 'TB') score += 35;
+    // Huge direction penalty — the user asked for a specific orientation,
+    // deliver it. 500 points dwarfs any plausible aspect-term value so this
+    // is effectively a hard constraint.
+    if (layoutPreference === 'landscape' && candidate.direction !== 'LR') score += 500;
+    if (layoutPreference === 'portrait' && candidate.direction !== 'TB') score += 500;
     if (layoutPreference === 'auto' && candidate.direction !== fallbackDirection) score += 4;
 
     return score;
@@ -2771,12 +3404,15 @@
     return { nodes: packedNodes, edges: packedEdges, direction: direction };
   }
 
-  function computeDirectedLayout(nodes, edges, gapX, gapY, direction, layoutPreference) {
+  function computeDirectedLayout(nodes, edges, gapX, gapY, direction, layoutPreference, extra) {
+    extra = extra || {};
+    var repairCrossLayerOverlaps = !!extra.repairCrossLayerOverlaps;
+
     var components = findWeaklyConnectedComponents(nodes, edges);
     if (components.length > 1) {
       var componentLayouts = components.map(function(component) {
         return normalizeLayoutResult(
-          computeDirectedLayout(component.nodes, component.edges, gapX, gapY, direction, layoutPreference)
+          computeDirectedLayout(component.nodes, component.edges, gapX, gapY, direction, layoutPreference, extra)
         );
       });
       return packDisconnectedLayouts(componentLayouts, gapX, gapY, direction, layoutPreference);
@@ -3062,7 +3698,7 @@
       });
     }
 
-    // Phase 3: overlap removal (forward pass, enforces min gap)
+    // Phase 3: overlap removal (forward pass, enforces min gap within layer)
     for (var l = 0; l <= layerMax; l++) {
       if (!layerGroups[l]) continue;
       var g = layerGroups[l];
@@ -3073,6 +3709,67 @@
           for (var j = i; j < g.length; j++) {
             coords[g[j]].x += shift;
           }
+        }
+      }
+    }
+
+    // Phase 3b: cross-layer overlap repair. Opt-in, since running it
+    // unconditionally can shift stable layouts and invalidate downstream
+    // multiplicity / label placement heuristics that assume specific bend
+    // geometries. Renderers pass `repairCrossLayerOverlaps: true` (typically
+    // in compact mode) to enable it.
+    if (repairCrossLayerOverlaps &&
+        window.UMLLayoutCore && typeof window.UMLLayoutCore.repairOverlaps === 'function') {
+      // Build lightweight node list that shares storage with `coords` so the
+      // repair mutates it in place. Hierarchy-row Y is locked — preserving
+      // layer ordering is non-negotiable. X is free to shift.
+      var repairList = [];
+      var lockY = {};
+      for (var rid in coords) {
+        if (!Object.prototype.hasOwnProperty.call(coords, rid)) continue;
+        if (rid.indexOf('--dummy--') === 0) continue; // dummies aren't real nodes
+        var rc = coords[rid];
+        repairList.push({ id: rid, _ref: rc, x: rc.x, y: rc.y, width: rc.w, height: rc.h });
+        lockY[rid] = true; // hold layer Y stable
+      }
+      // Pre-check: only run the pass if there is at least one *real* overlap.
+      // Avoids mutating already-valid layouts.
+      var preCheck = window.UMLLayoutCore.detectOverlaps(repairList, 0);
+      if (preCheck.length > 0) {
+        var repairResult = window.UMLLayoutCore.repairOverlaps(repairList, {
+          padding: 2,       // tight — we're only fixing actual overlap
+          maxIter: 16,
+          lockY: lockY,
+          damping: 0.85,
+          tolerance: 0.5
+        });
+        // Write adjusted X back to the canonical coords map, rounded to
+        // integer pixels so we never introduce sub-pixel offsets that show
+        // up as tiny (<12px) doglegs in downstream orthogonal routing.
+        for (var ri = 0; ri < repairList.length; ri++) {
+          var entry = repairList[ri];
+          if (entry._ref) entry._ref.x = Math.round(entry.x);
+        }
+        // Re-enforce layer min-gap in case repair pushed neighbors too close.
+        for (var l2 = 0; l2 <= layerMax; l2++) {
+          if (!layerGroups[l2]) continue;
+          var g2 = layerGroups[l2].slice().sort(function(a, b) {
+            return (coords[a] ? coords[a].x : 0) - (coords[b] ? coords[b].x : 0);
+          });
+          for (var i2 = 1; i2 < g2.length; i2++) {
+            var prev2 = coords[g2[i2-1]], cur2 = coords[g2[i2]];
+            if (!prev2 || !cur2) continue;
+            if (cur2.x < prev2.x + prev2.w + gapX) {
+              cur2.x = prev2.x + prev2.w + gapX;
+            }
+          }
+          // Keep layer order stable — overwrite group with the sorted one so
+          // downstream code sees consistent left-to-right.
+          layerGroups[l2] = g2;
+        }
+        // Record diagnostics for test hooks; no-op in production.
+        if (repairResult && !repairResult.converged && typeof window !== 'undefined') {
+          window.__UMLLayoutLastRepair = repairResult;
         }
       }
     }
@@ -3231,23 +3928,90 @@
     var layoutPreference = options.layoutPreference || null;
     var directionLocked = !!options.directionLocked;
 
-    if (!layoutPreference) {
-      return computeDirectedLayout(nodes, edges, gapX, gapY, direction, null);
+    // New: container aspect + measured gap floor. These make compact-mode
+    // output fit its actual host, and keep gaps from collapsing under what
+    // the diagram's labels/markers need. Both are fully optional — the
+    // engine falls back to pre-existing behavior when omitted.
+    var containerAspect = isFinite(options.containerAspect) ? options.containerAspect : null;
+    var measuredFloor = null;
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var nodesById = {};
+        if (Array.isArray(nodes)) {
+          for (var ni = 0; ni < nodes.length; ni++) if (nodes[ni] && nodes[ni].id != null) nodesById[nodes[ni].id] = nodes[ni];
+        }
+        measuredFloor = window.UMLLayoutCore.computeMinGaps(edges || [], nodesById, {
+          floorX: layoutPreference === 'compact' ? 24 : 32,
+          floorY: layoutPreference === 'compact' ? 22 : 28,
+          fontSize: options.labelFontSize || 13,
+          markerExtent: options.markerExtent || 14
+        });
+      } catch (e) {
+        measuredFloor = null;
+      }
     }
 
-    var candidates = buildLayoutCandidates(gapX, gapY, direction, layoutPreference, directionLocked);
+    // Orientation: let UMLLayoutCore pick a direction when the caller passed
+    // a container aspect. The user's direction lock still wins.
+    if (!directionLocked && containerAspect != null &&
+        window.UMLLayoutCore && typeof window.UMLLayoutCore.pickOrientation === 'function') {
+      try {
+        var hier = window.UMLLayoutCore.analyzeHierarchy(edges || []);
+        var pick = window.UMLLayoutCore.pickOrientation({
+          userDirection: direction,
+          directionLocked: false,
+          hasHierarchy: hier.hasHierarchy,
+          hierarchyDepth: hier.depth,
+          hierarchyBreadth: hier.breadth,
+          preference: layoutPreference,
+          containerAspect: containerAspect
+        });
+        if (pick && pick.direction) direction = pick.direction;
+      } catch (e) { /* keep original direction */ }
+    }
+
+    var fallbackResult = null;
+    // Cross-layer overlap repair is opt-in. It's needed most in compact mode
+    // (where gaps are aggressive and the chance of cross-row overlap rises),
+    // and can be explicitly requested by any caller via options.repairCrossLayerOverlaps.
+    var repairCrossLayerOverlaps = !!options.repairCrossLayerOverlaps ||
+      layoutPreference === 'compact';
+    function runLayout(gx, gy, dir, pref) {
+      try {
+        return computeDirectedLayout(nodes, edges, gx, gy, dir, pref, {
+          repairCrossLayerOverlaps: repairCrossLayerOverlaps
+        });
+      } catch (err) {
+        // Never throw out of the public API — give callers a safe, empty
+        // layout and let SVG generation fall back gracefully.
+        if (typeof window !== 'undefined') window.__UMLLayoutLastError = String(err);
+        return { nodes: {}, edges: [], direction: dir };
+      }
+    }
+
+    if (!layoutPreference) {
+      return runLayout(gapX, gapY, direction, null);
+    }
+
+    var candidates = buildLayoutCandidates(gapX, gapY, direction, layoutPreference, directionLocked, measuredFloor);
     var best = null;
     for (var ci = 0; ci < candidates.length; ci++) {
       var candidate = candidates[ci];
-      var result = computeDirectedLayout(nodes, edges, candidate.gapX, candidate.gapY, candidate.direction, layoutPreference);
+      var result = runLayout(candidate.gapX, candidate.gapY, candidate.direction, layoutPreference);
+      if (!fallbackResult) fallbackResult = result;
       var bounds = computeLayoutBounds(result);
-      var score = scoreLayoutCandidate(bounds, layoutPreference, candidate, direction);
+      var score = scoreLayoutCandidate(bounds, layoutPreference, candidate, direction, containerAspect);
       if (!best || score < best.score - 0.01 || (Math.abs(score - best.score) <= 0.01 && bounds.area < best.bounds.area)) {
         best = { result: result, bounds: bounds, score: score };
       }
     }
 
-    return best ? best.result : computeDirectedLayout(nodes, edges, gapX, gapY, direction, layoutPreference);
+    var final = best ? best.result : (fallbackResult || runLayout(gapX, gapY, direction, layoutPreference));
+    // Strip NaN/Infinity defensively before returning.
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.normalizeCoords === 'function' && final) {
+      try { window.UMLLayoutCore.normalizeCoords(final.nodes); } catch (e) { /* no-op */ }
+    }
+    return final;
   };
 
   window.UMLAdvancedLayout = LayoutEngine;
@@ -3922,31 +4686,52 @@
     var effectiveDirection = parsed.direction || 'TB';
     if (hasHierarchyEdges) {
       // UML inheritance hierarchies should read top-to-bottom regardless of
-      // footprint preference, so keep the hierarchy vertical and use spacing
-      // changes rather than rotating the graph sideways.
+      // footprint preference (G139), so keep the hierarchy vertical unless
+      // the user explicitly chose a landscape layout on a shallow tree.
       effectiveDirection = 'TB';
     }
 
     var effectiveGapY = CFG.gapY;
+
+    // Measured floor: smallest gap that still fits every edge's labels and
+    // markers. Used as the compact-mode minimum so labels never get crushed.
+    var measuredFloor = { minX: 0, minY: 0 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var nodesById = {};
+        for (var nbi = 0; nbi < layoutNodes.length; nbi++) nodesById[layoutNodes[nbi].id] = layoutNodes[nbi];
+        measuredFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, nodesById, {
+          fontSize: CFG.fontSizeStereotype,
+          markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4,
+          floorX: 28,
+          floorY: 24
+        });
+      } catch (e) { measuredFloor = { minX: 28, minY: 24 }; }
+    }
+
     if (layoutPreference === 'compact') {
-      // Compact with hierarchy: widen horizontally, tighten vertically
-      // to produce a landscape footprint while keeping inheritance top-to-bottom.
-      if (hasHierarchyEdges) {
-        effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.75));
-        effectiveGapY = Math.max(28, Math.round(CFG.gapY * 0.45));
-      } else {
-        effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
-        effectiveGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
-      }
+      // Measured compact: target a MUCH smaller footprint than normal mode,
+      // falling back to a soft floor only when labels would completely
+      // disappear. We shrink to ~50% (hierarchy) or 55% (free) of normal
+      // gaps, and use *half* the measured floor as the hard lower bound —
+      // labels have white-stroke backgrounds so modest overlap with edges
+      // is visually fine, and the downstream label placer will find
+      // alternate positions for the rest.
+      var compactScaleX = hasHierarchyEdges ? 0.55 : 0.5;
+      var compactScaleY = hasHierarchyEdges ? 0.4 : 0.45;
+      var softFloorX = Math.max(20, Math.round(measuredFloor.minX * 0.45));
+      var softFloorY = Math.max(20, Math.round(measuredFloor.minY * 0.5));
+      effectiveGapX = Math.max(softFloorX, Math.round(effectiveGapX * compactScaleX));
+      effectiveGapY = Math.max(softFloorY, Math.round(CFG.gapY * compactScaleY));
     } else if (hasHierarchyEdges && layoutPreference === 'landscape') {
       effectiveGapX = Math.max(effectiveGapX, Math.round(effectiveGapX * 1.35));
-      effectiveGapY = Math.max(36, Math.round(CFG.gapY * 0.82));
+      effectiveGapY = Math.max(36, measuredFloor.minY, Math.round(CFG.gapY * 0.82));
     } else if (hasHierarchyEdges && layoutPreference === 'portrait') {
-      effectiveGapX = Math.max(36, Math.round(effectiveGapX * 0.82));
+      effectiveGapX = Math.max(36, measuredFloor.minX, Math.round(effectiveGapX * 0.82));
       effectiveGapY = Math.max(CFG.gapY, Math.round(CFG.gapY * 1.3));
     } else if (hasHierarchyEdges && layoutPreference === 'square') {
       effectiveGapX = Math.max(effectiveGapX, Math.round(effectiveGapX * 1.08));
-      effectiveGapY = Math.max(40, Math.round(CFG.gapY * 0.92));
+      effectiveGapY = Math.max(40, measuredFloor.minY, Math.round(CFG.gapY * 0.92));
     }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
@@ -3954,7 +4739,10 @@
       gapY: effectiveGapY,
       direction: effectiveDirection,
       layoutPreference: (hasHierarchyEdges && layoutPreference !== 'compact') ? null : layoutPreference,
-      directionLocked: hasHierarchyEdges || !!parsed.directionLocked
+      directionLocked: hasHierarchyEdges || !!parsed.directionLocked,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSizeStereotype,
+      markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4
     });
 
     // Read back positions
@@ -6081,15 +6869,30 @@
   }
 
   function routeSide(fromE, toE, avoidFromBottom) {
-    if (avoidFromBottom) return 'bottom';
     var fromCx = fromE.x + fromE.box.width / 2;
     var fromCy = fromE.y + fromE.box.height / 2;
     var toCx = toE.x + toE.box.width / 2;
     var toCy = toE.y + toE.box.height / 2;
-    if (Math.abs(toCx - fromCx) > Math.abs(toCy - fromCy) * 0.6) {
-      return (toCx > fromCx) ? 'right' : 'left';
+    var dx = toCx - fromCx;
+    var dy = toCy - fromCy;
+
+    // When the source's bottom is already occupied by an inheritance
+    // triangle, prefer a horizontal exit toward the target so the route
+    // doesn't pass through the triangle zone or wrap around behind the
+    // source box. Falling back to the bottom (as the original code did)
+    // produced lines "crossing behind" classes with inheritance at bottom.
+    if (avoidFromBottom) {
+      if (Math.abs(dx) >= 1) return dx > 0 ? 'right' : 'left';
+      // Target directly below with zero horizontal offset: we can't go
+      // down (triangle zone) and the sides have no advantage — pick top
+      // as the least-bad option since the route will wrap around.
+      return dy < 0 ? 'top' : 'right';
     }
-    return (toCy > fromCy) ? 'bottom' : 'top';
+
+    if (Math.abs(dx) > Math.abs(dy) * 0.6) {
+      return dx > 0 ? 'right' : 'left';
+    }
+    return dy > 0 ? 'bottom' : 'top';
   }
 
   function routeSourceSideForRelation(fromE, toE, relationType, avoidFromBottom) {
@@ -6378,6 +7181,14 @@
 
     var colors = UMLShared.getThemeColors(container);
     colors.bg = window.getComputedStyle(container).getPropertyValue('--uml-bg').trim() || 'transparent';
+
+    // Attach the live container's aspect ratio so compact mode can target
+    // the actual host (widescreen/portrait/square) instead of the old
+    // hardcoded 1.5. Safe on SSR — returns null when DOM is unavailable.
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
+
     var layout = computeLayout(parsed);
     var svgStr = generateSVG(layout, parsed, colors);
     container.innerHTML = svgStr;
@@ -6746,13 +7557,26 @@
     var messages = parsed.messages;
     var spacing = computeSequenceSpacing(participants);
 
-    // Compact mode: tighten all spacing
-    if (parsed.layoutPreference === 'compact') {
-      spacing.participantGap = Math.max(16, Math.round(spacing.participantGap * 0.5));
-      spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.6));
-      spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.7));
+    // Compact mode: tighten spacing aggressively. Use a measured soft floor
+    // based on labels so messages stay readable, but scale gaps much smaller
+    // than the old 0.5× pass (which, combined with the new floor, made
+    // compact nearly indistinguishable from normal mode).
+    var seqMaxLabelW = 0;
+    for (var mli = 0; mli < messages.length; mli++) {
+      var mm = messages[mli];
+      if (mm && mm.label) {
+        seqMaxLabelW = Math.max(seqMaxLabelW, UMLShared.textWidth(mm.label, false, CFG.fontSize));
+      }
     }
-    var messageGapY = parsed.layoutPreference === 'compact' ? Math.max(18, Math.round(CFG.messageGapY * 0.55)) : CFG.messageGapY;
+    // Soft floor at roughly half the widest label — labels have white-stroke
+    // background, so some edge/box overlap is acceptable in compact mode.
+    var seqSoftFloorGap = Math.max(20, Math.round(seqMaxLabelW * 0.5) + 8);
+    if (parsed.layoutPreference === 'compact') {
+      spacing.participantGap = Math.max(seqSoftFloorGap, Math.round(spacing.participantGap * 0.45));
+      spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.55));
+      spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.6));
+    }
+    var messageGapY = parsed.layoutPreference === 'compact' ? Math.max(18, Math.round(CFG.messageGapY * 0.5)) : CFG.messageGapY;
 
     // ── Measure participant boxes ──
     var partWidths = [];
@@ -7722,12 +8546,29 @@
         }
       }
       if (subNodes.length > 0) {
-        var subGapScale = parsed.layoutPreference === 'compact' ? 0.35 : 0.7;
+        // Composite-state sub-layout respects the measured floor too: in
+        // compact mode we shrink the sub-diagram's gaps but never below the
+        // space transition labels would need.
+        var subGapScale = parsed.layoutPreference === 'compact' ? 0.5 : 0.7;
+        var subFloor = { minX: 16, minY: 16 };
+        if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+          try {
+            subFloor = window.UMLLayoutCore.computeMinGaps(subEdges, null, {
+              fontSize: CFG.fontSize,
+              markerExtent: CFG.arrowSize + 2,
+              floorX: 16,
+              floorY: 16
+            });
+          } catch (e) { /* keep default */ }
+        }
         var subResult = window.UMLAdvancedLayout.compute(subNodes, subEdges, {
-          gapX: Math.max(14, Math.round(CFG.gapX * subGapScale)),
-          gapY: Math.max(14, Math.round(CFG.gapY * subGapScale)),
+          gapX: Math.max(subFloor.minX, 14, Math.round(CFG.gapX * subGapScale)),
+          gapY: Math.max(subFloor.minY, 14, Math.round(CFG.gapY * subGapScale)),
           direction: parsed.direction || 'TB',
-          layoutPreference: parsed.layoutPreference || null
+          layoutPreference: parsed.layoutPreference || null,
+          containerAspect: parsed._containerAspect,
+          labelFontSize: CFG.fontSize,
+          markerExtent: CFG.arrowSize + 2
         });
         // Compute sub-bounding box
         var sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
@@ -7764,15 +8605,33 @@
 
     var stateGapX = CFG.gapX;
     var stateGapY = CFG.gapY;
+    var stateFloor = { minX: 22, minY: 20 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var sNodesById = {};
+        for (var sni = 0; sni < layoutNodes.length; sni++) sNodesById[layoutNodes[sni].id] = layoutNodes[sni];
+        stateFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, sNodesById, {
+          fontSize: CFG.fontSize,
+          markerExtent: CFG.arrowSize + 4,
+          floorX: 22,
+          floorY: 20
+        });
+      } catch (e) { /* keep default floor */ }
+    }
     if (parsed.layoutPreference === 'compact') {
-      stateGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
-      stateGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      var stateSoftX = Math.max(18, Math.round(stateFloor.minX * 0.5));
+      var stateSoftY = Math.max(16, Math.round(stateFloor.minY * 0.5));
+      stateGapX = Math.max(stateSoftX, Math.round(CFG.gapX * 0.45));
+      stateGapY = Math.max(stateSoftY, Math.round(CFG.gapY * 0.45));
     }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: stateGapX,
       gapY: stateGapY,
       direction: parsed.direction || 'TB',
-      layoutPreference: parsed.layoutPreference || null
+      layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.arrowSize + 4
     });
 
     // Map coords back for top-level states
@@ -8156,6 +9015,66 @@
         }
       }
 
+      // Obstacle avoidance: transitions must never pass through other
+      // states (including initial/final pseudostates). Always check —
+      // even distributed-exit and back-edge routes can cross a state.
+      //
+      // Composite states are PERMEABLE obstacles: transitions crossing
+      // their boundary to reach a nested state are semantically valid, so
+      // we exclude composite states from the obstacle list. Likewise we
+      // exclude any state that is an ancestor of the source or target,
+      // and any nested child of a composite whose peer is the other end
+      // of the edge.
+      if (!isBackEdge) {
+        var stateObsForRoute = [];
+        var stateSkipNames = {};
+        var entryByPos = {};
+        for (var entryId in entries) {
+          var e = entries[entryId];
+          entryByPos[Math.round(e.x) + ',' + Math.round(e.y)] = { id: entryId, entry: e };
+        }
+        for (var soi = 0; soi < stateObstacles.length; soi++) {
+          var so = stateObstacles[soi];
+          var obName = 'state' + soi;
+          // Resolve which entry this obstacle corresponds to.
+          var lookup = entryByPos[Math.round(so.x) + ',' + Math.round(so.y)];
+          var isComposite = lookup && lookup.entry.state && lookup.entry.state.isComposite;
+          if (isComposite) {
+            // Composite state rectangles are visual containers only.
+            stateSkipNames[obName] = true;
+          }
+          stateObsForRoute.push({
+            x1: so.x, y1: so.y,
+            x2: so.x + so.w, y2: so.y + so.h,
+            name: obName
+          });
+          if (so.x === fromE.x && so.y === fromE.y) stateSkipNames[obName] = true;
+          if (so.x === toE.x && so.y === toE.y) stateSkipNames[obName] = true;
+        }
+        if (UMLShared.routeHitsObstacle(points, stateObsForRoute, stateSkipNames, null)) {
+          // Pick source/target sides from the endpoint geometry. For
+          // customExits we respect the computed exit point; otherwise
+          // derive sides from the dx/dy of the endpoints.
+          var srcSide2;
+          if (customExits[ti] && customExits[ti].side) {
+            srcSide2 = customExits[ti].side;
+          } else {
+            srcSide2 = isHorizontal ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
+          }
+          var tgtSide2 = isHorizontal ? (dx > 0 ? 'left' : 'right') : (dy > 0 ? 'top' : 'bottom');
+          var rerouted = UMLShared.routeOrthogonalConnector(
+            { x: x1, y: y1, side: srcSide2, stub: 18 },
+            { x: x2, y: y2, side: tgtSide2, stub: 18 },
+            stateObsForRoute,
+            { skipNames: stateSkipNames, clearance: 12, bendPenalty: 38 }
+          );
+          if (rerouted && rerouted.points && rerouted.points.length >= 2 &&
+              !UMLShared.routeHitsObstacle(rerouted.points, stateObsForRoute, stateSkipNames, null)) {
+            points = UMLShared.simplifyOrthogonalPath(rerouted.points);
+          }
+        }
+      }
+
       var pStr = '';
       for (var pi = 0; pi < points.length; pi++) {
         if (pi > 0) pStr += ' ';
@@ -8173,12 +9092,38 @@
       UMLShared.drawArrow(svg, pLast.x, pLast.y, -adx, -ady, colors.line);
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
-      // Transition label with background
+      // Transition label with background. State-diagram labels must sit
+      // next to their arrows (Ambler G8 & G122 — center label on line).
+      // Crank up preferredPointWeight so the score strongly favors
+      // candidates near the midpoint of the route; also tighten vertical
+      // placements so labels don't wander hundreds of pixels away from a
+      // short vertical transition.
       if (tr.label) {
+        var trLabelW = UMLShared.textWidth(tr.label, false, CFG.fontSize);
         var labelPlacement = UMLShared.placeOrthogonalLabel(tr.label, points, stateObstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
           endpointPad: 18,
+          // Moderate midpoint pull — encourages proximity without forcing
+          // every competing label onto the same spot (which was the
+          // non-compact regression: close-only placements piled up).
+          preferredPointWeight: 0.22,
+          // Near positions first (low penalty), then "far" fallbacks so labels
+          // can escape collisions instead of stacking on top of each other.
+          verticalPlacements: [
+            { anchor: 'start', dx: 6, dy: -4, penalty: 0 },
+            { anchor: 'end',   dx: -6, dy: -4, penalty: 2 },
+            { anchor: 'start', dx: 6, dy: CFG.fontSize + 4, penalty: 4 },
+            { anchor: 'end',   dx: -6, dy: CFG.fontSize + 4, penalty: 4 },
+            { anchor: 'start', dx: trLabelW + 10, dy: 0, penalty: 20 },
+            { anchor: 'end',   dx: -(trLabelW + 10), dy: 0, penalty: 20 }
+          ],
+          horizontalPlacements: [
+            { anchor: 'middle', dx: 0, dy: -8, penalty: 0 },
+            { anchor: 'middle', dx: 0, dy: CFG.fontSize + 8, penalty: 4 },
+            { anchor: 'middle', dx: 0, dy: -(CFG.fontSize + 14), penalty: 12 },
+            { anchor: 'middle', dx: 0, dy: CFG.fontSize * 2 + 10, penalty: 12 }
+          ],
           scoreCandidate: function(segment, placement) {
             var bonus = segment.isH ? 8 : -4;
             if (placement.anchor === 'middle') bonus += 2;
@@ -8312,6 +9257,9 @@
     }
     UMLShared.prepareDiagramContainer(container, 'state');
     var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.autoFitSVG(container);
@@ -8636,16 +9584,34 @@
     var ifaceGapExtra = hasIface ? (CFG.ifaceStick + CFG.ifaceRadius) * 2 : 0;
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40 + ifaceGapExtra);
     var effectiveGapY = CFG.gapY;
+    var compFloor = { minX: 32, minY: 22 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var cNodesById = {};
+        for (var cni = 0; cni < layoutNodes.length; cni++) cNodesById[layoutNodes[cni].id] = layoutNodes[cni];
+        compFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, cNodesById, {
+          fontSize: CFG.fontSize,
+          markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
+          floorX: 32 + ifaceGapExtra,
+          floorY: 22
+        });
+      } catch (e) { /* keep default floor */ }
+    }
     if (parsed.layoutPreference === 'compact') {
-      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
-      effectiveGapY = Math.max(20, Math.round(effectiveGapY * 0.5));
+      var compSoftX = Math.max(24, Math.round(compFloor.minX * 0.5));
+      var compSoftY = Math.max(16, Math.round(compFloor.minY * 0.5));
+      effectiveGapX = Math.max(compSoftX, Math.round(effectiveGapX * 0.45));
+      effectiveGapY = Math.max(compSoftY, Math.round(effectiveGapY * 0.45));
     }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: parsed.direction || 'LR',
-      layoutPreference: parsed.layoutPreference || null
+      layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4
     });
     var actualDirection = result.direction || parsed.direction || 'LR';
 
@@ -11487,6 +12453,9 @@
     }
     UMLShared.prepareDiagramContainer(container, 'component');
     var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     adjustRenderedComponentLabels(container);
@@ -11698,16 +12667,35 @@
     }
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40);
     var deployGapY = CFG.gapY;
+    var depFloor = { minX: 38, minY: 28 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var dNodesById = {};
+        for (var dni = 0; dni < layoutNodes.length; dni++) dNodesById[layoutNodes[dni].id] = layoutNodes[dni];
+        depFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, dNodesById, {
+          fontSize: CFG.fontSize,
+          // 3D depth extends nodes by node3dDepth; account for it in the floor
+          markerExtent: CFG.arrowSize + CFG.node3dDepth + 4,
+          floorX: 38,
+          floorY: 28
+        });
+      } catch (e) { /* keep default floor */ }
+    }
     if (parsed.layoutPreference === 'compact') {
-      effectiveGapX = Math.max(20, Math.round(effectiveGapX * 0.5));
-      deployGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      var depSoftX = Math.max(24, Math.round(depFloor.minX * 0.5));
+      var depSoftY = Math.max(18, Math.round(depFloor.minY * 0.5));
+      effectiveGapX = Math.max(depSoftX, Math.round(effectiveGapX * 0.45));
+      deployGapY = Math.max(depSoftY, Math.round(CFG.gapY * 0.45));
     }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
       gapY: deployGapY,
       direction: parsed.direction || 'TB',
-      layoutPreference: parsed.layoutPreference || null
+      layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.arrowSize + CFG.node3dDepth + 4
     });
 
     for (var nm in result.nodes) {
@@ -12104,6 +13092,33 @@
           occupiedSegments
         );
       }
+      // Eliminate tiny (<12px) H-V-H or V-H-V doglegs: when the middle
+      // segment is short, snap both endpoints of the dogleg onto the longer
+      // side's coordinate, producing a clean straight line.
+      if (points.length === 4) {
+        var dg0 = points[0], dg1 = points[1], dg2 = points[2], dg3 = points[3];
+        var dgH1 = Math.abs(dg1.y - dg0.y) < 1;
+        var dgV  = Math.abs(dg2.x - dg1.x) < 1;
+        var dgH2 = Math.abs(dg3.y - dg2.y) < 1;
+        var dgVLen = Math.abs(dg2.y - dg1.y);
+        if (dgH1 && dgV && dgH2 && dgVLen > 0.3 && dgVLen <= 12) {
+          var leftLen = Math.abs(dg1.x - dg0.x);
+          var rightLen = Math.abs(dg3.x - dg2.x);
+          var snapY = leftLen >= rightLen ? dg0.y : dg3.y;
+          points = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
+        } else {
+          var dgV1 = Math.abs(dg1.x - dg0.x) < 1;
+          var dgH  = Math.abs(dg2.y - dg1.y) < 1;
+          var dgV2 = Math.abs(dg3.x - dg2.x) < 1;
+          var dgHLen = Math.abs(dg2.x - dg1.x);
+          if (dgV1 && dgH && dgV2 && dgHLen > 0.3 && dgHLen <= 12) {
+            var topLen = Math.abs(dg1.y - dg0.y);
+            var botLen = Math.abs(dg3.y - dg2.y);
+            var snapX = topLen >= botLen ? dg0.x : dg3.x;
+            points = [{ x: snapX, y: dg0.y }, { x: snapX, y: dg3.y }];
+          }
+        }
+      }
       UMLShared.reserveOrthogonalRoute(points, occupiedSegments);
 
       var pStr = '';
@@ -12254,6 +13269,9 @@
     }
     UMLShared.prepareDiagramContainer(container, 'deployment');
     var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.autoFitSVG(container);
@@ -12824,15 +13842,33 @@
 
     var ucGapX = CFG.gapX;
     var ucGapY = CFG.gapY;
+    var ucFloor = { minX: 40, minY: 24 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var uNodesById = {};
+        for (var uni = 0; uni < layoutNodes.length; uni++) uNodesById[layoutNodes[uni].id] = layoutNodes[uni];
+        ucFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, uNodesById, {
+          fontSize: CFG.fontSize,
+          markerExtent: CFG.arrowSize + 4,
+          floorX: 40,
+          floorY: 24
+        });
+      } catch (e) { /* keep default floor */ }
+    }
     if (parsed.layoutPreference === 'compact') {
-      ucGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
-      ucGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      var ucSoftX = Math.max(24, Math.round(ucFloor.minX * 0.5));
+      var ucSoftY = Math.max(18, Math.round(ucFloor.minY * 0.5));
+      ucGapX = Math.max(ucSoftX, Math.round(CFG.gapX * 0.45));
+      ucGapY = Math.max(ucSoftY, Math.round(CFG.gapY * 0.45));
     }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: ucGapX,
       gapY: ucGapY,
       direction: parsed.direction || 'LR',
       layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.arrowSize + 4
     });
 
     // Map positions back
@@ -13185,6 +14221,9 @@
     }
     UMLShared.prepareDiagramContainer(container, 'usecase');
     var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.autoFitSVG(container);
@@ -13631,15 +14670,33 @@
 
     var actGapX = CFG.gapX;
     var actGapY = CFG.gapY;
+    var actFloor = { minX: 24, minY: 20 };
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
+      try {
+        var aNodesById = {};
+        for (var ani = 0; ani < layoutNodes.length; ani++) aNodesById[layoutNodes[ani].id] = layoutNodes[ani];
+        actFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, aNodesById, {
+          fontSize: CFG.fontSize,
+          markerExtent: CFG.arrowSize + 4,
+          floorX: 24,
+          floorY: 20
+        });
+      } catch (e) { /* keep default floor */ }
+    }
     if (parsed.layoutPreference === 'compact') {
-      actGapX = Math.max(20, Math.round(CFG.gapX * 0.5));
-      actGapY = Math.max(20, Math.round(CFG.gapY * 0.5));
+      var actSoftX = Math.max(20, Math.round(actFloor.minX * 0.5));
+      var actSoftY = Math.max(16, Math.round(actFloor.minY * 0.5));
+      actGapX = Math.max(actSoftX, Math.round(CFG.gapX * 0.45));
+      actGapY = Math.max(actSoftY, Math.round(CFG.gapY * 0.45));
     }
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: actGapX,
       gapY: actGapY,
       direction: parsed.direction || 'TB',
       layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.arrowSize + 4
     });
 
     // Map coords back (Y positions from Sugiyama, X will be overridden for swimlanes)
@@ -14153,6 +15210,9 @@
     }
     UMLShared.prepareDiagramContainer(container, 'activity');
     var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.autoFitSVG(container);
@@ -14162,6 +15222,972 @@
 
   UMLShared.createAutoInit('pre > code.language-uml-activity', render, { type: 'activity' });
   window.UMLActivityDiagram = { render: render, parse: parse };
+})();
+/**
+ * Freeform Box-and-Line Diagram Renderer
+ *
+ * A deliberately informal diagram type for ad-hoc box-and-arrow visualisations
+ * that do NOT fit a formal UML category. Use this for memory layouts, tree
+ * structures, before/after conceptual pictures, annotated diagrams, etc. For
+ * real process flows use the activity diagram; for state machines use the
+ * state diagram; for class relationships use the class diagram, and so on.
+ *
+ * Text format:
+ *   @startuml
+ *   layout horizontal
+ *
+ *   box "Working Directory" as wd
+ *   box "Stash\nWIP: power function" as st
+ *   box "Restored" as r
+ *
+ *   wd --> st : git stash
+ *   st --> r  : git stash pop
+ *
+ *   note bottom of wd : You edit files here
+ *   @enduml
+ *
+ * Shapes (optional keyword after `box`):
+ *   box "Label" as id              rectangle (default)
+ *   box round "Label" as id        rounded rectangle
+ *   box pill "Label" as id         pill / stadium
+ *   box circle "Label" as id       circle
+ *   box ellipse "Label" as id      ellipse
+ *   box hex "Label" as id          hexagon
+ *   box note "Label" as id         dog-eared note box
+ *
+ * Edge operators:
+ *   -->  <-- <-> --     solid (forward, reverse, both, no arrow)
+ *   ..>  <.. <..> ..    dashed variants
+ *   ==>  <== <==> ==    thick variants
+ *
+ * Edge labels use `:` — the label may be quoted or bare.
+ * Multi-line box labels use `\n` inside the quoted string.
+ * Notes reuse the shared `note [top|bottom|left|right] of ID : text` form.
+ */
+(function () {
+  'use strict';
+
+  var CFG = {
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+    fontSize: 14,
+    fontSizeBold: 15,
+    lineHeight: 22,
+    padX: 20,
+    padY: 12,
+    minW: 110,
+    rx: 6,
+    roundRx: 18,
+    circleMinR: 40,
+    hexInset: 16,
+    noteFold: 10,
+    gapX: 80,
+    gapY: 50,
+    arrowSize: 10,
+    strokeWidth: 1.5,
+    svgPad: 30,
+  };
+
+  var VALID_SHAPES = {
+    rect: 1, round: 1, pill: 1, stadium: 1,
+    circle: 1, ellipse: 1, hex: 1, note: 1
+  };
+
+  function parse(text) {
+    var lines = text.split('\n');
+    var nodes = {};
+    var edges = [];
+    var notes = [];
+    var direction = 'TB';
+    var layoutPreference = null;
+    var shadowEnabled = null;
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (line.charAt(0) === '#' || line.indexOf('//') === 0) continue;
+
+      var layoutDirective = UMLShared.parseLayoutDirective(line);
+      if (layoutDirective) {
+        if (layoutDirective.direction) direction = layoutDirective.direction;
+        if (layoutDirective.layoutPreference !== null && layoutDirective.layoutPreference !== undefined) {
+          layoutPreference = layoutDirective.layoutPreference;
+        }
+        if (layoutDirective.shadowEnabled !== null) shadowEnabled = layoutDirective.shadowEnabled;
+        continue;
+      }
+
+      var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
+      if (noteIdx >= 0) { i = noteIdx; continue; }
+
+      // box [shape] "Label" as ID
+      var boxMatch = line.match(/^box(?:\s+([a-z]+))?\s+"((?:[^"\\]|\\.)*)"\s+as\s+(\S+)\s*$/i);
+      if (boxMatch) {
+        var shape = (boxMatch[1] || 'rect').toLowerCase();
+        if (!VALID_SHAPES[shape]) shape = 'rect';
+        if (shape === 'stadium') shape = 'pill';
+        var rawLabel = boxMatch[2].replace(/\\"/g, '"');
+        var id = boxMatch[3];
+        var labelLines = rawLabel.split(/\\n/);
+        nodes[id] = {
+          id: id,
+          shape: shape,
+          label: rawLabel,
+          lines: labelLines
+        };
+        continue;
+      }
+
+      // Edge: FROM <op> TO [: label]
+      // Operators listed most-specific first to avoid prefix mismatches.
+      var edgeMatch = line.match(/^(\S+)\s+(<==>|<\.\.>|<-->|<->|==>|<==|==|\.\.>|<\.\.|\.\.|-->|<--|--)\s+(\S+)(?:\s*:\s*(.+?))?\s*$/);
+      if (edgeMatch) {
+        var from = edgeMatch[1];
+        var op = edgeMatch[2];
+        var to = edgeMatch[3];
+        var label = edgeMatch[4] || '';
+        if (label) label = label.replace(/^"(.*)"$/, '$1').trim();
+
+        var style = 'solid';
+        if (op.indexOf('..') !== -1) style = 'dashed';
+        else if (op.indexOf('==') !== -1) style = 'thick';
+
+        var hasRight = op.charAt(op.length - 1) === '>';
+        var hasLeft = op.charAt(0) === '<';
+        var dir;
+        if (hasRight && hasLeft) dir = 'both';
+        else if (hasRight) dir = 'forward';
+        else if (hasLeft) dir = 'backward';
+        else dir = 'none';
+
+        edges.push({ from: from, to: to, style: style, direction: dir, label: label });
+        continue;
+      }
+    }
+
+    var nodeList = [];
+    for (var k in nodes) nodeList.push(nodes[k]);
+
+    return {
+      nodes: nodeList,
+      edges: edges,
+      notes: notes,
+      direction: direction,
+      layoutPreference: layoutPreference,
+      shadowEnabled: shadowEnabled
+    };
+  }
+
+  function measureNode(n) {
+    var textW = 0;
+    for (var i = 0; i < n.lines.length; i++) {
+      textW = Math.max(textW, UMLShared.textWidth(n.lines[i], false, CFG.fontSize));
+    }
+    var textH = n.lines.length * CFG.lineHeight;
+
+    var w, h;
+    if (n.shape === 'circle') {
+      var r = Math.max(CFG.circleMinR, Math.ceil(Math.sqrt(textW * textW + textH * textH) / 2) + 12);
+      w = r * 2; h = r * 2;
+    } else if (n.shape === 'ellipse') {
+      w = Math.ceil(textW * 1.35 + CFG.padX * 2);
+      h = Math.ceil(textH * 1.30 + CFG.padY * 2);
+    } else if (n.shape === 'hex') {
+      w = Math.ceil(textW + CFG.padX * 2 + CFG.hexInset * 2);
+      h = Math.ceil(textH + CFG.padY * 2);
+    } else if (n.shape === 'pill') {
+      h = Math.ceil(textH + CFG.padY * 2);
+      w = Math.max(CFG.minW, Math.ceil(textW + CFG.padX * 2 + h * 0.4));
+    } else {
+      w = Math.max(CFG.minW, Math.ceil(textW + CFG.padX * 2));
+      h = Math.ceil(textH + CFG.padY * 2);
+      if (n.shape === 'note') w = Math.max(w, Math.ceil(textW + CFG.padX * 2 + CFG.noteFold));
+    }
+    return { width: w, height: h };
+  }
+
+  function computeLayout(parsed) {
+    var nodeList = parsed.nodes;
+    var edgeList = parsed.edges;
+    if (nodeList.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
+
+    var entries = {};
+    for (var i = 0; i < nodeList.length; i++) {
+      var n = nodeList[i];
+      entries[n.id] = { node: n, box: measureNode(n), x: 0, y: 0 };
+    }
+
+    var layoutNodes = [];
+    var layoutEdges = [];
+    for (var li = 0; li < nodeList.length; li++) {
+      var le = entries[nodeList[li].id];
+      layoutNodes.push({ id: nodeList[li].id, width: le.box.width, height: le.box.height });
+    }
+    for (var ei = 0; ei < edgeList.length; ei++) {
+      var ed = edgeList[ei];
+      if (!entries[ed.from] || !entries[ed.to]) continue;
+      var src = ed.from, tgt = ed.to;
+      // Backward-only edges should lay out as tgt→src so the layout engine
+      // places the downstream node after the upstream one; the renderer still
+      // draws the arrowhead on the correct side based on `direction`.
+      if (ed.direction === 'backward') { src = ed.to; tgt = ed.from; }
+      layoutEdges.push({ source: src, target: tgt, type: 'navigable' });
+    }
+
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+      gapX: CFG.gapX,
+      gapY: CFG.gapY,
+      direction: parsed.direction || 'TB',
+      layoutPreference: parsed.layoutPreference || null,
+      containerAspect: parsed._containerAspect,
+      labelFontSize: CFG.fontSize,
+      markerExtent: CFG.arrowSize + 4
+    });
+
+    for (var nm in result.nodes) {
+      if (!entries[nm]) continue;
+      entries[nm].x = result.nodes[nm].x;
+      entries[nm].y = result.nodes[nm].y;
+    }
+
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var nm2 in entries) {
+      minX = Math.min(minX, entries[nm2].x);
+      minY = Math.min(minY, entries[nm2].y);
+      maxX = Math.max(maxX, entries[nm2].x + entries[nm2].box.width);
+      maxY = Math.max(maxY, entries[nm2].y + entries[nm2].box.height);
+    }
+
+    return {
+      entries: entries,
+      width: maxX - minX,
+      height: maxY - minY,
+      offsetX: -minX,
+      offsetY: -minY
+    };
+  }
+
+  function drawShape(svg, e, colors) {
+    var n = e.node;
+    var x = e.x, y = e.y, w = e.box.width, h = e.box.height;
+    var cx = x + w / 2, cy = y + h / 2;
+    var stroke = colors.stroke;
+    var fill = colors.headerFill;
+    var strw = CFG.strokeWidth;
+
+    if (n.shape === 'circle') {
+      var r = Math.min(w, h) / 2;
+      svg.push('<circle class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" r="' + r +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else if (n.shape === 'ellipse') {
+      svg.push('<ellipse class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" rx="' + (w / 2) + '" ry="' + (h / 2) +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else if (n.shape === 'hex') {
+      var inset = CFG.hexInset;
+      svg.push('<polygon class="uml-node-shadow" points="' +
+        (x + inset) + ',' + y + ' ' +
+        (x + w - inset) + ',' + y + ' ' +
+        (x + w) + ',' + cy + ' ' +
+        (x + w - inset) + ',' + (y + h) + ' ' +
+        (x + inset) + ',' + (y + h) + ' ' +
+        x + ',' + cy +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else if (n.shape === 'pill') {
+      var pr = h / 2;
+      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+        '" rx="' + pr + '" ry="' + pr +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else if (n.shape === 'round') {
+      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+        '" rx="' + CFG.roundRx + '" ry="' + CFG.roundRx +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else if (n.shape === 'note') {
+      var f = CFG.noteFold;
+      svg.push('<polygon class="uml-node-shadow" points="' +
+        x + ',' + y + ' ' +
+        (x + w - f) + ',' + y + ' ' +
+        (x + w) + ',' + (y + f) + ' ' +
+        (x + w) + ',' + (y + h) + ' ' +
+        x + ',' + (y + h) +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+      svg.push('<polyline points="' +
+        (x + w - f) + ',' + y + ' ' +
+        (x + w - f) + ',' + (y + f) + ' ' +
+        (x + w) + ',' + (y + f) +
+        '" fill="none" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    } else {
+      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+        '" rx="' + CFG.rx + '" ry="' + CFG.rx +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
+    }
+
+    var totalTextH = (n.lines.length - 1) * CFG.lineHeight;
+    var startY = cy - totalTextH / 2 + CFG.fontSize * 0.35;
+    for (var li = 0; li < n.lines.length; li++) {
+      svg.push('<text x="' + cx + '" y="' + (startY + li * CFG.lineHeight) +
+        '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
+        UMLShared.escapeXml(n.lines[li]) + '</text>');
+    }
+  }
+
+  function computeEndpoints(fromE, toE) {
+    var fromCx = fromE.x + fromE.box.width / 2;
+    var fromCy = fromE.y + fromE.box.height / 2;
+    var toCx = toE.x + toE.box.width / 2;
+    var toCy = toE.y + toE.box.height / 2;
+    var dx = toCx - fromCx, dy = toCy - fromCy;
+    var pts;
+    if (Math.abs(dy) >= Math.abs(dx) * 0.5) {
+      if (dy > 0) {
+        pts = { x1: fromCx, y1: fromE.y + fromE.box.height, x2: toCx, y2: toE.y };
+      } else {
+        pts = { x1: fromCx, y1: fromE.y, x2: toCx, y2: toE.y + toE.box.height };
+      }
+      pts.horizontal = false;
+    } else {
+      if (dx > 0) {
+        pts = { x1: fromE.x + fromE.box.width, y1: fromCy, x2: toE.x, y2: toCy };
+      } else {
+        pts = { x1: fromE.x, y1: fromCy, x2: toE.x + toE.box.width, y2: toCy };
+      }
+      pts.horizontal = true;
+    }
+    return pts;
+  }
+
+  function orthogonalRoute(ep) {
+    var x1 = ep.x1, y1 = ep.y1, x2 = ep.x2, y2 = ep.y2;
+    if ((!ep.horizontal && Math.abs(x1 - x2) < 2) || (ep.horizontal && Math.abs(y1 - y2) < 2)) {
+      return [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+    }
+    if (ep.horizontal) {
+      var midX = (x1 + x2) / 2;
+      return [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
+    }
+    var midY = (y1 + y2) / 2;
+    return [{ x: x1, y: y1 }, { x: x1, y: midY }, { x: x2, y: midY }, { x: x2, y: y2 }];
+  }
+
+  function generateSVG(layout, parsed, colors) {
+    var entries = layout.entries;
+    var edgeList = parsed.edges;
+
+    // Pre-compute everything that has a position (edge routes + edge label
+    // rects) BEFORE placing notes, so the note placer can treat edge labels
+    // as obstacles and avoid overlapping them.
+    var obstacles = [];
+    for (var en0 in entries) {
+      var e0 = entries[en0];
+      obstacles.push({ x: e0.x, y: e0.y, w: e0.box.width, h: e0.box.height });
+    }
+
+    var edgeDescriptors = []; // { points, style, direction, label?, labelPlacement? }
+    var placedLabelRects = [];
+    for (var ti = 0; ti < edgeList.length; ti++) {
+      var tr = edgeList[ti];
+      var fromE = entries[tr.from];
+      var toE = entries[tr.to];
+      if (!fromE || !toE || tr.from === tr.to) { edgeDescriptors.push(null); continue; }
+
+      var ep = computeEndpoints(fromE, toE);
+      var points = orthogonalRoute(ep);
+      var descriptor = {
+        points: points,
+        style: tr.style,
+        direction: tr.direction,
+        label: tr.label || '',
+        labelPlacement: null
+      };
+
+      if (tr.label) {
+        var placement = UMLShared.placeOrthogonalLabel(tr.label, points, obstacles, placedLabelRects, {
+          fontSize: CFG.fontSize,
+          endpointPad: 14,
+          preferredPointWeight: 0.45
+        });
+        if (placement) {
+          placedLabelRects.push(placement.rect);
+          descriptor.labelPlacement = placement;
+        }
+      }
+
+      edgeDescriptors.push(descriptor);
+    }
+
+    // Notes: feed edge label rects in as extra obstacles so the anchored
+    // placer won't park a note on top of an edge label.
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, placedLabelRects);
+
+    var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
+    for (var nbi = 0; nbi < notePositions.length; nbi++) {
+      var npb = notePositions[nbi];
+      if (npb.x < -layout.offsetX) noteExtraL = Math.max(noteExtraL, -layout.offsetX - npb.x + CFG.svgPad);
+      var nr = npb.x + npb.w - (layout.width - layout.offsetX);
+      if (nr > 0) noteExtraR = Math.max(noteExtraR, nr + CFG.svgPad);
+      if (npb.y < -layout.offsetY) noteExtraT = Math.max(noteExtraT, -layout.offsetY - npb.y + CFG.svgPad);
+      var nb = npb.y + npb.h - (layout.height - layout.offsetY);
+      if (nb > 0) noteExtraB = Math.max(noteExtraB, nb + CFG.svgPad);
+    }
+
+    var ox = layout.offsetX + CFG.svgPad + noteExtraL;
+    var oy = layout.offsetY + CFG.svgPad + noteExtraT;
+    var svgW = layout.width + CFG.svgPad * 2 + noteExtraL + noteExtraR;
+    var svgH = layout.height + CFG.svgPad * 2 + noteExtraT + noteExtraB;
+
+    var svg = [];
+    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
+
+    // Edges (lines + arrowheads only; labels drawn later, above nodes).
+    for (var di = 0; di < edgeDescriptors.length; di++) {
+      var d = edgeDescriptors[di];
+      if (!d) continue;
+      var pts = d.points;
+      var pStr = '';
+      for (var pi = 0; pi < pts.length; pi++) {
+        if (pi > 0) pStr += ' ';
+        pStr += pts[pi].x + ',' + pts[pi].y;
+      }
+      var dashAttr = d.style === 'dashed' ? ' stroke-dasharray="5,4"' : '';
+      var sw = d.style === 'thick' ? CFG.strokeWidth * 2.1 : CFG.strokeWidth;
+      svg.push('<polyline points="' + pStr +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + sw + '"' + dashAttr + '/>');
+
+      if (d.direction === 'forward' || d.direction === 'both') {
+        var last = pts[pts.length - 1];
+        var prev = pts[pts.length - 2];
+        var adx = last.x - prev.x, ady = last.y - prev.y;
+        var alen = Math.sqrt(adx * adx + ady * ady) || 1;
+        UMLShared.drawArrow(svg, last.x, last.y, -adx / alen, -ady / alen, colors.line);
+      }
+      if (d.direction === 'backward' || d.direction === 'both') {
+        var first = pts[0];
+        var second = pts[1];
+        var bdx = first.x - second.x, bdy = first.y - second.y;
+        var blen = Math.sqrt(bdx * bdx + bdy * bdy) || 1;
+        UMLShared.drawArrow(svg, first.x, first.y, -bdx / blen, -bdy / blen, colors.line);
+      }
+    }
+
+    // Nodes
+    for (var en in entries) {
+      drawShape(svg, entries[en], colors);
+    }
+
+    // Edge labels (on top of nodes, below notes)
+    for (var di2 = 0; di2 < edgeDescriptors.length; di2++) {
+      var d2 = edgeDescriptors[di2];
+      if (!d2 || !d2.labelPlacement) continue;
+      var p = d2.labelPlacement;
+      svg.push('<text x="' + p.x + '" y="' + p.y +
+        '" text-anchor="' + p.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+        '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+        UMLShared.escapeXml(d2.label) + '</text>');
+    }
+
+    // Notes
+    for (var ni = 0; ni < notePositions.length; ni++) {
+      var np = notePositions[ni];
+      var cF, cT;
+      if (np.note.position === 'right') { cF = { x: np.x, y: np.y + np.h / 2 }; cT = { x: np.tx + np.tw, y: np.ty + np.th / 2 }; }
+      else if (np.note.position === 'left') { cF = { x: np.x + np.w, y: np.y + np.h / 2 }; cT = { x: np.tx, y: np.ty + np.th / 2 }; }
+      else if (np.note.position === 'top') { cF = { x: np.x + np.w / 2, y: np.y + np.h }; cT = { x: np.tx + np.tw / 2, y: np.ty }; }
+      else { cF = { x: np.x + np.w / 2, y: np.y }; cT = { x: np.tx + np.tw / 2, y: np.ty + np.th }; }
+      UMLShared.drawNote(svg, np.x, np.y, np.note.lines, colors, { fromX: cF.x, fromY: cF.y, toX: cT.x, toY: cT.y });
+    }
+
+    svg.push(UMLShared.svgClose());
+    return svg.join('\n');
+  }
+
+  function render(container, text) {
+    var parsed = parse(text);
+    if (!parsed.nodes || parsed.nodes.length === 0) {
+      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No boxes to display.</div>';
+      return;
+    }
+    UMLShared.prepareDiagramContainer(container, 'freeform');
+    var colors = UMLShared.getThemeColors(container);
+    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
+      parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
+    }
+    var layout = computeLayout(parsed);
+    container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.autoFitSVG(container);
+  }
+
+  // Accept both the explicit HTML class (`diagram-freeform`) and the
+  // Markdown-highlighter convention (`language-freeform`) that marked.js
+  // emits when tutorial step instructions contain a ```freeform fence.
+  UMLShared.createAutoInit('pre > code.diagram-freeform, pre > code.language-freeform', render, { type: 'freeform' });
+  window.UMLFreeformDiagram = { render: render, parse: parse };
+})();
+/**
+ * GitGraph Static-Spec Adapter
+ *
+ * Thin text-DSL adapter that builds a { commits, branches, head, commitMap }
+ * data structure and hands it to window.GitGraph's SVG renderer (which is
+ * normally driven by live `git log` output). Lets tutorials render commit
+ * graphs from a compact declarative spec.
+ *
+ * Text format:
+ *   @startuml
+ *   branch main:
+ *     A "Initial commit"
+ *     B "Add helper"
+ *     C "Refactor"
+ *
+ *   branch feature from B:
+ *     α "Start feature"
+ *     β "Develop"
+ *     γ "Complete"
+ *
+ *   head main
+ *   @enduml
+ *
+ * Commits are written in natural human order (oldest → newest top-down),
+ * grouped by branch. `from X` attaches the branch to commit X as its base.
+ *
+ * Merges:
+ *     branch main:
+ *       …
+ *       M merge feature "Merge feature into main"
+ *
+ * HEAD:
+ *   `head <branch>`              — HEAD points at the named branch (default: first branch)
+ *   `head detached at <commit>`  — detached-HEAD state
+ */
+(function () {
+  'use strict';
+
+  function parse(text) {
+    var lines = text.split('\n');
+    var branchOrder = [];
+    var branchByName = {};
+    var head = { type: 'default' };
+    var currentBranch = null;
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (line.charAt(0) === '#' || line.indexOf('//') === 0) continue;
+
+      var headDetached = line.match(/^head\s+detached\s+at\s+(\S+)\s*$/i);
+      if (headDetached) { head = { type: 'detached', commit: headDetached[1] }; continue; }
+      var headRef = line.match(/^head\s+(\S+)\s*$/i);
+      if (headRef) { head = { type: 'ref', branch: headRef[1] }; continue; }
+
+      // `branch NAME at COMMIT_ID` — point a label at an existing commit
+      // without declaring new commits under it. Useful for "after fast-forward
+      // merge" scenes where two branches end up on the same tip.
+      var branchAt = line.match(/^branch\s+(\S+)\s+at\s+(\S+)\s*$/i);
+      if (branchAt) {
+        var aliasBranch = {
+          name: branchAt[1],
+          from: null,
+          commits: [],
+          aliasFor: branchAt[2]
+        };
+        branchOrder.push(aliasBranch);
+        branchByName[aliasBranch.name] = aliasBranch;
+        currentBranch = null; // no commits get attached to an alias
+        continue;
+      }
+
+      var branchMatch = line.match(/^branch\s+(\S+?)(?:\s+from\s+(\S+?))?\s*:\s*$/i);
+      if (branchMatch) {
+        currentBranch = {
+          name: branchMatch[1],
+          from: branchMatch[2] || null,
+          commits: []
+        };
+        branchOrder.push(currentBranch);
+        branchByName[currentBranch.name] = currentBranch;
+        continue;
+      }
+
+      if (!currentBranch) continue;
+
+      // <id> merge <branch> ["message"]
+      var mergeMatch = line.match(/^(\S+)\s+merge\s+(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/i);
+      if (mergeMatch) {
+        currentBranch.commits.push({
+          id: mergeMatch[1],
+          message: mergeMatch[3] ? mergeMatch[3].replace(/\\"/g, '"') : ('Merge ' + mergeMatch[2] + ' into ' + currentBranch.name),
+          merge: true,
+          mergeFrom: mergeMatch[2]
+        });
+        continue;
+      }
+
+      // <id> ["message"]
+      var commitMatch = line.match(/^(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/);
+      if (commitMatch) {
+        currentBranch.commits.push({
+          id: commitMatch[1],
+          message: commitMatch[2] ? commitMatch[2].replace(/\\"/g, '"') : '',
+          merge: false
+        });
+        continue;
+      }
+    }
+
+    return buildGraphData(branchOrder, branchByName, head);
+  }
+
+  /**
+   * Transform the parsed spec into { commits, branches, head, commitMap } in
+   * the shape window.GitGraph's renderer expects. `commits` must be in
+   * newest-first topological order so row 0 sits at the top of the graph.
+   */
+  function buildGraphData(branchOrder, branchByName, headSpec) {
+    var commitMap = {};
+    var commitsInDeclOrder = [];
+
+    for (var bi = 0; bi < branchOrder.length; bi++) {
+      var br = branchOrder[bi];
+      var prevId = br.from;
+      for (var ci = 0; ci < br.commits.length; ci++) {
+        var c = br.commits[ci];
+        if (commitMap[c.id]) continue;
+        var parents = [];
+        if (prevId) parents.push(prevId);
+        if (c.merge && c.mergeFrom) {
+          var mergeBr = branchByName[c.mergeFrom];
+          if (mergeBr && mergeBr.commits.length > 0) {
+            parents.push(mergeBr.commits[mergeBr.commits.length - 1].id);
+          }
+        }
+        var commit = {
+          hash: c.id,
+          shortHash: c.id,
+          parents: parents,
+          message: c.message || c.id,
+          decorations: '',
+          children: [],
+          col: 0,
+          row: 0,
+          branchColor: null,
+        };
+        commitMap[c.id] = commit;
+        commitsInDeclOrder.push(commit);
+        prevId = c.id;
+      }
+    }
+
+    for (var cc = 0; cc < commitsInDeclOrder.length; cc++) {
+      var cm = commitsInDeclOrder[cc];
+      for (var pp = 0; pp < cm.parents.length; pp++) {
+        var parent = commitMap[cm.parents[pp]];
+        if (parent) parent.children.push(cm.hash);
+      }
+    }
+
+    var sorted = [];
+    var placed = {};
+    var remaining = commitsInDeclOrder.slice();
+    var safety = commitsInDeclOrder.length * 2 + 4;
+    while (remaining.length > 0 && safety-- > 0) {
+      var pickedIdx = -1;
+      for (var ri = 0; ri < remaining.length; ri++) {
+        var candidate = remaining[ri];
+        var allChildrenPlaced = true;
+        for (var chi = 0; chi < candidate.children.length; chi++) {
+          if (!placed[candidate.children[chi]]) { allChildrenPlaced = false; break; }
+        }
+        if (allChildrenPlaced) { pickedIdx = ri; break; }
+      }
+      if (pickedIdx === -1) pickedIdx = remaining.length - 1;
+      var picked = remaining.splice(pickedIdx, 1)[0];
+      sorted.push(picked);
+      placed[picked.hash] = true;
+    }
+
+    var branches = [];
+    for (var bj = 0; bj < branchOrder.length; bj++) {
+      var bb = branchOrder[bj];
+      var tipId = null;
+      if (bb.aliasFor) {
+        // `branch NAME at COMMIT` — no commits of its own, just a label on an
+        // existing commit.
+        if (commitMap[bb.aliasFor]) tipId = bb.aliasFor;
+      } else if (bb.commits.length > 0) {
+        tipId = bb.commits[bb.commits.length - 1].id;
+      }
+      if (tipId && commitMap[tipId]) branches.push({ name: bb.name, hash: tipId });
+    }
+
+    for (var di = 0; di < branches.length; di++) {
+      var tip = commitMap[branches[di].hash];
+      if (!tip) continue;
+      tip.decorations = tip.decorations ? tip.decorations + ', ' + branches[di].name : branches[di].name;
+    }
+
+    function tipOfBranch(br) {
+      if (!br) return null;
+      if (br.aliasFor) return commitMap[br.aliasFor] ? br.aliasFor : null;
+      return br.commits.length > 0 ? br.commits[br.commits.length - 1].id : null;
+    }
+
+    var resolvedHead = { ref: null, hash: null, detached: false };
+    if (headSpec.type === 'ref' && branchByName[headSpec.branch]) {
+      resolvedHead.ref = headSpec.branch;
+      resolvedHead.hash = tipOfBranch(branchByName[headSpec.branch]);
+    } else if (headSpec.type === 'detached' && commitMap[headSpec.commit]) {
+      resolvedHead.detached = true;
+      resolvedHead.hash = headSpec.commit;
+    } else if (branches.length > 0) {
+      resolvedHead.ref = branches[0].name;
+      resolvedHead.hash = branches[0].hash;
+    }
+
+    return { commits: sorted, branches: branches, head: resolvedHead, commitMap: commitMap };
+  }
+
+  function render(container, text) {
+    var data = parse(text);
+    if (!window.GitGraph) {
+      container.innerHTML = '<div style="padding:20px;color:#b00;text-align:center;">' +
+        'GitGraph renderer not loaded. Include <code>js/git-graph.js</code> on the page.</div>';
+      return;
+    }
+    if (!data.commits || data.commits.length === 0) {
+      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No commits to display.</div>';
+      return;
+    }
+    UMLShared.prepareDiagramContainer(container, 'gitgraph');
+    container.innerHTML = window.GitGraph.renderToSVG(data);
+  }
+
+  // Accept both `diagram-gitgraph` (explicit HTML) and `language-gitgraph`
+  // (from ```gitgraph fences processed by marked.js in tutorial steps).
+  UMLShared.createAutoInit('pre > code.diagram-gitgraph, pre > code.language-gitgraph', render, { type: 'gitgraph' });
+  window.UMLGitGraphDiagram = { render: render, parse: parse };
+})();
+/**
+ * Folder-Tree Diagram Renderer
+ *
+ * A dedicated visualisation for filesystem / directory layouts. Not UML —
+ * explicitly a separate type because folder trees have a very specific
+ * idiom (folder icon, file icon, tree connectors) that a generic
+ * box-and-line renderer would not capture cleanly.
+ *
+ * Text format (indentation-based — the most natural form for humans):
+ *   @startuml
+ *   project-root/
+ *     src/
+ *       main.js
+ *       utils.js
+ *     tests/
+ *       main.test.js
+ *     README.md           ← project documentation
+ *     package.json
+ *   @enduml
+ *
+ * Rules:
+ *   - Leading whitespace = depth. Indent unit is auto-detected from the
+ *     first indented line (commonly 2 or 4 spaces); tabs count as 4.
+ *   - A name ending in `/` is a folder; anything else is a file.
+ *   - Optional trailing annotation: `name  ← note` or `name  # note`.
+ */
+(function () {
+  'use strict';
+
+  var CFG = {
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+    fontFamilyMono: "'Fira Code', 'Cascadia Code', Menlo, Consolas, monospace",
+    fontSize: 14,
+    rowHeight: 24,
+    indentPx: 22,
+    iconSize: 16,
+    iconGap: 8,
+    annotationGap: 18,
+    svgPad: 16,
+  };
+
+  function parse(text) {
+    var lines = text.split('\n');
+    var rows = [];
+    var indentUnit = 0;
+
+    for (var i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      var trimmed = raw.trim();
+      if (!trimmed || trimmed === '@startuml' || trimmed === '@enduml') continue;
+
+      var lead = 0;
+      for (var k = 0; k < raw.length; k++) {
+        if (raw.charAt(k) === ' ') lead++;
+        else if (raw.charAt(k) === '\t') lead += 4;
+        else break;
+      }
+
+      if (indentUnit === 0 && lead > 0) indentUnit = lead;
+      var depth = indentUnit > 0 ? Math.floor(lead / indentUnit) : 0;
+
+      // `name  ← annotation` or `name  # annotation` or `name  // annotation`
+      var content = trimmed;
+      var annotation = '';
+      var annotMatch = content.match(/^(.+?)\s+(?:←|<-|#|\/\/)\s+(.+)$/);
+      if (annotMatch) {
+        content = annotMatch[1].trim();
+        annotation = annotMatch[2].trim();
+      }
+
+      var isFolder = content.length > 0 && content.charAt(content.length - 1) === '/';
+      rows.push({ depth: depth, name: content, isFolder: isFolder, annotation: annotation });
+    }
+
+    // Pre-compute sibling / ancestor continuation info for connector drawing.
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      row.ancestorContinues = [];
+      for (var d = 0; d < row.depth; d++) {
+        var continues = false;
+        for (var rr = r + 1; rr < rows.length; rr++) {
+          if (rows[rr].depth <= d) break;
+          if (rows[rr].depth === d + 1) { continues = true; break; }
+        }
+        row.ancestorContinues.push(continues);
+      }
+      var isLast = true;
+      for (var rr2 = r + 1; rr2 < rows.length; rr2++) {
+        if (rows[rr2].depth < row.depth) break;
+        if (rows[rr2].depth === row.depth) { isLast = false; break; }
+      }
+      row.isLast = isLast;
+    }
+
+    return { rows: rows };
+  }
+
+  function drawFolderIcon(svg, x, y, colors) {
+    // Little folder with a tab on top-left
+    var s = CFG.iconSize;
+    var body = s - 2;
+    var tabW = Math.round(s * 0.45);
+    var tabH = Math.round(s * 0.18);
+    svg.push('<rect x="' + x + '" y="' + (y + tabH) + '" width="' + body + '" height="' + (body - tabH) +
+      '" rx="1.5" fill="' + (colors.headerFill || '#dbe8f8') + '" stroke="' + (colors.stroke || '#4060a0') + '" stroke-width="1"/>');
+    svg.push('<rect x="' + x + '" y="' + y + '" width="' + tabW + '" height="' + (tabH + 2) +
+      '" rx="1.5" fill="' + (colors.headerFill || '#dbe8f8') + '" stroke="' + (colors.stroke || '#4060a0') + '" stroke-width="1"/>');
+  }
+
+  function drawFileIcon(svg, x, y, colors) {
+    // Page with folded top-right corner
+    var w = CFG.iconSize - 3;
+    var h = CFG.iconSize - 2;
+    var fx = x + 1;
+    var fy = y + 1;
+    var fold = 4;
+    svg.push('<polygon points="' +
+      fx + ',' + fy + ' ' +
+      (fx + w - fold) + ',' + fy + ' ' +
+      (fx + w) + ',' + (fy + fold) + ' ' +
+      (fx + w) + ',' + (fy + h) + ' ' +
+      fx + ',' + (fy + h) +
+      '" fill="' + (colors.fill || '#fdfcf8') + '" stroke="' + (colors.stroke || '#4060a0') + '" stroke-width="1"/>');
+    svg.push('<polyline points="' +
+      (fx + w - fold) + ',' + fy + ' ' +
+      (fx + w - fold) + ',' + (fy + fold) + ' ' +
+      (fx + w) + ',' + (fy + fold) +
+      '" fill="none" stroke="' + (colors.stroke || '#4060a0') + '" stroke-width="1"/>');
+  }
+
+  function generateSVG(parsed, colors) {
+    var rows = parsed.rows;
+    if (rows.length === 0) return '';
+
+    var nameFont = CFG.fontFamilyMono;
+
+    // Measure widest row to pick an SVG width
+    var maxRowW = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var leftPad = row.depth * CFG.indentPx + CFG.iconSize + CFG.iconGap;
+      var tw = UMLShared.textWidth(row.name, row.isFolder, CFG.fontSize, nameFont);
+      var annotW = row.annotation
+        ? CFG.annotationGap + UMLShared.textWidth('← ' + row.annotation, false, CFG.fontSize)
+        : 0;
+      maxRowW = Math.max(maxRowW, leftPad + tw + annotW);
+    }
+
+    var w = maxRowW + CFG.svgPad * 2;
+    var h = rows.length * CFG.rowHeight + CFG.svgPad * 2;
+
+    var connectorColor = colors.secondaryLine || '#88a';
+    var annotColor = colors.secondaryLine || '#888';
+
+    var svg = [];
+    svg.push(UMLShared.svgOpen(w, h, CFG.svgPad, CFG.svgPad, CFG.fontFamily, { shadowEnabled: false }));
+
+    for (var r = 0; r < rows.length; r++) {
+      var row2 = rows[r];
+      var yTop = r * CFG.rowHeight;
+      var yMid = yTop + CFG.rowHeight / 2;
+      var yBot = yTop + CFG.rowHeight;
+
+      // Vertical continuation lines for each ancestor depth that still has more children below.
+      for (var d = 0; d < row2.ancestorContinues.length; d++) {
+        if (row2.ancestorContinues[d]) {
+          var vx = d * CFG.indentPx + CFG.indentPx / 2;
+          svg.push('<line x1="' + vx + '" y1="' + yTop + '" x2="' + vx + '" y2="' + yBot +
+            '" stroke="' + connectorColor + '" stroke-width="1"/>');
+        }
+      }
+
+      // Tree connector from the row's parent guide down to the node row.
+      if (row2.depth > 0) {
+        var guideX = (row2.depth - 1) * CFG.indentPx + CFG.indentPx / 2;
+        var nodeX = row2.depth * CFG.indentPx;
+        var vEnd = row2.isLast ? yMid : yBot;
+        svg.push('<line x1="' + guideX + '" y1="' + yTop + '" x2="' + guideX + '" y2="' + vEnd +
+          '" stroke="' + connectorColor + '" stroke-width="1"/>');
+        svg.push('<line x1="' + guideX + '" y1="' + yMid + '" x2="' + nodeX + '" y2="' + yMid +
+          '" stroke="' + connectorColor + '" stroke-width="1"/>');
+      }
+
+      var iconX = row2.depth * CFG.indentPx + 2;
+      var iconY = yMid - CFG.iconSize / 2;
+      if (row2.isFolder) drawFolderIcon(svg, iconX, iconY, colors);
+      else drawFileIcon(svg, iconX, iconY, colors);
+
+      var textX = iconX + CFG.iconSize + CFG.iconGap;
+      var textY = yMid + CFG.fontSize * 0.35;
+      svg.push('<text x="' + textX + '" y="' + textY +
+        '" font-family="' + nameFont + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+        (row2.isFolder ? '" font-weight="600">' : '">') +
+        UMLShared.escapeXml(row2.name) + '</text>');
+
+      if (row2.annotation) {
+        var annotX = textX +
+          UMLShared.textWidth(row2.name, row2.isFolder, CFG.fontSize, nameFont) +
+          CFG.annotationGap;
+        svg.push('<text x="' + annotX + '" y="' + textY +
+          '" font-size="' + CFG.fontSize + '" fill="' + annotColor +
+          '" font-style="italic">' +
+          UMLShared.escapeXml('← ' + row2.annotation) + '</text>');
+      }
+    }
+
+    svg.push(UMLShared.svgClose());
+    return svg.join('\n');
+  }
+
+  function render(container, text) {
+    var parsed = parse(text);
+    if (!parsed.rows || parsed.rows.length === 0) {
+      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No folder tree to display.</div>';
+      return;
+    }
+    UMLShared.prepareDiagramContainer(container, 'folder-tree');
+    var colors = UMLShared.getThemeColors(container);
+    container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.autoFitSVG(container);
+  }
+
+  // Accept both explicit HTML class (`diagram-folder-tree`) and fence-derived
+  // `language-folder-tree` (from marked.js / Rouge).
+  UMLShared.createAutoInit('pre > code.diagram-folder-tree, pre > code.language-folder-tree', render, { type: 'folder-tree' });
+  window.UMLFolderTreeDiagram = { render: render, parse: parse };
 })();
 /**
  * UML Notation Symbol Renderer

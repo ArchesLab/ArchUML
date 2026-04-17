@@ -51,6 +51,8 @@ async function renderUML(type, text) {
             deployment: window.UMLDeploymentDiagram,
             usecase:    window.UMLUseCaseDiagram,
             activity:   window.UMLActivityDiagram,
+            freeform:   window.UMLFreeformDiagram,
+            gitgraph:   window.UMLGitGraphDiagram,
         };
         const R = RENDERERS[type];
         if (!R) return 'Error: Unknown renderer type: ' + type;
