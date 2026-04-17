@@ -1441,10 +1441,42 @@
     if (best) return best;
     if (bestSoft) return bestSoft;
 
+    // Fallback: no position cleanly avoided obstacles. Try progressively
+    // larger offsets away from the segment until we find one that DOES
+    // clear every obstacle. Previously the fallback ignored obstacles and
+    // just placed the label at the segment midpoint — which could place
+    // a transition label right on top of an adjacent state box.
     var fallbackSeg = segments[0];
     var fallbackAnchor = fallbackSeg.isH ? 'middle' : 'start';
-    var fallbackX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x + 10;
-    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 10 : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
+    var fallbackBaseX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x;
+    var fallbackBaseY = fallbackSeg.isH ? fallbackSeg.y : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
+    var tryOffsets = [];
+    for (var step = 1; step <= 6; step++) {
+      var d = step * (labelH + 6);
+      if (fallbackSeg.isH) {
+        tryOffsets.push({ dx: 0, dy: -d });
+        tryOffsets.push({ dx: 0, dy: d });
+      } else {
+        tryOffsets.push({ dx: d, dy: 0, anchor: 'start' });
+        tryOffsets.push({ dx: -d, dy: 0, anchor: 'end' });
+      }
+    }
+    var obstaclePadStrict = opts.obstaclePad || 6;
+    for (var toi = 0; toi < tryOffsets.length; toi++) {
+      var off = tryOffsets[toi];
+      var fx = fallbackBaseX + off.dx;
+      var fy = fallbackBaseY + off.dy;
+      var fa = off.anchor || fallbackAnchor;
+      var fr = makeLabelRect(fx, fy, labelW, labelH, fa);
+      if (!labelRectHitsObstacles(fr, obstacles, obstaclePadStrict) &&
+          !labelRectHitsPlacedLabels(fr, placedLabels, opts.labelPad || 8)) {
+        return { x: fx, y: fy, anchor: fa, rect: fr, score: -Infinity };
+      }
+    }
+    // Last resort — preserve previous behavior (place at segment center,
+    // may overlap an obstacle). Still better than rendering no label at all.
+    var fallbackX = fallbackSeg.isH ? fallbackBaseX : fallbackSeg.x + 10;
+    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 10 : fallbackBaseY;
     return {
       x: fallbackX,
       y: fallbackY,
@@ -2457,9 +2489,9 @@
     opts = opts || {};
     var fs = finiteOr(opts.fontSize, 13);
     var markerW = finiteOr(opts.markerExtent, 14);
-    var pad = finiteOr(opts.labelPadding, 8);
+    var pad = finiteOr(opts.labelPadding, 4);
 
-    if (!edge) return { minX: 40, minY: 28 };
+    if (!edge) return { minX: 32, minY: 24 };
 
     var labels = [];
     // Accept multiple naming conventions used across diagram types.
@@ -2479,16 +2511,17 @@
       if (labels[i]) labelCount++;
     }
 
-    // Horizontal requirement: enough room for the widest label to sit *next to*
-    // the line when the line runs vertically (target=below arrow), plus both
-    // endpoint markers can fully form without overlapping the nodes.
-    var minX = Math.max(40, maxLabelW + markerW * 2 + pad + 8);
+    // Horizontal requirement: the widest label plus a small breathing margin.
+    // The marker doesn't need its own 2× reserve here — it lives inside the
+    // gap alongside the label. Keeping this tight (~label width + 10px)
+    // prevents diagrams from growing to ~2× the label width.
+    var minX = Math.max(32, Math.round(maxLabelW) + 10);
 
-    // Vertical requirement: enough room to stack multiplicity + label above
-    // the line when the line runs horizontally, plus breathing room so arrows
-    // and diamonds don't touch the opposing node boundary.
+    // Vertical requirement: room to stack the label rows above/below the
+    // line plus minimal arrowhead clearance.
     var lineHeight = fs + 4;
-    var minY = Math.max(28, (labelCount > 1 ? 2 : 1) * lineHeight + markerW + pad);
+    var labelRows = labelCount > 1 ? 2 : 1;
+    var minY = Math.max(24, labelRows * lineHeight + Math.max(6, markerW * 0.4));
 
     return { minX: Math.round(minX), minY: Math.round(minY) };
   }
@@ -2946,6 +2979,230 @@
 
   // ───── Export ─────────────────────────────────────────────────────
 
+  // ───── Modular layout stages ──────────────────────────────────────
+  //
+  // The following stages are pure functions that can be composed by any
+  // renderer (or by UMLAdvancedLayout) to build a full layout. Each stage
+  // has a single responsibility and well-defined input/output contracts.
+  //
+  //   Stage       Input                               Output
+  //   ────────    ─────────────────────────────────   ────────────────────────
+  //   rankNodes   nodes, edges                        layers[]  (nodeId → layer)
+  //   budgetGaps  layers, edges, edgeSizes, defaults  rowGaps{}, colGaps{}
+  //   placeOnGrid layers, orders, budgets, nodeSizes  coords{}  (x, y per node)
+  //
+  // These are exposed so diagram renderers with special layout needs (state
+  // machines, activity swimlanes, sequence timelines) can build a custom
+  // pipeline without reimplementing every stage from scratch.
+
+  /**
+   * Stage 3 — rankNodes
+   *
+   * Assigns each node to a layer using a longest-path algorithm over the
+   * directed edges. Cycles are broken by reversing back-edges detected
+   * during DFS. This is the first half of the Sugiyama framework: it only
+   * produces layer assignments, not coordinates.
+   *
+   * Edge direction is determined per-type:
+   *   generalization/realization → source goes BELOW target (so inheritance reads top-down)
+   *   composition/aggregation    → source ABOVE target (owner on top)
+   *   dependency/navigable       → source ABOVE target (caller on top)
+   *   (others)                   → source ABOVE target
+   *
+   * @param {Array} nodes — [{ id, ... }]
+   * @param {Array} edges — [{ source, target, type }]
+   * @returns {{ layers: {nodeId: number}, layerMax: number, directed: Array }}
+   */
+  function rankNodes(nodes, edges) {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return { layers: {}, layerMax: 0, directed: [] };
+    }
+
+    var adj = {};
+    var inDegree = {};
+    var nodeMap = {};
+    nodes.forEach(function(n) {
+      adj[n.id] = [];
+      inDegree[n.id] = 0;
+      nodeMap[n.id] = n;
+    });
+
+    var directed = [];
+    (edges || []).forEach(function(e) {
+      if (!e || !nodeMap[e.source] || !nodeMap[e.target]) return;
+      if (e.layerParticipates === false || (e.data && e.data.layerParticipates === false)) return;
+      var src = e.source, tgt = e.target;
+      if (e.type === 'generalization' || e.type === 'realization') {
+        src = e.target; tgt = e.source;
+      }
+      if (src === tgt) return;
+      adj[src].push(tgt);
+      inDegree[tgt]++;
+      directed.push({ orig: e, src: src, tgt: tgt });
+    });
+
+    // Cycle removal via DFS
+    var visited = {}, recStack = {};
+    function dfs(u) {
+      visited[u] = true;
+      recStack[u] = true;
+      var newAdj = [];
+      for (var i = 0; i < adj[u].length; i++) {
+        var v = adj[u][i];
+        if (!visited[v]) { dfs(v); newAdj.push(v); }
+        else if (recStack[v]) {
+          adj[v].push(u);
+          inDegree[u]++;
+          inDegree[v]--;
+        } else newAdj.push(v);
+      }
+      adj[u] = newAdj;
+      recStack[u] = false;
+    }
+    nodes.forEach(function(n) { if (!visited[n.id]) dfs(n.id); });
+
+    // Longest-path layer assignment
+    var layers = {};
+    var roots = [];
+    nodes.forEach(function(n) { if (inDegree[n.id] === 0) roots.push(n.id); });
+    if (roots.length === 0 && nodes.length > 0) roots.push(nodes[0].id);
+
+    var queue = [].concat(roots);
+    roots.forEach(function(r) { layers[r] = 0; });
+    while (queue.length) {
+      var u = queue.shift();
+      (adj[u] || []).forEach(function(v) {
+        var newLayer = (layers[u] || 0) + 1;
+        if (layers[v] === undefined || newLayer > layers[v]) {
+          layers[v] = newLayer;
+          queue.push(v);
+        }
+      });
+    }
+    nodes.forEach(function(n) { if (layers[n.id] === undefined) layers[n.id] = 0; });
+
+    var layerMax = 0;
+    for (var id in layers) if (layers[id] > layerMax) layerMax = layers[id];
+    return { layers: layers, layerMax: layerMax, directed: directed };
+  }
+
+  /**
+   * Stage 5 — budgetGaps
+   *
+   * THE MISSING PIECE in the previous layout engine. Given the layer
+   * assignment and sized edges, computes how much vertical space the gap
+   * between each pair of adjacent layers must have. Returns a per-gap
+   * map, not a single uniform gapY.
+   *
+   * The rowGap between layers L and L+1 is the max over all edges crossing
+   * that gap of the space required for:
+   *   - the edge's label rows (height), stacked
+   *   - the largest multiplicity adornment
+   *   - the arrowhead marker
+   *   - optional breathing padding
+   *
+   * Short, label-free edges use a small baseline gap. Long-labeled edges
+   * force wider gaps only in the rows they actually live in.
+   *
+   * @param {object} rank         output of rankNodes (layers, layerMax, directed)
+   * @param {Array}  edgeSizes    [{ source, target, labelHeight, labelWidth, multHeight, markerExtent, padding }]
+   * @param {object} opts         { baseGapY, baseGapX }
+   * @returns {{ rowGaps: {layerIdx: px}, colGaps: {layerIdx: {afterNodeIdx: px}}, minRowGap: px, minColGap: px }}
+   */
+  function budgetGaps(rank, edgeSizes, opts) {
+    opts = opts || {};
+    var baseGapY = finiteOr(opts.baseGapY, 40);
+    var baseGapX = finiteOr(opts.baseGapX, 40);
+    var result = { rowGaps: {}, colGaps: {}, minRowGap: baseGapY, minColGap: baseGapX };
+    if (!rank || !rank.layers) return result;
+
+    var layers = rank.layers;
+    var layerMax = rank.layerMax || 0;
+    // Initialize each row gap to the baseline
+    for (var g = 0; g < layerMax; g++) result.rowGaps[g] = baseGapY;
+
+    if (!Array.isArray(edgeSizes) || edgeSizes.length === 0) return result;
+
+    for (var i = 0; i < edgeSizes.length; i++) {
+      var es = edgeSizes[i];
+      if (!es) continue;
+      var sl = layers[es.source];
+      var tl = layers[es.target];
+      if (sl == null || tl == null) continue;
+      if (sl === tl) continue; // intra-layer edge — doesn't consume row gap
+
+      var lo = Math.min(sl, tl);
+      var hi = Math.max(sl, tl);
+
+      // Demand: label rows + multiplicity + marker + padding
+      var lh = finiteOr(es.labelHeight, 0);
+      var mh = finiteOr(es.multHeight, 0);
+      var mk = finiteOr(es.markerExtent, 10);
+      var pd = finiteOr(es.padding, 8);
+      // Heuristic — a single-gap edge gets the full demand. A multi-gap
+      // edge spreads demand since only one segment crosses a given gap.
+      var span = hi - lo;
+      var demand;
+      if (span <= 1) {
+        demand = lh + mh + mk + pd;
+      } else {
+        demand = Math.max(lh + pd, mk + pd);
+      }
+      for (var gi = lo; gi < hi; gi++) {
+        if (demand > (result.rowGaps[gi] || 0)) result.rowGaps[gi] = demand;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Stage 6 — placeOnGrid
+   *
+   * Given a layer assignment and per-gap budgets, compute Y coordinates.
+   * X coordinates are a caller's concern (they depend on column packing
+   * logic which varies by diagram type). This stage only handles the
+   * vertical axis, since that's what layered drawings care about.
+   *
+   * @param {object} rank         output of rankNodes
+   * @param {object} budget       output of budgetGaps
+   * @param {object} nodeSizes    { nodeId: { width, height } }
+   * @returns {{ y: {nodeId: px}, layerHeights: [px] }}
+   */
+  function placeOnGrid(rank, budget, nodeSizes) {
+    if (!rank || !rank.layers) return { y: {}, layerHeights: [] };
+    var layers = rank.layers;
+    var layerMax = rank.layerMax || 0;
+
+    // Bucket nodes by layer
+    var byLayer = [];
+    for (var l = 0; l <= layerMax; l++) byLayer.push([]);
+    for (var id in layers) byLayer[layers[id]].push(id);
+
+    var layerHeights = [];
+    var cursorY = 0;
+    var y = {};
+    for (var l2 = 0; l2 <= layerMax; l2++) {
+      var maxH = 0;
+      for (var ni = 0; ni < byLayer[l2].length; ni++) {
+        var nid = byLayer[l2][ni];
+        var h = nodeSizes && nodeSizes[nid] ? finiteOr(nodeSizes[nid].height, 0) : 0;
+        if (h > maxH) maxH = h;
+      }
+      layerHeights.push(maxH);
+      for (var ni2 = 0; ni2 < byLayer[l2].length; ni2++) {
+        y[byLayer[l2][ni2]] = cursorY;
+      }
+      cursorY += maxH;
+      if (l2 < layerMax) {
+        var gap = budget && budget.rowGaps ? finiteOr(budget.rowGaps[l2], 40) : 40;
+        cursorY += gap;
+      }
+    }
+    return { y: y, layerHeights: layerHeights };
+  }
+
+  // ───── Export ─────────────────────────────────────────────────────
+
   window.UMLLayoutCore = {
     // measurement
     measureEdgeRequirement: measureEdgeRequirement,
@@ -2962,6 +3219,10 @@
     // hygiene
     normalizeCoords: normalizeCoords,
     boundsOf: boundsOf,
+    // modular layout stages
+    rankNodes: rankNodes,
+    budgetGaps: budgetGaps,
+    placeOnGrid: placeOnGrid,
     // internal helpers exposed for tests
     _internal: { finiteOr: finiteOr, clamp: clamp, approxTextWidth: approxTextWidth }
   };
@@ -3407,6 +3668,10 @@
   function computeDirectedLayout(nodes, edges, gapX, gapY, direction, layoutPreference, extra) {
     extra = extra || {};
     var repairCrossLayerOverlaps = !!extra.repairCrossLayerOverlaps;
+    // Per-layer row gaps (optional) — if supplied, each row gap is sized
+    // to what actually crosses it instead of a uniform gapY. See
+    // UMLLayoutCore.budgetGaps.
+    var extraRowGaps = extra.rowGaps || null;
 
     var components = findWeaklyConnectedComponents(nodes, edges);
     if (components.length > 1) {
@@ -3663,6 +3928,10 @@
     var currentY = 0;
 
     // Phase 1: initial left-to-right packing + Y assignment
+    //
+    // If the caller provided per-layer `rowGaps` (output of budgetGaps),
+    // use them instead of a uniform gapY so each vertical gap is sized
+    // to the labels / adornments that actually live there.
     for (var l = 0; l <= layerMax; l++) {
       if (!layerGroups[l]) continue;
       var currentX = 0;
@@ -3678,7 +3947,8 @@
       layerGroups[l].forEach(function(u) {
          coords[u].y = currentY;
       });
-      currentY = cMaxY + gapY;
+      var thisRowGap = (extraRowGaps && isFinite(extraRowGaps[l])) ? extraRowGaps[l] : gapY;
+      currentY = cMaxY + thisRowGap;
     }
 
     // Phase 2: per-node ideal X based on parent centers (top-down)
@@ -3976,10 +4246,33 @@
     // and can be explicitly requested by any caller via options.repairCrossLayerOverlaps.
     var repairCrossLayerOverlaps = !!options.repairCrossLayerOverlaps ||
       layoutPreference === 'compact';
+
+    // Compose the modular pipeline: if the caller gave us per-edge label
+    // sizes, run rankNodes → budgetGaps to derive a per-row gap map.
+    // The underlying layout engine then places each layer using the
+    // correct gap for that layer.
+    //
+    // This replaces the old "single gapY for the whole diagram" model
+    // that forced us to over-size the uniform gap when ANY edge had a
+    // long label, wasting space elsewhere.
+    var precomputedRowGaps = null;
+    if (Array.isArray(options.edgeSizes) && options.edgeSizes.length > 0 &&
+        window.UMLLayoutCore && typeof window.UMLLayoutCore.rankNodes === 'function') {
+      try {
+        var rank = window.UMLLayoutCore.rankNodes(nodes, edges);
+        var budget = window.UMLLayoutCore.budgetGaps(rank, options.edgeSizes, {
+          baseGapY: gapY,
+          baseGapX: gapX
+        });
+        if (budget && budget.rowGaps) precomputedRowGaps = budget.rowGaps;
+      } catch (err) { /* swallow — fall back to uniform gapY */ }
+    }
+
     function runLayout(gx, gy, dir, pref) {
       try {
         return computeDirectedLayout(nodes, edges, gx, gy, dir, pref, {
-          repairCrossLayerOverlaps: repairCrossLayerOverlaps
+          repairCrossLayerOverlaps: repairCrossLayerOverlaps,
+          rowGaps: precomputedRowGaps
         });
       } catch (err) {
         // Never throw out of the public API — give callers a safe, empty
@@ -4731,7 +5024,31 @@
       effectiveGapY = Math.max(CFG.gapY, Math.round(CFG.gapY * 1.3));
     } else if (hasHierarchyEdges && layoutPreference === 'square') {
       effectiveGapX = Math.max(effectiveGapX, Math.round(effectiveGapX * 1.08));
-      effectiveGapY = Math.max(40, measuredFloor.minY, Math.round(CFG.gapY * 0.92));
+      effectiveGapY = Math.max(40, Math.round(CFG.gapY * 0.92));
+    }
+
+    // Per-edge label sizes — the budgetGaps stage uses these to size each
+    // row gap individually so long labels only push apart the specific
+    // layers they live in, not the whole diagram.
+    var clsLineHeight = CFG.fontSize + 4;
+    var classEdgeSizes = [];
+    for (var resi = 0; resi < relationships.length; resi++) {
+      var rrel = relationships[resi];
+      if (!rrel || rrel.from === rrel.to) continue;
+      var maxLbl = 0;
+      if (rrel.label) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.label, false, CFG.fontSizeStereotype));
+      if (rrel.fromMult) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.fromMult, false, CFG.fontSizeStereotype));
+      if (rrel.toMult) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.toMult, false, CFG.fontSizeStereotype));
+      var multCount = (rrel.label ? 1 : 0) + (rrel.fromMult ? 1 : 0) + (rrel.toMult ? 1 : 0);
+      classEdgeSizes.push({
+        source: rrel.from,
+        target: rrel.to,
+        labelWidth: maxLbl,
+        labelHeight: (multCount > 0 ? clsLineHeight : 0),
+        multHeight: multCount > 1 ? clsLineHeight : 0,
+        markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize),
+        padding: 6
+      });
     }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
@@ -4742,7 +5059,8 @@
       directionLocked: hasHierarchyEdges || !!parsed.directionLocked,
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSizeStereotype,
-      markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4
+      markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4,
+      edgeSizes: classEdgeSizes
     });
 
     // Read back positions
@@ -5299,9 +5617,19 @@
       var secondaryOffset = primaryOffset + 8;
       var markerLaneOffset = Math.max(CFG.diamondW + 8, CFG.diamondH * 0.65, CFG.arrowSize + 4);
       var rowOffset = CFG.fontSizeStereotype + 8;
-      var sourceInheritOffset = isSource && endpoint.dy > 0 && hasInheritAtBottom[routeInfo.rel.from]
-        ? CFG.triangleH + CFG.junctionGap + 4
-        : 0;
+      // Inheritance-triangle offset: only applies when the mult placement
+      // would actually overlap the triangle at the source's bottom.
+      // Previously this was unconditional — pushing mult labels ~38px below
+      // the source endpoint even when the route exited from a bottom
+      // position far from the triangle's X range (the triangle is centered
+      // on the source box's centerX with half-width = triangleW/2).
+      var sourceInheritOffset = 0;
+      if (isSource && endpoint.dy > 0 && hasInheritAtBottom[routeInfo.rel.from]) {
+        var triCenterX = entry.x + entry.box.width / 2;
+        var triHalfW = CFG.triangleW / 2 + 4; // +4 padding
+        var mustAvoidTriangle = Math.abs(endpoint.point.x - triCenterX) < triHalfW;
+        sourceInheritOffset = mustAvoidTriangle ? (CFG.triangleH + 6) : 0;
+      }
       var ownMarkerObstacles = isSource ? (routeInfo.sourceMarkerObstacles || []) : (routeInfo.targetMarkerObstacles || []);
       var ownHasMarker = ownMarkerObstacles.length > 0;
       var placementObstacles = excludeClassMarkerObstacles(
@@ -7568,13 +7896,16 @@
         seqMaxLabelW = Math.max(seqMaxLabelW, UMLShared.textWidth(mm.label, false, CFG.fontSize));
       }
     }
-    // Soft floor at roughly half the widest label — labels have white-stroke
-    // background, so some edge/box overlap is acceptable in compact mode.
+    // Soft floor for compact mode (labels can modestly overlap); hard floor
+    // for non-compact so participants move apart to fit long message labels.
     var seqSoftFloorGap = Math.max(20, Math.round(seqMaxLabelW * 0.5) + 8);
+    var seqHardFloorGap = Math.max(30, seqMaxLabelW + 16);
     if (parsed.layoutPreference === 'compact') {
       spacing.participantGap = Math.max(seqSoftFloorGap, Math.round(spacing.participantGap * 0.45));
       spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.55));
       spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.6));
+    } else {
+      spacing.participantGap = Math.max(spacing.participantGap, seqHardFloorGap);
     }
     var messageGapY = parsed.layoutPreference === 'compact' ? Math.max(18, Math.round(CFG.messageGapY * 0.5)) : CFG.messageGapY;
 
@@ -8605,25 +8936,31 @@
 
     var stateGapX = CFG.gapX;
     var stateGapY = CFG.gapY;
-    var stateFloor = { minX: 22, minY: 20 };
-    if (window.UMLLayoutCore && typeof window.UMLLayoutCore.computeMinGaps === 'function') {
-      try {
-        var sNodesById = {};
-        for (var sni = 0; sni < layoutNodes.length; sni++) sNodesById[layoutNodes[sni].id] = layoutNodes[sni];
-        stateFloor = window.UMLLayoutCore.computeMinGaps(layoutEdges, sNodesById, {
-          fontSize: CFG.fontSize,
-          markerExtent: CFG.arrowSize + 4,
-          floorX: 22,
-          floorY: 20
-        });
-      } catch (e) { /* keep default floor */ }
-    }
     if (parsed.layoutPreference === 'compact') {
-      var stateSoftX = Math.max(18, Math.round(stateFloor.minX * 0.5));
-      var stateSoftY = Math.max(16, Math.round(stateFloor.minY * 0.5));
-      stateGapX = Math.max(stateSoftX, Math.round(CFG.gapX * 0.45));
-      stateGapY = Math.max(stateSoftY, Math.round(CFG.gapY * 0.45));
+      stateGapX = Math.max(20, Math.round(CFG.gapX * 0.45));
+      stateGapY = Math.max(18, Math.round(CFG.gapY * 0.45));
     }
+
+    // Per-edge label size measurement — feeds into UMLAdvancedLayout's
+    // modular budgetGaps stage so each vertical gap is sized to exactly
+    // what crosses it, not to a uniform worst-case across the whole diagram.
+    var stateEdgeSizes = [];
+    var sLineHeight = CFG.fontSize + 4;
+    for (var tsi = 0; tsi < transitions.length; tsi++) {
+      var t = transitions[tsi];
+      if (!t || t.from === t.to) continue;
+      var ltext = t.label || '';
+      var labelW = ltext ? UMLShared.textWidth(ltext, false, CFG.fontSize) : 0;
+      stateEdgeSizes.push({
+        source: t.from,
+        target: t.to,
+        labelWidth: labelW,
+        labelHeight: ltext ? sLineHeight : 0,
+        markerExtent: CFG.arrowSize + 2,
+        padding: 8
+      });
+    }
+
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: stateGapX,
       gapY: stateGapY,
@@ -8631,7 +8968,8 @@
       layoutPreference: parsed.layoutPreference || null,
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
-      markerExtent: CFG.arrowSize + 4
+      markerExtent: CFG.arrowSize + 4,
+      edgeSizes: stateEdgeSizes
     });
 
     // Map coords back for top-level states
@@ -8678,73 +9016,113 @@
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var transitions = parsed.transitions;
+
+    // ── Direction-aware routing setup ────────────────────────────────
+    // Resolve the actual layout direction used by the engine (may differ
+    // from parsed.direction when the engine rotates TB↔LR based on the
+    // container aspect). Every downstream routing decision — forward vs
+    // back edge, exit/entry face, outside-lane axis, self-loop placement —
+    // MUST follow this direction. Hardcoding TB behaviour collapses LR
+    // diagrams into detours that weave through other states.
+    var actualDirection = (layout.layoutResult && layout.layoutResult.direction) || parsed.direction || 'TB';
+    var isTB = actualDirection !== 'LR';
+
     // Pre-compute distributed exit points to avoid overlapping lines from same source
     var customExits = {};  // ti -> {x, y}
 
-    // Compute max bounds for back-edge routing
-    var maxBoundsX = 0;
+    // Compute max bounds on BOTH axes — routing lanes live on the
+    // secondary axis (TB: right; LR: bottom) and we need to know where
+    // "past the diagram" is regardless of direction.
+    var maxBoundsX = 0, maxBoundsY = 0;
     for (var en0 in entries) {
       maxBoundsX = Math.max(maxBoundsX, entries[en0].x + entries[en0].box.width);
+      maxBoundsY = Math.max(maxBoundsY, entries[en0].y + entries[en0].box.height);
     }
-    var routeMarginX = maxBoundsX + CFG.gapX * 0.25;
+    // `routeMargin` is the secondary-axis coordinate of the back-edge
+    // outside lane. In TB it's an X just past the rightmost state; in LR
+    // it's a Y just below the bottommost state.
+    var routeMargin = isTB
+      ? maxBoundsX + CFG.gapX * 0.25
+      : maxBoundsY + CFG.gapY * 0.35;
 
-    // Group downward transitions by source state
-    var downByFrom = {};
+    // Axis helpers — keep per-entry accessors small and readable so the
+    // main routing logic below reads top-to-bottom without ternaries
+    // littering every line. `prim` = direction of graph flow (TB: y;
+    // LR: x). `sec` = perpendicular (TB: x; LR: y).
+    function primCenter(e) { return isTB ? (e.y + e.box.height / 2) : (e.x + e.box.width / 2); }
+    function secCenter(e)  { return isTB ? (e.x + e.box.width / 2)  : (e.y + e.box.height / 2); }
+    function primFar(e)    { return isTB ? (e.y + e.box.height)     : (e.x + e.box.width); }
+    function primNear(e)   { return isTB ? e.y                       : e.x; }
+    function secFar(e)     { return isTB ? (e.x + e.box.width)      : (e.y + e.box.height); }
+    function secNear(e)    { return isTB ? e.x                       : e.y; }
+    function secSize(e)    { return isTB ? e.box.width               : e.box.height; }
+    // Build a point from primary + secondary coords without the caller
+    // having to remember which axis is which.
+    function mkPt(prim, sec) { return isTB ? { x: sec, y: prim } : { x: prim, y: sec }; }
+
+    // Group forward transitions (target ahead of source on the primary
+    // axis) by source state — so when one state fans out to several
+    // downstream states, we spread the exit points along its far face.
+    var forwardByFrom = {};
     for (var ti0 = 0; ti0 < transitions.length; ti0++) {
       var tr0 = transitions[ti0];
       if (!entries[tr0.from] || !entries[tr0.to] || tr0.from === tr0.to) continue;
       var fe0 = entries[tr0.from], te0 = entries[tr0.to];
-      if ((te0.y + te0.box.height / 2) > (fe0.y + fe0.box.height / 2)) {
-        if (!downByFrom[tr0.from]) downByFrom[tr0.from] = [];
-        downByFrom[tr0.from].push(ti0);
+      if (primCenter(te0) > primCenter(fe0)) {
+        if (!forwardByFrom[tr0.from]) forwardByFrom[tr0.from] = [];
+        forwardByFrom[tr0.from].push(ti0);
       }
     }
-    // Distribute exit X positions for groups with multiple downward transitions
-    for (var fname in downByFrom) {
-      var dgroup = downByFrom[fname];
+    for (var fname in forwardByFrom) {
+      var dgroup = forwardByFrom[fname];
       if (dgroup.length < 2) continue;
       var fe = entries[fname];
-      // Sort by destination center X
+      // Sort by destination's secondary coord so exit points appear in
+      // the same order as their targets — avoids distributed exits
+      // criss-crossing in the first segment.
       dgroup.sort(function(a, b) {
         var ta = transitions[a], tb = transitions[b];
-        var cxa = entries[ta.to] ? entries[ta.to].x + entries[ta.to].box.width / 2 : 0;
-        var cxb = entries[tb.to] ? entries[tb.to].x + entries[tb.to].box.width / 2 : 0;
-        return cxa - cxb;
+        var tea = entries[ta.to], teb = entries[tb.to];
+        return (tea ? secCenter(tea) : 0) - (teb ? secCenter(teb) : 0);
       });
       for (var dgi = 0; dgi < dgroup.length; dgi++) {
-        var exitX = fe.x + fe.box.width * (dgi + 1) / (dgroup.length + 1);
-        customExits[dgroup[dgi]] = { x: exitX, y: fe.y + fe.box.height };
+        var frac = (dgi + 1) / (dgroup.length + 1);
+        var exitSec = secNear(fe) + secSize(fe) * frac;
+        customExits[dgroup[dgi]] = mkPt(primFar(fe), exitSec);
       }
     }
 
-    // Compute extra space needed for back-edge routes, self-loops, and labels
-    var extraRight = 0;
+    // Compute extra secondary-axis space needed for back-edge routes,
+    // self-loops, and their labels. Same formula for TB and LR — only
+    // the axis alias differs.
+    var extraSec = 0;
     for (var pt = 0; pt < transitions.length; pt++) {
       var ptr = transitions[pt];
       var pfe = entries[ptr.from], pte = entries[ptr.to];
       if (!pfe || !pte) continue;
       if (ptr.from === ptr.to) {
-        var slRight = pfe.x + pfe.box.width + CFG.selfLoopW;
-        if (ptr.label) slRight += 4 + UMLShared.textWidth(ptr.label, false, CFG.fontSize);
-        extraRight = Math.max(extraRight, slRight - maxBoundsX);
-      } else {
-        var pfcy = pfe.y + pfe.box.height / 2;
-        var ptcy = pte.y + pte.box.height / 2;
-        if (ptcy < pfcy - 10) {
-          var beRight = routeMarginX;
-          if (ptr.label) beRight += 8 + UMLShared.textWidth(ptr.label, false, CFG.fontSize) + CFG.labelBgPad * 2;
-          extraRight = Math.max(extraRight, beRight - maxBoundsX);
-        }
+        // Self-loop extends past the state on the secondary axis.
+        var slExtent = secFar(pfe) + CFG.selfLoopW;
+        if (ptr.label) slExtent += 4 + UMLShared.textWidth(ptr.label, false, CFG.fontSize);
+        extraSec = Math.max(extraSec, slExtent - (isTB ? maxBoundsX : maxBoundsY));
+      } else if (primCenter(pte) < primCenter(pfe) - 10) {
+        // Back-edge: target is "behind" the source on the primary axis.
+        // Its lane segment lives in the outside lane and its label hangs
+        // off that segment.
+        var beExtent = routeMargin;
+        if (ptr.label) beExtent += 8 + UMLShared.textWidth(ptr.label, false, CFG.fontSize) + CFG.labelBgPad * 2;
+        extraSec = Math.max(extraSec, beExtent - (isTB ? maxBoundsX : maxBoundsY));
       }
     }
 
-    // Group upward (back-edge) transitions by target state to stagger entry Y coordinates
+    // Group back-edges by TARGET and distribute their entry points along
+    // the target's secondary-far face (TB: right; LR: bottom).
     var backEdgeByTo = {};
     for (var bti = 0; bti < transitions.length; bti++) {
       var btr = transitions[bti];
       if (!entries[btr.from] || !entries[btr.to] || btr.from === btr.to) continue;
       var bfe = entries[btr.from], bte = entries[btr.to];
-      if ((bte.y + bte.box.height / 2) < (bfe.y + bfe.box.height / 2) - 10) {
+      if (primCenter(bte) < primCenter(bfe) - 10) {
         if (!backEdgeByTo[btr.to]) backEdgeByTo[btr.to] = [];
         backEdgeByTo[btr.to].push(bti);
       }
@@ -8756,107 +9134,115 @@
       var btarget = entries[bname];
       bgroup.sort(function(a, b) {
         var fa = entries[transitions[a].from], fb = entries[transitions[b].from];
-        var cya = fa ? fa.y + fa.box.height / 2 : 0;
-        var cyb = fb ? fb.y + fb.box.height / 2 : 0;
-        return cya - cyb;
+        return (fa ? primCenter(fa) : 0) - (fb ? primCenter(fb) : 0);
       });
       for (var bgi = 0; bgi < bgroup.length; bgi++) {
         var bfrac = (bgi + 1) / (bgroup.length + 1);
-        customEntries[bgroup[bgi]] = {
-          x: btarget.x + btarget.box.width,
-          y: btarget.y + btarget.box.height * bfrac
-        };
+        var entrySecCoord = secNear(btarget) + secSize(btarget) * bfrac;
+        // Back-edges re-enter the target at its secondary-FAR face so
+        // the route wraps around the outside without crossing the
+        // target. mkPt lifts this from primary/secondary semantics.
+        if (isTB) {
+          customEntries[bgroup[bgi]] = { x: btarget.x + btarget.box.width, y: btarget.y + btarget.box.height * bfrac };
+        } else {
+          customEntries[bgroup[bgi]] = { x: btarget.x + btarget.box.width * bfrac, y: btarget.y + btarget.box.height };
+        }
       }
     }
 
-    // Assign back-edge X margins based on source Y position (not transition index)
-    // to avoid crossings.  Back-edge entry points on the target's right side are
-    // sorted by source Y (higher source → higher entry).  To avoid crossings,
-    // HIGHER sources need LARGER margins (further out) so their vertical segments
-    // wrap OUTSIDE lower sources' horizontal entry segments.  This creates a
-    // proper nesting where each back-edge's vertical is outside the next one's.
+    // Assign back-edge secondary-axis margins based on source PRIMARY
+    // position so that farther-along sources wrap OUTSIDE nearer sources,
+    // producing nested lanes free of crossings.
     var backEdgeMargin = {};
     var backEdgeList = [];
     for (var bei = 0; bei < transitions.length; bei++) {
       var betr = transitions[bei];
       if (!entries[betr.from] || !entries[betr.to] || betr.from === betr.to) continue;
       var befe = entries[betr.from], bete = entries[betr.to];
-      if ((bete.y + bete.box.height / 2) < (befe.y + befe.box.height / 2) - 10) {
-        backEdgeList.push({ ti: bei, sourceY: befe.y + befe.box.height / 2 });
+      if (primCenter(bete) < primCenter(befe) - 10) {
+        backEdgeList.push({ ti: bei, sourcePrim: primCenter(befe) });
       }
     }
-    // Sort descending: highest source (smallest Y) gets largest margin index
-    backEdgeList.sort(function(a, b) { return b.sourceY - a.sourceY; });
+    // Farther-along sources (larger primary) get the OUTER lane.
+    backEdgeList.sort(function(a, b) { return a.sourcePrim - b.sourcePrim; });
+    // Lane gap must leave room for BOTH the next lane's line AND the
+    // label row that sits between them: label row (fontSize+6) + label
+    // pad (8) + line clearance (2) ≈ fontSize + 16. This stops a
+    // label placed on one lane from overlapping the label area of the
+    // next lane.
+    var laneStep = CFG.fontSize + 16;
     for (var bmi = 0; bmi < backEdgeList.length; bmi++) {
-      backEdgeMargin[backEdgeList[bmi].ti] = routeMarginX + (bmi * 10);
+      backEdgeMargin[backEdgeList[bmi].ti] = routeMargin + (bmi * laneStep);
     }
 
-    // ── Pairwise crossing detection for back-edges ──
-    // Compute hypothetical routes for all back-edges, detect pairwise crossings,
-    // and fix them by swapping entry Y + margin assignments.
+    // Pairwise crossing detection for back-edges — build hypothetical
+    // routes and swap margin/entry assignments when it strictly reduces
+    // crossings. Expressing geometry via mkPt makes this work in either
+    // axis orientation.
     for (var bname2 in backEdgeByTo) {
       var bg = backEdgeByTo[bname2];
       if (bg.length < 2) continue;
       var btgt = entries[bname2];
-      // Build route for each back-edge in this group
       var beRoutes = [];
       for (var bgi2 = 0; bgi2 < bg.length; bgi2++) {
         var bIdx = bg[bgi2];
         var btr2 = transitions[bIdx];
         var bfrom2 = entries[btr2.from];
-        var bEntry = customEntries[bIdx] || { x: btgt.x + btgt.box.width, y: btgt.y + btgt.box.height / 2 };
-        var bMargin = backEdgeMargin[bIdx] !== undefined ? backEdgeMargin[bIdx] : routeMarginX + (bIdx * 10);
+        var defaultEntry = mkPt(primCenter(btgt), secFar(btgt));
+        var bEntry = customEntries[bIdx] || defaultEntry;
+        var bMargin = backEdgeMargin[bIdx] !== undefined ? backEdgeMargin[bIdx] : routeMargin + (bIdx * laneStep);
+        var exitPt = mkPt(primCenter(bfrom2), secFar(bfrom2));
+        var entryPrim = isTB ? bEntry.y : bEntry.x;
         beRoutes.push({
           idx: bIdx,
           points: [
-            { x: bfrom2.x + bfrom2.box.width, y: bfrom2.y + bfrom2.box.height / 2 },
-            { x: bMargin, y: bfrom2.y + bfrom2.box.height / 2 },
-            { x: bMargin, y: bEntry.y },
-            { x: bEntry.x, y: bEntry.y }
+            exitPt,
+            mkPt(primCenter(bfrom2), bMargin),
+            mkPt(entryPrim, bMargin),
+            bEntry
           ],
-          entryY: bEntry.y,
+          entryPrim: entryPrim,
           margin: bMargin,
-          sourceY: bfrom2.y + bfrom2.box.height / 2
+          sourcePrim: primCenter(bfrom2)
         });
       }
-      // Check all pairs for crossings and try swapping
       for (var bi2 = 0; bi2 < beRoutes.length; bi2++) {
         for (var bj2 = bi2 + 1; bj2 < beRoutes.length; bj2++) {
           var crossCount = UMLShared.countRoutePairCrossings(beRoutes[bi2].points, beRoutes[bj2].points);
           if (crossCount === 0) continue;
-          // Try swapping their entry Y and margin
           var swappedA = [
             beRoutes[bi2].points[0],
-            { x: beRoutes[bj2].margin, y: beRoutes[bi2].sourceY },
-            { x: beRoutes[bj2].margin, y: beRoutes[bj2].entryY },
-            { x: beRoutes[bj2].points[3].x, y: beRoutes[bj2].entryY }
+            mkPt(beRoutes[bi2].sourcePrim, beRoutes[bj2].margin),
+            mkPt(beRoutes[bj2].entryPrim, beRoutes[bj2].margin),
+            beRoutes[bj2].points[3]
           ];
           var swappedB = [
             beRoutes[bj2].points[0],
-            { x: beRoutes[bi2].margin, y: beRoutes[bj2].sourceY },
-            { x: beRoutes[bi2].margin, y: beRoutes[bi2].entryY },
-            { x: beRoutes[bi2].points[3].x, y: beRoutes[bi2].entryY }
+            mkPt(beRoutes[bj2].sourcePrim, beRoutes[bi2].margin),
+            mkPt(beRoutes[bi2].entryPrim, beRoutes[bi2].margin),
+            beRoutes[bi2].points[3]
           ];
           var newCrossCount = UMLShared.countRoutePairCrossings(swappedA, swappedB);
           if (newCrossCount < crossCount) {
-            // Apply the swap
             var tmpMargin = backEdgeMargin[beRoutes[bi2].idx];
             backEdgeMargin[beRoutes[bi2].idx] = backEdgeMargin[beRoutes[bj2].idx];
             backEdgeMargin[beRoutes[bj2].idx] = tmpMargin;
             var tmpEntry = customEntries[beRoutes[bi2].idx];
             customEntries[beRoutes[bi2].idx] = customEntries[beRoutes[bj2].idx];
             customEntries[beRoutes[bj2].idx] = tmpEntry;
-            // Update route data for subsequent pair checks
             beRoutes[bi2].points = swappedA;
             beRoutes[bi2].margin = beRoutes[bj2].margin;
-            beRoutes[bi2].entryY = beRoutes[bj2].entryY;
+            beRoutes[bi2].entryPrim = beRoutes[bj2].entryPrim;
             beRoutes[bj2].points = swappedB;
             beRoutes[bj2].margin = beRoutes[bi2].margin;
-            beRoutes[bj2].entryY = beRoutes[bi2].entryY;
+            beRoutes[bj2].entryPrim = beRoutes[bi2].entryPrim;
           }
         }
       }
     }
+    // Axis-specific aliases consumed when sizing the SVG viewport below.
+    var extraRight = isTB ? extraSec : 0;
+    var extraBottom = isTB ? 0 : extraSec;
 
     // Pre-compute note positions for SVG bounds expansion
     var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries);
@@ -8874,7 +9260,7 @@
     var ox = layout.offsetX + CFG.svgPad + noteExtraL;
     var oy = layout.offsetY + CFG.svgPad + noteExtraT;
     var svgW = layout.width + extraRight + CFG.svgPad * 2 + noteExtraL + noteExtraR;
-    var svgH = layout.height + CFG.svgPad * 2 + noteExtraT + noteExtraB;
+    var svgH = layout.height + extraBottom + CFG.svgPad * 2 + noteExtraT + noteExtraB;
 
     var svg = [];
     var labelSvg = []; // Transition labels rendered after states so they appear on top
@@ -8894,25 +9280,53 @@
       var toE = entries[tr.to];
       if (!fromE || !toE) continue;
 
-      // Self-transition
+      // Self-transition — loop lives on the secondary-far face so it
+      // never obstructs the primary flow of the diagram.
       if (tr.from === tr.to) {
-        var sx = fromE.x + fromE.box.width;
-        var sy = fromE.y + fromE.box.height / 2 - 10;
         var lw = CFG.selfLoopW, lh = CFG.selfLoopH;
-        svg.push('<path d="M ' + sx + ' ' + sy + ' C ' + (sx + lw) + ' ' + (sy - lh) + ' ' +
-          (sx + lw) + ' ' + (sy + lh + 20) + ' ' + sx + ' ' + (sy + 20) +
+        var sPathStart, sPathCtrl1, sPathCtrl2, sPathEnd, sArrowTip, sArrowDir;
+        var loopLabelX, loopLabelY, loopLabelAnchor;
+        if (isTB) {
+          // Loop on the right face — vertical oval extending right.
+          var sx = fromE.x + fromE.box.width;
+          var sy = fromE.y + fromE.box.height / 2 - 10;
+          sPathStart = { x: sx, y: sy };
+          sPathCtrl1 = { x: sx + lw, y: sy - lh };
+          sPathCtrl2 = { x: sx + lw, y: sy + lh + 20 };
+          sPathEnd   = { x: sx, y: sy + 20 };
+          sArrowTip  = { x: sx, y: sy + 20, dx: -1, dy: 0 };
+          loopLabelX = sx + lw + 4;
+          loopLabelY = sy + 10;
+          loopLabelAnchor = 'start';
+        } else {
+          // Loop on the bottom face — horizontal oval extending down.
+          var sxh = fromE.x + fromE.box.width / 2 - 10;
+          var syh = fromE.y + fromE.box.height;
+          sPathStart = { x: sxh, y: syh };
+          sPathCtrl1 = { x: sxh - lh, y: syh + lw };
+          sPathCtrl2 = { x: sxh + lh + 20, y: syh + lw };
+          sPathEnd   = { x: sxh + 20, y: syh };
+          sArrowTip  = { x: sxh + 20, y: syh, dx: 0, dy: -1 };
+          loopLabelX = sxh + 10;
+          loopLabelY = syh + lw + CFG.fontSize + 2;
+          loopLabelAnchor = 'middle';
+        }
+        svg.push('<path d="M ' + sPathStart.x + ' ' + sPathStart.y + ' C ' +
+          sPathCtrl1.x + ' ' + sPathCtrl1.y + ' ' +
+          sPathCtrl2.x + ' ' + sPathCtrl2.y + ' ' +
+          sPathEnd.x + ' ' + sPathEnd.y +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-        // Arrowhead
-        UMLShared.drawArrow(svg, sx, sy + 20, -1, 0, colors.line);
+        UMLShared.drawArrow(svg, sArrowTip.x, sArrowTip.y, sArrowTip.dx, sArrowTip.dy, colors.line);
         if (tr.label) {
-          var loopLabelX = sx + lw + 4;
-          var loopLabelY = sy + 10;
+          var labelW = UMLShared.textWidth(tr.label, false, CFG.fontSize);
           labelSvg.push('<text x="' + loopLabelX + '" y="' + loopLabelY +
-            '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+            '" text-anchor="' + loopLabelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
             '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
+          var lblLeft = loopLabelAnchor === 'middle' ? loopLabelX - labelW / 2 :
+                        (loopLabelAnchor === 'end' ? loopLabelX - labelW : loopLabelX);
           placedLabels.push({
-            left: loopLabelX,
-            right: loopLabelX + UMLShared.textWidth(tr.label, false, CFG.fontSize),
+            left: lblLeft,
+            right: lblLeft + labelW,
             top: loopLabelY - CFG.fontSize - 2,
             bottom: loopLabelY + 4
           });
@@ -8925,71 +9339,107 @@
       var toCx = toE.x + toE.box.width / 2;
       var toCy = toE.y + toE.box.height / 2;
 
-      // Determine exit/entry points
-      var x1, y1, x2, y2;
+      // Direction-aware classification: primary axis drives forward/back
+      // edge distinction and the face used for exit/entry. Secondary
+      // axis drives same-layer adjacency.
       var dx = toCx - fromCx, dy = toCy - fromCy;
-      var isBackEdge = false;
-      var isHorizontal = false;
+      var primDelta = isTB ? dy : dx;
+      var secDelta = isTB ? dx : dy;
+      var isBackEdge = primDelta < -10;
+      // Same-layer: primary coords are close compared to secondary, so
+      // the arrow travels along the secondary axis (sideways in TB;
+      // vertically in LR). Forward-cross-layer is the default branch.
+      var isSameLayer = !isBackEdge && Math.abs(primDelta) < Math.abs(secDelta) * 0.5;
 
-      // Use pre-computed distributed exit point if available
+      var x1, y1, x2, y2;
+      var primaryRoute = !isSameLayer; // true → route along primary axis
+
       if (customExits[ti]) {
-        x1 = customExits[ti].x; y1 = customExits[ti].y;
-        x2 = toCx; y2 = toE.y;
-      } else if (dy < -10) {
-        // Back-edge going upward: route via right margin to avoid crossing
-        x1 = fromE.x + fromE.box.width; y1 = fromCy;
+        // Multi-forward distribution: exit on source's primary-far face.
+        x1 = customExits[ti].x;
+        y1 = customExits[ti].y;
+        if (isTB) { x2 = toCx; y2 = toE.y; }            // enter target's top
+        else      { x2 = toE.x; y2 = toCy; }            // enter target's left
+        primaryRoute = true;
+      } else if (isBackEdge) {
+        // Back-edge: exit on source's secondary-far face, wrap around
+        // the outside lane, re-enter on target's secondary-far face.
+        if (isTB) {
+          x1 = fromE.x + fromE.box.width; y1 = fromCy;    // exit right
+        } else {
+          x1 = fromCx; y1 = fromE.y + fromE.box.height;   // exit bottom
+        }
         if (customEntries[ti]) {
           x2 = customEntries[ti].x; y2 = customEntries[ti].y;
         } else {
-          x2 = toE.x + toE.box.width; y2 = toCy;
+          if (isTB) { x2 = toE.x + toE.box.width; y2 = toCy; } // enter right
+          else      { x2 = toCx; y2 = toE.y + toE.box.height; } // enter bottom
         }
-        isBackEdge = true;
-      } else if (Math.abs(dy) >= Math.abs(dx) * 0.5) {
-        // Vertical connection
-        if (dy > 0) {
-          x1 = fromCx; y1 = fromE.y + fromE.box.height;
-          x2 = toCx; y2 = toE.y;
+      } else if (isSameLayer) {
+        // Same-layer: exit/enter on the secondary-axis faces.
+        if (isTB) {
+          if (dx > 0) { x1 = fromE.x + fromE.box.width; y1 = fromCy; x2 = toE.x; y2 = toCy; }
+          else        { x1 = fromE.x;                    y1 = fromCy; x2 = toE.x + toE.box.width; y2 = toCy; }
         } else {
-          x1 = fromCx; y1 = fromE.y;
-          x2 = toCx; y2 = toE.y + toE.box.height;
+          if (dy > 0) { x1 = fromCx; y1 = fromE.y + fromE.box.height; x2 = toCx; y2 = toE.y; }
+          else        { x1 = fromCx; y1 = fromE.y;                    x2 = toCx; y2 = toE.y + toE.box.height; }
         }
       } else {
-        // Horizontal connection
-        if (dx > 0) {
-          x1 = fromE.x + fromE.box.width; y1 = fromCy;
-          x2 = toE.x; y2 = toCy;
+        // Forward cross-layer: exit/enter on the primary-axis faces.
+        if (isTB) {
+          if (primDelta > 0) { x1 = fromCx; y1 = fromE.y + fromE.box.height; x2 = toCx; y2 = toE.y; }
+          else               { x1 = fromCx; y1 = fromE.y;                    x2 = toCx; y2 = toE.y + toE.box.height; }
         } else {
-          x1 = fromE.x; y1 = fromCy;
-          x2 = toE.x + toE.box.width; y2 = toCy;
+          if (primDelta > 0) { x1 = fromE.x + fromE.box.width; y1 = fromCy; x2 = toE.x; y2 = toCy; }
+          else               { x1 = fromE.x;                    y1 = fromCy; x2 = toE.x + toE.box.width; y2 = toCy; }
         }
-        isHorizontal = true;
       }
 
       var points;
       if (isBackEdge && !customExits[ti]) {
-        // Back-edge via right margin — use Y-sorted margin to avoid crossings
-        var dynamicMargin = backEdgeMargin[ti] !== undefined ? backEdgeMargin[ti] : routeMarginX + (ti * 10);
-        points = [
-          { x: x1, y: y1 },
-          { x: dynamicMargin, y: y1 },
-          { x: dynamicMargin, y: y2 },
-          { x: x2, y: y2 }
-        ];
-      } else if (!isHorizontal && Math.abs(x1 - x2) < 2) {
-        // Straight vertical
-        points = [{ x: x1, y: y1 }, { x: x2, y: y2 }];
-      } else if (isHorizontal && Math.abs(y1 - y2) < 2) {
-        // Straight horizontal
-        points = [{ x: x1, y: y1 }, { x: x2, y: y2 }];
-      } else {
-        if (isHorizontal) {
-          // Z-route along horizontal axis (enters sideways at 90 degrees)
-          var midX = (x1 + x2) / 2;
-          points = [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
+        // Back-edge wraps around the secondary-far outside lane.
+        var dynamicMargin = backEdgeMargin[ti] !== undefined ? backEdgeMargin[ti] : routeMargin + (ti * laneStep);
+        if (isTB) {
+          // TB: lane is a vertical line at x=dynamicMargin.
+          points = [
+            { x: x1, y: y1 },
+            { x: dynamicMargin, y: y1 },
+            { x: dynamicMargin, y: y2 },
+            { x: x2, y: y2 }
+          ];
         } else {
-          // Z-route along vertical axis (enters top/bottom at 90 degrees)
+          // LR: lane is a horizontal line at y=dynamicMargin.
+          points = [
+            { x: x1, y: y1 },
+            { x: x1, y: dynamicMargin },
+            { x: x2, y: dynamicMargin },
+            { x: x2, y: y2 }
+          ];
+        }
+      } else if (primaryRoute && (isTB ? Math.abs(x1 - x2) < 2 : Math.abs(y1 - y2) < 2)) {
+        // Straight along the primary axis — aligned columns (TB) or rows (LR).
+        points = [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+      } else if (!primaryRoute && (isTB ? Math.abs(y1 - y2) < 2 : Math.abs(x1 - x2) < 2)) {
+        // Straight along the secondary axis — same-layer aligned.
+        points = [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+      } else if (primaryRoute) {
+        // Z-route through mid-primary so the route enters target's
+        // primary-near face at 90°.
+        if (isTB) {
           var midY = (y1 + y2) / 2;
           points = [{ x: x1, y: y1 }, { x: x1, y: midY }, { x: x2, y: midY }, { x: x2, y: y2 }];
+        } else {
+          var midX = (x1 + x2) / 2;
+          points = [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
+        }
+      } else {
+        // Same-layer Z-route through mid-secondary.
+        if (isTB) {
+          var midX2 = (x1 + x2) / 2;
+          points = [{ x: x1, y: y1 }, { x: midX2, y: y1 }, { x: midX2, y: y2 }, { x: x2, y: y2 }];
+        } else {
+          var midY2 = (y1 + y2) / 2;
+          points = [{ x: x1, y: y1 }, { x: x1, y: midY2 }, { x: x2, y: midY2 }, { x: x2, y: y2 }];
         }
       }
 
@@ -9052,16 +9502,29 @@
           if (so.x === toE.x && so.y === toE.y) stateSkipNames[obName] = true;
         }
         if (UMLShared.routeHitsObstacle(points, stateObsForRoute, stateSkipNames, null)) {
-          // Pick source/target sides from the endpoint geometry. For
-          // customExits we respect the computed exit point; otherwise
-          // derive sides from the dx/dy of the endpoints.
-          var srcSide2;
+          // Pick source/target sides from the actual exit/entry faces
+          // the routing block above chose. `primaryRoute` tells us
+          // whether the arrow entered the target on its primary-axis or
+          // secondary-axis face.
+          var srcSide2, tgtSide2;
           if (customExits[ti] && customExits[ti].side) {
             srcSide2 = customExits[ti].side;
+          } else if (primaryRoute) {
+            // Primary-axis route: TB → top/bottom; LR → left/right.
+            if (isTB) srcSide2 = primDelta > 0 ? 'bottom' : 'top';
+            else      srcSide2 = primDelta > 0 ? 'right'  : 'left';
           } else {
-            srcSide2 = isHorizontal ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
+            // Same-layer secondary-axis route: opposite of primary.
+            if (isTB) srcSide2 = secDelta > 0 ? 'right'  : 'left';
+            else      srcSide2 = secDelta > 0 ? 'bottom' : 'top';
           }
-          var tgtSide2 = isHorizontal ? (dx > 0 ? 'left' : 'right') : (dy > 0 ? 'top' : 'bottom');
+          if (primaryRoute) {
+            if (isTB) tgtSide2 = primDelta > 0 ? 'top'  : 'bottom';
+            else      tgtSide2 = primDelta > 0 ? 'left' : 'right';
+          } else {
+            if (isTB) tgtSide2 = secDelta > 0 ? 'left' : 'right';
+            else      tgtSide2 = secDelta > 0 ? 'top'  : 'bottom';
+          }
           var rerouted = UMLShared.routeOrthogonalConnector(
             { x: x1, y: y1, side: srcSide2, stub: 18 },
             { x: x2, y: y2, side: tgtSide2, stub: 18 },
@@ -9100,34 +9563,107 @@
       // short vertical transition.
       if (tr.label) {
         var trLabelW = UMLShared.textWidth(tr.label, false, CFG.fontSize);
-        var labelPlacement = UMLShared.placeOrthogonalLabel(tr.label, points, stateObstacles, placedLabels, {
-          fontSize: CFG.fontSize,
-          otherSegments: placedRouteSegments,
-          endpointPad: 18,
-          // Moderate midpoint pull — encourages proximity without forcing
-          // every competing label onto the same spot (which was the
-          // non-compact regression: close-only placements piled up).
-          preferredPointWeight: 0.22,
-          // Near positions first (low penalty), then "far" fallbacks so labels
-          // can escape collisions instead of stacking on top of each other.
-          verticalPlacements: [
+        // Preferred point: the geometric midpoint of the whole route —
+        // where UML convention places a transition label (Ambler G8, G122).
+        var trPreferredPoint = UMLShared.buildOrthogonalSegments(points).length
+          ? (function(){
+              // Approximate midpoint by arc length
+              var total = 0, segs = [];
+              for (var si = 0; si < points.length - 1; si++) {
+                var len = Math.abs(points[si+1].x - points[si].x) + Math.abs(points[si+1].y - points[si].y);
+                segs.push(len); total += len;
+              }
+              var target = total / 2, acc = 0;
+              for (var sj = 0; sj < segs.length; sj++) {
+                if (acc + segs[sj] >= target) {
+                  var lf = (target - acc) / Math.max(1, segs[sj]);
+                  return { x: points[sj].x + (points[sj+1].x - points[sj].x) * lf,
+                           y: points[sj].y + (points[sj+1].y - points[sj].y) * lf };
+                }
+                acc += segs[sj];
+              }
+              return points[Math.floor(points.length / 2)];
+            })()
+          : points[0];
+        // Back-edge labels all live in the outside lane. Forcing them
+        // to a single side of their lane (outside-the-diagram side)
+        // prevents adjacent lanes' labels from meeting in the middle
+        // and overlapping — which happens when one label defaults
+        // above and the neighbour defaults below.
+        //
+        // The dy offsets are chosen so the label's bounding rect sits
+        // ~7 px off the line (placeOrthogonalLabel's `preferredGap`
+        // default). Below: dy = labelH + 2 = fontSize + 8. Above: dy
+        // = -11 places the rect bottom 7 px above the line. Using
+        // mismatched offsets makes `opticalGapPenalty` prefer one side
+        // strongly — which is what we need for consistent lanes.
+        var labelVerticalPlacements, labelHorizontalPlacements;
+        if (isBackEdge) {
+          if (isTB) {
+            // TB: back-edge lane runs vertically past the right edge
+            // of the diagram. Labels go to the lane's right (outside).
+            labelVerticalPlacements = [
+              { anchor: 'start', dx: 8, dy: 0, penalty: 0 },
+              { anchor: 'end',   dx: -8, dy: 0, penalty: 6 }
+            ];
+            labelHorizontalPlacements = [
+              { anchor: 'middle', dx: 0, dy: -11, penalty: 0 },
+              { anchor: 'middle', dx: 0, dy: CFG.fontSize + 8, penalty: 6 }
+            ];
+          } else {
+            // LR: back-edge lane runs horizontally below the diagram.
+            // Labels go below the lane (outside the diagram body).
+            labelHorizontalPlacements = [
+              { anchor: 'middle', dx: 0, dy: CFG.fontSize + 8, penalty: 0 },
+              { anchor: 'middle', dx: 0, dy: -11, penalty: 6 }
+            ];
+            labelVerticalPlacements = [
+              { anchor: 'start', dx: 8, dy: 0, penalty: 0 },
+              { anchor: 'end',   dx: -8, dy: 0, penalty: 6 }
+            ];
+          }
+        } else {
+          // Forward / same-layer edges: the existing defaults work
+          // well because labels hug each route independently.
+          labelVerticalPlacements = [
             { anchor: 'start', dx: 6, dy: -4, penalty: 0 },
             { anchor: 'end',   dx: -6, dy: -4, penalty: 2 },
             { anchor: 'start', dx: 6, dy: CFG.fontSize + 4, penalty: 4 },
-            { anchor: 'end',   dx: -6, dy: CFG.fontSize + 4, penalty: 4 },
-            { anchor: 'start', dx: trLabelW + 10, dy: 0, penalty: 20 },
-            { anchor: 'end',   dx: -(trLabelW + 10), dy: 0, penalty: 20 }
-          ],
-          horizontalPlacements: [
-            { anchor: 'middle', dx: 0, dy: -8, penalty: 0 },
-            { anchor: 'middle', dx: 0, dy: CFG.fontSize + 8, penalty: 4 },
-            { anchor: 'middle', dx: 0, dy: -(CFG.fontSize + 14), penalty: 12 },
-            { anchor: 'middle', dx: 0, dy: CFG.fontSize * 2 + 10, penalty: 12 }
-          ],
+            { anchor: 'end',   dx: -6, dy: CFG.fontSize + 4, penalty: 4 }
+          ];
+          labelHorizontalPlacements = [
+            { anchor: 'middle', dx: 0, dy: -6, penalty: 0 },
+            { anchor: 'middle', dx: 0, dy: CFG.fontSize + 6, penalty: 3 }
+          ];
+        }
+        var labelPlacement = UMLShared.placeOrthogonalLabel(tr.label, points, stateObstacles, placedLabels, {
+          fontSize: CFG.fontSize,
+          otherSegments: placedRouteSegments,
+          endpointPad: 16,
+          preferredPoint: trPreferredPoint,
+          // Strong midpoint pull — a label 60px away from the route midpoint
+          // costs 60 × 1.2 = 72 penalty, comparable to segment.length*2. That
+          // ensures labels are glued near the route midpoint rather than
+          // drifting to a long adjacent segment.
+          preferredPointWeight: 1.2,
+          verticalPlacements: labelVerticalPlacements,
+          horizontalPlacements: labelHorizontalPlacements,
           scoreCandidate: function(segment, placement) {
-            var bonus = segment.isH ? 8 : -4;
+            // Prefer the primary segment orientation of the route for
+            // labels: in TB, back-edge labels live on the vertical lane
+            // segment; in LR, on the horizontal lane segment. Route
+            // forward/same-layer edges pick whichever segment scores
+            // highest.
+            var bonus = 0;
+            if (isBackEdge) {
+              // Strong bias toward the lane segment (horizontal in LR,
+              // vertical in TB) so labels don't wander onto the short
+              // stub segments next to the states.
+              bonus += (isTB ? !segment.isH : segment.isH) ? 18 : -6;
+            } else {
+              bonus += segment.isH ? 6 : 0;
+            }
             if (placement.anchor === 'middle') bonus += 2;
-            if (isBackEdge) bonus += segment.isH ? 18 : -12;
             return bonus;
           }
         });
@@ -9581,7 +10117,11 @@
     for (var ci_ig = 0; ci_ig < components.length && !hasIface; ci_ig++)
       for (var pi_ig = 0; pi_ig < components[ci_ig].ports.length; pi_ig++)
         if (components[ci_ig].ports[pi_ig].kind) { hasIface = true; break; }
-    var ifaceGapExtra = hasIface ? (CFG.ifaceStick + CFG.ifaceRadius) * 2 : 0;
+    // Use the socket (require) radius here — it's larger than the lollipop
+    // radius, so sizing gaps to the lollipop underestimates what the marker
+    // actually consumes and forces the layout into a tight regime where the
+    // hierarchical placement becomes asymmetric.
+    var ifaceGapExtra = hasIface ? (CFG.ifaceStick + CFG.ifaceSocketRadius) * 2 : 0;
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40 + ifaceGapExtra);
     var effectiveGapY = CFG.gapY;
     var compFloor = { minX: 32, minY: 22 };
@@ -9597,21 +10137,41 @@
         });
       } catch (e) { /* keep default floor */ }
     }
-    if (parsed.layoutPreference === 'compact') {
-      var compSoftX = Math.max(24, Math.round(compFloor.minX * 0.5));
-      var compSoftY = Math.max(16, Math.round(compFloor.minY * 0.5));
-      effectiveGapX = Math.max(compSoftX, Math.round(effectiveGapX * 0.45));
-      effectiveGapY = Math.max(compSoftY, Math.round(effectiveGapY * 0.45));
+    // Component diagrams deliberately skip a "compact" pipeline. Port
+    // stubs, interface markers, and in-gap edge labels already consume most
+    // of the inter-component space, so any aggressive shrink forces the
+    // hierarchical layout into asymmetric placements (Order flipped to the
+    // top-right in the Ball-and-Socket diagram) and makes the orthogonal
+    // router zigzag around boxes whose x-ranges now overlap. Past attempts
+    // delivered only a few percent of area savings while introducing
+    // visible detours — net worse. `layout compact` therefore falls
+    // through to the normal layout here.
+
+    // Per-connector label sizes for the budgetGaps stage.
+    var compLineHeight = CFG.fontSize + 4;
+    var compEdgeSizes = [];
+    for (var ceri = 0; ceri < connectors.length; ceri++) {
+      var crel = connectors[ceri];
+      if (!crel || crel.from === crel.to) continue;
+      var lw = crel.label ? UMLShared.textWidth(crel.label, false, CFG.fontSize) : 0;
+      compEdgeSizes.push({
+        source: crel.from, target: crel.to,
+        labelWidth: lw,
+        labelHeight: crel.label ? compLineHeight : 0,
+        markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius,
+        padding: 6
+      });
     }
 
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: parsed.direction || 'LR',
-      layoutPreference: parsed.layoutPreference || null,
+      layoutPreference: parsed.layoutPreference === 'compact' ? null : (parsed.layoutPreference || null),
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
-      markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4
+      markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
+      edgeSizes: compEdgeSizes
     });
     var actualDirection = result.direction || parsed.direction || 'LR';
 
@@ -12459,7 +13019,12 @@
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     adjustRenderedComponentLabels(container);
-    UMLShared.autoFitSVG(container);
+    // Compact: trim the auto-fit padding so the final viewBox sits closer
+    // to the actual content. The layout itself (node positions, edge
+    // routes) is untouched — this only shrinks the margin that autoFit
+    // adds around the bounding box of rendered elements.
+    var autoFitPad = parsed.layoutPreference === 'compact' ? 10 : 24;
+    UMLShared.autoFitSVG(container, autoFitPad);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -12688,6 +13253,21 @@
       deployGapY = Math.max(depSoftY, Math.round(CFG.gapY * 0.45));
     }
 
+    var depLineHeight = CFG.fontSize + 4;
+    var depEdgeSizes = [];
+    for (var deri = 0; deri < links.length; deri++) {
+      var dlk = links[deri];
+      if (!dlk || dlk.from === dlk.to) continue;
+      var dlw = dlk.label ? UMLShared.textWidth(dlk.label, false, CFG.fontSize) : 0;
+      depEdgeSizes.push({
+        source: dlk.from, target: dlk.to,
+        labelWidth: dlw,
+        labelHeight: dlk.label ? depLineHeight : 0,
+        markerExtent: CFG.arrowSize + CFG.node3dDepth,
+        padding: 6
+      });
+    }
+
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: effectiveGapX,
       gapY: deployGapY,
@@ -12695,7 +13275,8 @@
       layoutPreference: parsed.layoutPreference || null,
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
-      markerExtent: CFG.arrowSize + CFG.node3dDepth + 4
+      markerExtent: CFG.arrowSize + CFG.node3dDepth + 4,
+      edgeSizes: depEdgeSizes
     });
 
     for (var nm in result.nodes) {
@@ -13604,11 +14185,15 @@
 
   function applyUseCaseLayoutConventions(entries, parsed) {
     var ucCompactScale = parsed.layoutPreference === 'compact' ? 0.5 : 1;
-    var includeGroups = {};
-    var extendGroups = {};
+    var gapX = CFG.gapX * ucCompactScale;
+    var gapY = CFG.gapY * ucCompactScale;
+
+    // ── Phase 1: Parse all relationships ──
+    var includeGroups = {};   // targetId → [sourceIds]
+    var extendGroups = {};    // baseId → [extenderIds]
     var usecaseGeneralizations = {};
     var actorGeneralizations = {};
-    var actorAssociations = {};
+    var actorAssociations = {};  // actorId → [usecaseIds]
 
     function pushUnique(map, key, value) {
       if (!map[key]) map[key] = [];
@@ -13626,175 +14211,317 @@
       var kind = useCaseRelLabelKind(rel);
       if (kind === 'include' && fromEntry.type === 'usecase' && toEntry.type === 'usecase') {
         pushUnique(includeGroups, toId, fromId);
-        continue;
-      }
-      if (kind === 'extend' && fromEntry.type === 'usecase' && toEntry.type === 'usecase') {
+      } else if (kind === 'extend' && fromEntry.type === 'usecase' && toEntry.type === 'usecase') {
         pushUnique(extendGroups, toId, fromId);
-        continue;
-      }
-      if (kind === 'generalization') {
+      } else if (kind === 'generalization') {
         if (fromEntry.type === 'usecase' && toEntry.type === 'usecase') {
           pushUnique(usecaseGeneralizations, toId, fromId);
         } else if (fromEntry.type === 'actor' && toEntry.type === 'actor') {
           pushUnique(actorGeneralizations, toId, fromId);
         }
-        continue;
-      }
-      if ((kind === 'association' || kind === 'directed') && fromEntry.type !== toEntry.type) {
+      } else if ((kind === 'association' || kind === 'directed') && fromEntry.type !== toEntry.type) {
         if (fromEntry.type === 'actor' && toEntry.type === 'usecase') pushUnique(actorAssociations, fromId, toId);
         if (toEntry.type === 'actor' && fromEntry.type === 'usecase') pushUnique(actorAssociations, toId, fromId);
       }
     }
 
-    for (var includeTarget in includeGroups) {
-      var includeSources = includeGroups[includeTarget];
-      var targetEntry = entries[includeTarget];
-      if (!targetEntry || !includeSources.length) continue;
+    // ── Phase 2: Classify use cases into layout columns ──
+    // Column 0 (core): directly connected to actors
+    // Column 1 (include): targets of <<include>>
+    // Extend: below their base (same column)
+    // Identify which use cases are include-only targets (not directly connected to actors)
+    var isIncludeTarget = {};
+    var isExtender = {};
+    for (var incT in includeGroups) isIncludeTarget[incT] = true;
+    for (var extB in extendGroups) {
+      var exts = extendGroups[extB];
+      for (var exi = 0; exi < exts.length; exi++) isExtender[exts[exi]] = extB;
+    }
+
+    // Build actor family order for use case sorting
+    var actorGenChildren = {};
+    for (var agpId in actorGeneralizations) {
+      var agcList = actorGeneralizations[agpId];
+      for (var agci = 0; agci < agcList.length; agci++) actorGenChildren[agcList[agci]] = agpId;
+    }
+
+    var actorOrder = {};
+    var orderIdx = 0;
+    for (var aoId in actorAssociations) {
+      if (actorGenChildren[aoId]) continue;
+      actorOrder[aoId] = orderIdx++;
+      if (actorGeneralizations[aoId]) {
+        var aoChildren = actorGeneralizations[aoId];
+        for (var aoci = 0; aoci < aoChildren.length; aoci++) actorOrder[aoChildren[aoci]] = orderIdx++;
+      }
+    }
+
+    // Reverse map: ucId → [actorIds]
+    var ucToActors = {};
+    for (var ucaId in actorAssociations) {
+      var ucaList = actorAssociations[ucaId];
+      for (var ucai = 0; ucai < ucaList.length; ucai++) {
+        if (!ucToActors[ucaList[ucai]]) ucToActors[ucaList[ucai]] = [];
+        ucToActors[ucaList[ucai]].push(ucaId);
+      }
+    }
+
+    // ── Phase 3: Position use cases from scratch ──
+    // Separate core UCs (connected to actors, not include-only) from include targets and extenders
+    var coreUcIds = [];
+    var includeOnlyIds = [];
+    for (var ucId in entries) {
+      if (!entries[ucId] || entries[ucId].type !== 'usecase') continue;
+      if (isIncludeTarget[ucId] && !ucToActors[ucId]) {
+        includeOnlyIds.push(ucId);
+      } else if (!isExtender[ucId]) {
+        coreUcIds.push(ucId);
+      }
+      // extenders will be positioned relative to their base
+    }
+
+    // Sort core UCs by actor weight (parent's UCs first, then children's)
+    function ucSortWeight(ucId) {
+      var actors = ucToActors[ucId] || [];
+      if (actors.length === 0) return 999;
+      var sum = 0;
+      for (var i = 0; i < actors.length; i++) sum += (actorOrder[actors[i]] !== undefined ? actorOrder[actors[i]] : 999);
+      return sum / actors.length;
+    }
+    coreUcIds.sort(function(a, b) { return ucSortWeight(a) - ucSortWeight(b); });
+
+    // Position core UCs in a single column with even spacing
+    var coreX = 200; // starting X for core use cases
+    var startY = 40;
+    var ucSpacingY = gapY * 1.2;
+    var curY = startY;
+    for (var ci = 0; ci < coreUcIds.length; ci++) {
+      var cEntry = entries[coreUcIds[ci]];
+      cEntry.x = coreX - cEntry.box.width / 2;
+      cEntry.y = curY;
+      curY += cEntry.box.height + ucSpacingY;
+    }
+
+    // Position include targets to the RIGHT of their source (G77)
+    for (var incTarget in includeGroups) {
+      var incSources = includeGroups[incTarget];
+      var tEntry = entries[incTarget];
+      if (!tEntry) continue;
       var rightMost = -Infinity;
-      var sumCenterY = 0;
-      for (var si = 0; si < includeSources.length; si++) {
-        var sourceEntry = entries[includeSources[si]];
-        rightMost = Math.max(rightMost, sourceEntry.x + sourceEntry.box.width);
-        sumCenterY += entryCenterY(sourceEntry);
+      var sumY = 0;
+      for (var isi = 0; isi < incSources.length; isi++) {
+        var sEntry = entries[incSources[isi]];
+        rightMost = Math.max(rightMost, sEntry.x + sEntry.box.width);
+        sumY += entryCenterY(sEntry);
       }
-      targetEntry.x = rightMost + CFG.gapX * 0.7 * ucCompactScale;
-      setEntryCenterY(targetEntry, sumCenterY / includeSources.length);
+      tEntry.x = rightMost + gapX * 0.7;
+      setEntryCenterY(tEntry, sumY / incSources.length);
     }
 
-    for (var extendBase in extendGroups) {
-      var extenders = extendGroups[extendBase];
-      var baseEntry = entries[extendBase];
-      if (!baseEntry || !extenders.length) continue;
-      extenders.sort(function(a, b) {
-        return entryCenterY(entries[a]) - entryCenterY(entries[b]);
-      });
-      for (var ei = 0; ei < extenders.length; ei++) {
-        var extenderEntry = entries[extenders[ei]];
-        setEntryCenterX(extenderEntry, entryCenterX(baseEntry));
-        extenderEntry.y = baseEntry.y + baseEntry.box.height + CFG.gapY * 0.8 * ucCompactScale +
-          ei * (extenderEntry.box.height + CFG.gapY * 0.45 * ucCompactScale);
+    // Position extenders BELOW their base (G78)
+    for (var extBase in extendGroups) {
+      var extList = extendGroups[extBase];
+      var bEntry = entries[extBase];
+      if (!bEntry) continue;
+      for (var eli = 0; eli < extList.length; eli++) {
+        var extEntry = entries[extList[eli]];
+        setEntryCenterX(extEntry, entryCenterX(bEntry));
+        extEntry.y = bEntry.y + bEntry.box.height + gapY * 0.7 +
+          eli * (extEntry.box.height + gapY * 0.4);
       }
     }
 
-    for (var usecaseParent in usecaseGeneralizations) {
-      var usecaseChildren = usecaseGeneralizations[usecaseParent];
-      var parentEntry = entries[usecaseParent];
-      if (!parentEntry || !usecaseChildren.length) continue;
-      usecaseChildren.sort(function(a, b) {
-        return entryCenterY(entries[a]) - entryCenterY(entries[b]);
-      });
-      for (var ugi = 0; ugi < usecaseChildren.length; ugi++) {
-        var childEntry = entries[usecaseChildren[ugi]];
-        setEntryCenterX(childEntry, entryCenterX(parentEntry));
-        childEntry.y = parentEntry.y + parentEntry.box.height + CFG.gapY * 0.8 * ucCompactScale +
-          ugi * (childEntry.box.height + CFG.gapY * 0.45 * ucCompactScale);
+    // Position UC generalizations below parent
+    for (var ucParent in usecaseGeneralizations) {
+      var ucChildren = usecaseGeneralizations[ucParent];
+      var pEntry = entries[ucParent];
+      if (!pEntry) continue;
+      for (var ugi = 0; ugi < ucChildren.length; ugi++) {
+        var ucChild = entries[ucChildren[ugi]];
+        setEntryCenterX(ucChild, entryCenterX(pEntry));
+        ucChild.y = pEntry.y + pEntry.box.height + gapY * 0.7 +
+          ugi * (ucChild.box.height + gapY * 0.4);
       }
     }
 
-    for (var actorParent in actorGeneralizations) {
-      var actorChildren = actorGeneralizations[actorParent];
-      var actorParentEntry = entries[actorParent];
-      if (!actorParentEntry || !actorChildren.length) continue;
-      actorChildren.sort(function(a, b) {
-        return entryCenterY(entries[a]) - entryCenterY(entries[b]);
-      });
-      for (var agi = 0; agi < actorChildren.length; agi++) {
-        var actorChildEntry = entries[actorChildren[agi]];
-        setEntryCenterX(actorChildEntry, entryCenterX(actorParentEntry));
-        actorChildEntry.y = actorParentEntry.y + actorParentEntry.box.height + CFG.gapY * 0.55 * ucCompactScale +
-          agi * (actorChildEntry.box.height + CFG.gapY * 0.3 * ucCompactScale);
-      }
+    // ── Phase 4: Resolve use case overlaps ──
+    var allUcIds = [];
+    for (var overlapId in entries) {
+      if (entries[overlapId] && entries[overlapId].type === 'usecase') allUcIds.push(overlapId);
     }
-
-    var actorIds = [];
-    for (var actorId in actorAssociations) {
-      var actorEntry = entries[actorId];
-      var associatedUsecases = actorAssociations[actorId];
-      if (!actorEntry || !associatedUsecases.length) continue;
-      var leftMost = Infinity;
-      var totalCenterY = 0;
-      for (var ai = 0; ai < associatedUsecases.length; ai++) {
-        var usecaseEntry = entries[associatedUsecases[ai]];
-        leftMost = Math.min(leftMost, usecaseEntry.x);
-        totalCenterY += entryCenterY(usecaseEntry);
-      }
-      actorEntry.x = leftMost - actorEntry.box.width - CFG.gapX * 0.7 * ucCompactScale;
-      setEntryCenterY(actorEntry, totalCenterY / associatedUsecases.length);
-      actorIds.push(actorId);
-    }
-
-    spreadEntriesVertically(entries, actorIds, 18);
-
-    // Resolve actor–usecase collisions: an actor placed to the left of its use case
-    // may land on top of another use case that sits between them (e.g. when an
-    // include chain places the target use case to the right of an intermediate one).
-    // Push the colliding actor further left (or to the right if that is closer).
-    var gap = CFG.gapX * 0.5 * ucCompactScale;
-    for (var colActorId in entries) {
-      var colActor = entries[colActorId];
-      if (!colActor || colActor.type !== 'actor') continue;
-      for (var colUcId in entries) {
-        var colUc = entries[colUcId];
-        if (!colUc || colUc.type !== 'usecase') continue;
-        // Check overlap (with a small margin)
-        var overlapX = colActor.x + colActor.box.width > colUc.x + gap &&
-                       colActor.x < colUc.x + colUc.box.width - gap;
-        var overlapY = colActor.y + colActor.box.height > colUc.y + gap &&
-                       colActor.y < colUc.y + colUc.box.height - gap;
-        if (overlapX && overlapY) {
-          // Choose side: push left past the use case's left edge
-          colActor.x = colUc.x - colActor.box.width - gap * 2;
+    // Simple overlap resolution: push overlapping UCs down
+    allUcIds.sort(function(a, b) { return entries[a].y - entries[b].y; });
+    for (var oi = 0; oi < allUcIds.length; oi++) {
+      var ucA = entries[allUcIds[oi]];
+      for (var oj = oi + 1; oj < allUcIds.length; oj++) {
+        var ucB = entries[allUcIds[oj]];
+        var overX = ucA.x < ucB.x + ucB.box.width + 10 && ucB.x < ucA.x + ucA.box.width + 10;
+        var overY = ucA.y < ucB.y + ucB.box.height + 8 && ucB.y < ucA.y + ucA.box.height + 8;
+        if (overX && overY) {
+          ucB.y = ucA.y + ucA.box.height + gapY * 0.5;
         }
       }
     }
 
-    // Ensure all actors are outside system boundaries (actors may be on left or right)
+    // ── Phase 5: Position actors ──
+    var allUcMinX = Infinity, allUcMaxX = -Infinity;
+    var allUcMinY = Infinity, allUcMaxY = -Infinity;
+    for (var ucScanId in entries) {
+      var ucScanE = entries[ucScanId];
+      if (!ucScanE || ucScanE.type !== 'usecase') continue;
+      allUcMinX = Math.min(allUcMinX, ucScanE.x);
+      allUcMaxX = Math.max(allUcMaxX, ucScanE.x + ucScanE.box.width);
+      allUcMinY = Math.min(allUcMinY, ucScanE.y);
+      allUcMaxY = Math.max(allUcMaxY, ucScanE.y + ucScanE.box.height);
+    }
+    var ucMidX = (allUcMinX + allUcMaxX) / 2;
+
+    var leftActorIds = [];
+    var rightActorIds = [];
+    var actorMedianY = {};
+
+    for (var actorId in actorAssociations) {
+      if (actorGenChildren[actorId]) continue;
+      var actorEntry = entries[actorId];
+      var associatedUsecases = actorAssociations[actorId];
+      if (!actorEntry || !associatedUsecases.length) continue;
+
+      // Include children's use cases for parent positioning
+      var familyUcs = associatedUsecases.slice();
+      if (actorGeneralizations[actorId]) {
+        var chActors = actorGeneralizations[actorId];
+        for (var cai = 0; cai < chActors.length; cai++) {
+          var chUcs = actorAssociations[chActors[cai]];
+          if (chUcs) {
+            for (var cui = 0; cui < chUcs.length; cui++) {
+              if (familyUcs.indexOf(chUcs[cui]) === -1) familyUcs.push(chUcs[cui]);
+            }
+          }
+        }
+      }
+
+      var ucYs = [];
+      var allRight = true;
+      for (var ai = 0; ai < familyUcs.length; ai++) {
+        var usecaseEntry = entries[familyUcs[ai]];
+        if (!usecaseEntry) continue;
+        ucYs.push(entryCenterY(usecaseEntry));
+        if (entryCenterX(usecaseEntry) <= ucMidX) allRight = false;
+      }
+      ucYs.sort(function(a, b) { return a - b; });
+      actorMedianY[actorId] = ucYs.length > 0 ? ucYs[Math.floor(ucYs.length / 2)] : 0;
+
+      if (allRight) rightActorIds.push(actorId);
+      else leftActorIds.push(actorId);
+    }
+
+    leftActorIds.sort(function(a, b) { return actorMedianY[a] - actorMedianY[b]; });
+    rightActorIds.sort(function(a, b) { return actorMedianY[a] - actorMedianY[b]; });
+
+    function positionActorGroup(ids, centerX) {
+      if (ids.length === 0) return;
+      if (ids.length === 1) {
+        setEntryCenterX(entries[ids[0]], centerX);
+        setEntryCenterY(entries[ids[0]], actorMedianY[ids[0]]);
+        return;
+      }
+      var totalH = 0;
+      for (var i = 0; i < ids.length; i++) totalH += entries[ids[i]].box.height;
+      var span = allUcMaxY - allUcMinY;
+      var spacing = Math.max(18, (span - totalH) / (ids.length - 1));
+      var curY = allUcMinY;
+      for (var j = 0; j < ids.length; j++) {
+        setEntryCenterX(entries[ids[j]], centerX);
+        entries[ids[j]].y = curY;
+        curY += entries[ids[j]].box.height + spacing;
+      }
+      spreadEntriesVertically(entries, ids, 18);
+    }
+
+    var actorGapX = gapX * 0.7;
+    var maxActorW = 60;
+    var allActors = leftActorIds.concat(rightActorIds);
+    for (var mwi = 0; mwi < allActors.length; mwi++) {
+      maxActorW = Math.max(maxActorW, entries[allActors[mwi]].box.width);
+    }
+    positionActorGroup(leftActorIds, allUcMinX - maxActorW / 2 - actorGapX);
+    positionActorGroup(rightActorIds, allUcMaxX + maxActorW / 2 + actorGapX);
+
+    // ── Phase 6: Ensure actors outside system boundaries ──
     if (parsed.systems && parsed.systems.length > 0) {
       var sysBounds = [];
       for (var syi = 0; syi < parsed.systems.length; syi++) {
         var sys = parsed.systems[syi];
         var sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
-        var hasUsecaseMember = false;
+        var hasMember = false;
         for (var smi = 0; smi < sys.members.length; smi++) {
           var smid = parsed.aliasToId[sys.members[smi]] || sys.members[smi];
           var sme = entries[smid];
           if (!sme || sme.type !== 'usecase') continue;
-          hasUsecaseMember = true;
+          hasMember = true;
           sMinX = Math.min(sMinX, sme.x - CFG.sysPadX);
           sMinY = Math.min(sMinY, sme.y - CFG.sysPadY);
           sMaxX = Math.max(sMaxX, sme.x + sme.box.width + CFG.sysPadX);
           sMaxY = Math.max(sMaxY, sme.y + sme.box.height + CFG.sysPadY);
         }
-        if (hasUsecaseMember) {
-          sysBounds.push({ minX: sMinX, minY: sMinY, maxX: sMaxX, maxY: sMaxY });
-        }
+        if (hasMember) sysBounds.push({ minX: sMinX, minY: sMinY, maxX: sMaxX, maxY: sMaxY });
       }
       for (var actorCheckId in entries) {
-        var actorCheckEntry = entries[actorCheckId];
-        if (!actorCheckEntry || actorCheckEntry.type !== 'actor') continue;
-        for (var sbi2 = 0; sbi2 < sysBounds.length; sbi2++) {
-          var sb = sysBounds[sbi2];
-          if (actorCheckEntry.x + actorCheckEntry.box.width > sb.minX &&
-              actorCheckEntry.x < sb.maxX &&
-              actorCheckEntry.y + actorCheckEntry.box.height > sb.minY &&
-              actorCheckEntry.y < sb.maxY) {
-            // Determine side based on actor center vs system center
-            var aCenterX = actorCheckEntry.x + actorCheckEntry.box.width / 2;
-            var sCenterX = (sb.minX + sb.maxX) / 2;
-            if (aCenterX <= sCenterX) {
-              actorCheckEntry.x = sb.minX - actorCheckEntry.box.width - CFG.gapX * 0.7 * ucCompactScale;
+        var ace = entries[actorCheckId];
+        if (!ace || ace.type !== 'actor') continue;
+        for (var sbi = 0; sbi < sysBounds.length; sbi++) {
+          var sb = sysBounds[sbi];
+          if (ace.x + ace.box.width > sb.minX && ace.x < sb.maxX &&
+              ace.y + ace.box.height > sb.minY && ace.y < sb.maxY) {
+            if (entryCenterX(ace) <= (sb.minX + sb.maxX) / 2) {
+              ace.x = sb.minX - ace.box.width - actorGapX;
             } else {
-              actorCheckEntry.x = sb.maxX + CFG.gapX * 0.7 * ucCompactScale;
+              ace.x = sb.maxX + actorGapX;
             }
           }
         }
       }
-      // Re-spread all actors vertically after boundary adjustments
-      var allActorIds = [];
-      for (var reSpreadId in entries) {
-        if (entries[reSpreadId] && entries[reSpreadId].type === 'actor') allActorIds.push(reSpreadId);
+    }
+
+    // ── Phase 7: Final actor alignment ──
+    var allLeftIds = [], allRightIds = [];
+    var finalLeftCX = Infinity, finalRightCX = -Infinity;
+    for (var fid in entries) {
+      var fe = entries[fid];
+      if (!fe || fe.type !== 'actor') continue;
+      if (entryCenterX(fe) < ucMidX) {
+        allLeftIds.push(fid);
+        finalLeftCX = Math.min(finalLeftCX, entryCenterX(fe));
+      } else {
+        allRightIds.push(fid);
+        finalRightCX = Math.max(finalRightCX, entryCenterX(fe));
       }
-      spreadEntriesVertically(entries, allActorIds, 18);
+    }
+    for (var fli = 0; fli < allLeftIds.length; fli++) setEntryCenterX(entries[allLeftIds[fli]], finalLeftCX);
+    for (var fri = 0; fri < allRightIds.length; fri++) setEntryCenterX(entries[allRightIds[fri]], finalRightCX);
+    allLeftIds.sort(function(a, b) { return entries[a].y - entries[b].y; });
+    allRightIds.sort(function(a, b) { return entries[a].y - entries[b].y; });
+    spreadEntriesVertically(entries, allLeftIds, 18);
+    spreadEntriesVertically(entries, allRightIds, 18);
+
+    // ── Phase 8: Actor generalization — children side-by-side below parent ──
+    for (var actorParent in actorGeneralizations) {
+      var actorChildren = actorGeneralizations[actorParent];
+      var actorParentEntry = entries[actorParent];
+      if (!actorParentEntry || !actorChildren.length) continue;
+      var parentCX = entryCenterX(actorParentEntry);
+      var childY = actorParentEntry.y + actorParentEntry.box.height + gapY * 1.2;
+      var childGapX = gapX * 0.6;
+      var totalChildW = 0;
+      for (var agi = 0; agi < actorChildren.length; agi++) totalChildW += entries[actorChildren[agi]].box.width;
+      totalChildW += (actorChildren.length - 1) * childGapX;
+      var startX = parentCX - totalChildW / 2;
+      for (var agi2 = 0; agi2 < actorChildren.length; agi2++) {
+        var actorChildEntry = entries[actorChildren[agi2]];
+        actorChildEntry.x = startX;
+        actorChildEntry.y = childY;
+        startX += actorChildEntry.box.width + childGapX;
+      }
     }
   }
 
@@ -13861,6 +14588,25 @@
       ucGapX = Math.max(ucSoftX, Math.round(CFG.gapX * 0.45));
       ucGapY = Math.max(ucSoftY, Math.round(CFG.gapY * 0.45));
     }
+
+    var ucLineHeight = CFG.fontSize + 4;
+    var ucEdgeSizes = [];
+    for (var ueri = 0; ueri < relationships.length; ueri++) {
+      var urel = relationships[ueri];
+      if (!urel) continue;
+      var ufromId = parsed.aliasToId[urel.from] || urel.from;
+      var utoId = parsed.aliasToId[urel.to] || urel.to;
+      if (ufromId === utoId) continue;
+      var ulw = urel.label ? UMLShared.textWidth(urel.label, false, CFG.fontSize) : 0;
+      ucEdgeSizes.push({
+        source: ufromId, target: utoId,
+        labelWidth: ulw,
+        labelHeight: urel.label ? ucLineHeight : 0,
+        markerExtent: CFG.arrowSize,
+        padding: 6
+      });
+    }
+
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: ucGapX,
       gapY: ucGapY,
@@ -13868,7 +14614,8 @@
       layoutPreference: parsed.layoutPreference || null,
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
-      markerExtent: CFG.arrowSize + 4
+      markerExtent: CFG.arrowSize + 4,
+      edgeSizes: ucEdgeSizes
     });
 
     // Map positions back
@@ -14013,8 +14760,27 @@
         UMLShared.escapeXml(sbox.name) + '</text>');
     }
 
+    // ── Group actor generalizations for tree-style rendering ──
+    var actorInheritGroups = {};  // parentId → [childId, ...]
+    var actorGenRelSkip = {};     // index → true (skip in generic loop)
+    for (var agri = 0; agri < relationships.length; agri++) {
+      var agrel = relationships[agri];
+      if (agrel.type !== 'generalization') continue;
+      var agFromId = parsed.aliasToId[agrel.from] || agrel.from;
+      var agToId = parsed.aliasToId[agrel.to] || agrel.to;
+      var agFromE = entries[agFromId];
+      var agToE = entries[agToId];
+      if (!agFromE || !agToE) continue;
+      if (agFromE.type === 'actor' && agToE.type === 'actor') {
+        if (!actorInheritGroups[agToId]) actorInheritGroups[agToId] = [];
+        actorInheritGroups[agToId].push(agFromId);
+        actorGenRelSkip[agri] = true;
+      }
+    }
+
     // ── Draw relationships ──
     for (var ri = 0; ri < relationships.length; ri++) {
+      if (actorGenRelSkip[ri]) continue; // rendered as tree-style later
       var rel = relationships[ri];
       var fromId = parsed.aliasToId[rel.from] || rel.from;
       var toId = parsed.aliasToId[rel.to] || rel.to;
@@ -14027,19 +14793,48 @@
       var toCx = toE.x + toE.box.width / 2;
       var toCy = toE.y + toE.box.height / 2;
 
-      // Compute intersection points with element boundaries
-      var p1 = clipToElement(fromE, fromCx, fromCy, toCx, toCy);
-      var p2 = clipToElement(toE, toCx, toCy, fromCx, fromCy);
-
       var isDashed = rel.type === 'dependency';
       var dashAttr = isDashed ? ' stroke-dasharray="6,4"' : '';
+      var lineColor = isDashed ? colors.secondaryLine : colors.line;
 
-      // Draw line
-      svg.push('<line x1="' + p1.x + '" y1="' + p1.y + '" x2="' + p2.x + '" y2="' + p2.y +
-        '" stroke="' + (isDashed ? colors.secondaryLine : colors.line) + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+      // Route around intermediate use case ellipses
+      var skipIds = {};
+      skipIds[fromId] = true;
+      skipIds[toId] = true;
+      var waypoints = routeAroundEllipses(fromCx, fromCy, toCx, toCy, entries, skipIds);
+
+      if (waypoints.length > 0) {
+        // Build full path: start → waypoints → end
+        var allPts = [{ x: fromCx, y: fromCy }];
+        for (var wi = 0; wi < waypoints.length; wi++) allPts.push(waypoints[wi]);
+        allPts.push({ x: toCx, y: toCy });
+
+        // Clip first and last segments to element boundaries
+        var p1 = clipToElement(fromE, allPts[0].x, allPts[0].y, allPts[1].x, allPts[1].y);
+        var lastIdx = allPts.length - 1;
+        var p2 = clipToElement(toE, allPts[lastIdx].x, allPts[lastIdx].y, allPts[lastIdx - 1].x, allPts[lastIdx - 1].y);
+        allPts[0] = p1;
+        allPts[lastIdx] = p2;
+
+        var pathParts = [];
+        for (var pi = 0; pi < allPts.length; pi++) {
+          pathParts.push(allPts[pi].x + ',' + allPts[pi].y);
+        }
+        svg.push('<polyline points="' + pathParts.join(' ') +
+          '" fill="none" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+
+        // Arrowhead direction from last segment
+        var adx = p2.x - allPts[lastIdx - 1].x, ady = p2.y - allPts[lastIdx - 1].y;
+      } else {
+        // Straight line (no obstacles)
+        var p1 = clipToElement(fromE, fromCx, fromCy, toCx, toCy);
+        var p2 = clipToElement(toE, toCx, toCy, fromCx, fromCy);
+        svg.push('<line x1="' + p1.x + '" y1="' + p1.y + '" x2="' + p2.x + '" y2="' + p2.y +
+          '" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+        var adx = p2.x - p1.x, ady = p2.y - p1.y;
+      }
 
       // Arrowhead at target
-      var adx = p2.x - p1.x, ady = p2.y - p1.y;
       var alen = Math.sqrt(adx * adx + ady * ady);
       if (alen > 0) { adx /= alen; ady /= alen; }
 
@@ -14100,6 +14895,76 @@
         UMLShared.escapeXml(e2.data.name) + '</text>');
     }
 
+    // ── Draw actor inheritance (tree-style, like class diagrams) ──
+    var triH = CFG.arrowSize * 1.2 * 1.04;  // triangle height (matches drawHollowTriangle)
+    var triW = CFG.arrowSize * 1.2 * 0.52;  // triangle half-width
+    for (var aipId in actorInheritGroups) {
+      var aipChildren = actorInheritGroups[aipId];
+      var parentE = entries[aipId];
+      if (!parentE) continue;
+
+      var parentCx = parentE.x + parentE.box.width / 2;
+      var parentBot = parentE.y + parentE.box.height;  // bottom of actor including label
+
+      // Hollow triangle pointing up at parent bottom
+      var triTop = parentBot;
+      var triBot = triTop + triH;
+      svg.push('<polygon points="' +
+        parentCx + ',' + triTop + ' ' +
+        (parentCx - triW) + ',' + triBot + ' ' +
+        (parentCx + triW) + ',' + triBot +
+        '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + (CFG.strokeWidth * 1.02) + '" stroke-linejoin="miter"/>');
+
+      if (aipChildren.length === 1) {
+        // Single child: orthogonal routing
+        var childE = entries[aipChildren[0]];
+        var childCx = childE.x + childE.box.width / 2;
+        var childTop = childE.y;
+        if (Math.abs(parentCx - childCx) < 1) {
+          // Aligned: single vertical line
+          svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + childCx + '" y2="' + childTop +
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        } else {
+          // Orthogonal: vertical → horizontal → vertical
+          var juncY = (triBot + childTop) / 2;
+          svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + parentCx + '" y2="' + juncY +
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          svg.push('<line x1="' + parentCx + '" y1="' + juncY + '" x2="' + childCx + '" y2="' + juncY +
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          svg.push('<line x1="' + childCx + '" y1="' + juncY + '" x2="' + childCx + '" y2="' + childTop +
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        }
+      } else {
+        // Multiple children: shared-target tree
+        var childCxArr = [];
+        var childTopArr = [];
+        for (var aci = 0; aci < aipChildren.length; aci++) {
+          var ch = entries[aipChildren[aci]];
+          childCxArr.push(ch.x + ch.box.width / 2);
+          childTopArr.push(ch.y);
+        }
+        var minChildTop = Math.min.apply(null, childTopArr);
+        var juncY = (triBot + minChildTop) / 2;
+
+        // Trunk: triangle bottom to junction
+        svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + parentCx + '" y2="' + juncY +
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+
+        // Horizontal bar spanning all children
+        var leftCx = Math.min.apply(null, childCxArr.concat([parentCx]));
+        var rightCx = Math.max.apply(null, childCxArr.concat([parentCx]));
+        svg.push('<line x1="' + leftCx + '" y1="' + juncY + '" x2="' + rightCx + '" y2="' + juncY +
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+
+        // Vertical stems to each child
+        for (var aci2 = 0; aci2 < aipChildren.length; aci2++) {
+          var cx = childCxArr[aci2];
+          svg.push('<line x1="' + cx + '" y1="' + juncY + '" x2="' + cx + '" y2="' + childTopArr[aci2] +
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        }
+      }
+    }
+
     // ── Draw labels on top ──
     for (var li = 0; li < labelSvg.length; li++) {
       svg.push(labelSvg[li]);
@@ -14129,6 +14994,73 @@
 
     svg.push(UMLShared.svgClose());
     return svg.join('\n');
+  }
+
+  // ─── Line-through-ellipse avoidance ──────────────────────────────
+
+  /**
+   * Check if line segment (x1,y1)-(x2,y2) passes through an ellipse (cx,cy,rx,ry).
+   * Returns true if the line intersects the ellipse interior (not just tangent).
+   */
+  function lineIntersectsEllipse(x1, y1, x2, y2, cx, cy, rx, ry) {
+    // Transform to unit circle coordinates
+    var dx1 = (x1 - cx) / rx, dy1 = (y1 - cy) / ry;
+    var dx2 = (x2 - cx) / rx, dy2 = (y2 - cy) / ry;
+    var ddx = dx2 - dx1, ddy = dy2 - dy1;
+    var a = ddx * ddx + ddy * ddy;
+    var b = 2 * (dx1 * ddx + dy1 * ddy);
+    var c = dx1 * dx1 + dy1 * dy1 - 1;
+    var disc = b * b - 4 * a * c;
+    if (disc < 0) return false;
+    var sqrtDisc = Math.sqrt(disc);
+    var t1 = (-b - sqrtDisc) / (2 * a);
+    var t2 = (-b + sqrtDisc) / (2 * a);
+    // Line segment intersects if any t in (0,1) — use small margin to avoid endpoints
+    return (t1 > 0.05 && t1 < 0.95) || (t2 > 0.05 && t2 < 0.95) ||
+           (t1 < 0.05 && t2 > 0.95); // line passes fully through
+  }
+
+  /**
+   * Find waypoints to route a line around obstructing ellipses.
+   * Returns array of {x,y} points (excluding start/end).
+   */
+  function routeAroundEllipses(x1, y1, x2, y2, entries, skipIds) {
+    var waypoints = [];
+    var margin = 12; // px margin around elements
+    for (var eid in entries) {
+      if (skipIds[eid]) continue;
+      var e = entries[eid];
+      if (!e) continue;
+
+      var cx = e.x + e.box.width / 2;
+      var cy = e.y + e.box.height / 2;
+      var midY = (y1 + y2) / 2;
+
+      if (e.type === 'usecase') {
+        var rx = e.box.width / 2;
+        var ry = e.box.height / 2;
+        if (lineIntersectsEllipse(x1, y1, x2, y2, cx, cy, rx + margin, ry + margin)) {
+          var above = cy - ry - margin;
+          var below = cy + ry + margin;
+          var routeY = (Math.abs(above - midY) < Math.abs(below - midY)) ? above : below;
+          waypoints.push({ x: cx, y: routeY, dist: Math.abs(cx - x1) });
+        }
+      } else if (e.type === 'actor') {
+        // Treat actor as a rectangular obstacle (stick figure + label)
+        var arx = e.box.width / 2 + margin;
+        var ary = e.box.height / 2 + margin;
+        // Approximate actor as an ellipse for intersection test
+        if (lineIntersectsEllipse(x1, y1, x2, y2, cx, cy, arx, ary)) {
+          var above = e.y - margin;
+          var below = e.y + e.box.height + margin;
+          var routeY = (Math.abs(above - midY) < Math.abs(below - midY)) ? above : below;
+          waypoints.push({ x: cx, y: routeY, dist: Math.abs(cx - x1) });
+        }
+      }
+    }
+    // Sort waypoints by distance from start
+    waypoints.sort(function(a, b) { return a.dist - b.dist; });
+    return waypoints;
   }
 
   // ─── Geometry Helpers ─────────────────────────────────────────────
@@ -14689,6 +15621,23 @@
       actGapX = Math.max(actSoftX, Math.round(CFG.gapX * 0.45));
       actGapY = Math.max(actSoftY, Math.round(CFG.gapY * 0.45));
     }
+
+    var actLineHeight = CFG.fontSize + 4;
+    var actEdgeSizes = [];
+    for (var aeri = 0; aeri < edgeList.length; aeri++) {
+      var aed = edgeList[aeri];
+      if (!aed || aed.from === aed.to) continue;
+      var alt = aed.guard ? '[' + aed.guard + ']' : '';
+      var alw = alt ? UMLShared.textWidth(alt, false, CFG.fontSize) : 0;
+      actEdgeSizes.push({
+        source: aed.from, target: aed.to,
+        labelWidth: alw,
+        labelHeight: alt ? actLineHeight : 0,
+        markerExtent: CFG.arrowSize,
+        padding: 6
+      });
+    }
+
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
       gapX: actGapX,
       gapY: actGapY,
@@ -14696,7 +15645,8 @@
       layoutPreference: parsed.layoutPreference || null,
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
-      markerExtent: CFG.arrowSize + 4
+      markerExtent: CFG.arrowSize + 4,
+      edgeSizes: actEdgeSizes
     });
 
     // Map coords back (Y positions from Sugiyama, X will be overridden for swimlanes)
