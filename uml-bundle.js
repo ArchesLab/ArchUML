@@ -56,7 +56,7 @@
     if (value === 'vertical' || value === 'top-to-bottom' || value === 'tb') {
       return { direction: 'TB', layoutPreference: null, shadowEnabled: null };
     }
-    if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'compact' || value === 'auto' || value === 'default' || value === 'none') {
+    if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'compact' || value === 'tight' || value === 'auto' || value === 'default' || value === 'none') {
       return {
         direction: null,
         layoutPreference: (value === 'default' || value === 'none') ? 'auto' : value,
@@ -646,7 +646,7 @@
              'with','try','except','finally','raise','pass','break','continue','yield','lambda','global','nonlocal','assert','del'],
     java: ['public','private','protected','static','final','abstract','class','interface','extends','implements',
            'new','return','if','else','for','while','do','switch','case','break','continue','try','catch','finally',
-           'throw','throws','void','import','package','this','super'],
+           'throw','throws','void','boolean','int','long','double','float','char','byte','short','import','package','this','super'],
     javascript: ['function','const','let','var','return','if','else','for','while','do','switch','case','break',
                  'continue','try','catch','finally','throw','new','class','extends','import','export','default',
                  'async','await','yield','this','typeof','instanceof'],
@@ -16383,11 +16383,12 @@
       layoutEdges.push({ source: src, target: tgt, type: 'navigable' });
     }
 
+    var isTight = parsed.layoutPreference === 'tight';
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
-      gapX: CFG.gapX,
-      gapY: CFG.gapY,
+      gapX: isTight ? 0 : CFG.gapX,
+      gapY: isTight ? 0 : CFG.gapY,
       direction: parsed.direction || 'TB',
-      layoutPreference: parsed.layoutPreference || null,
+      layoutPreference: isTight ? null : (parsed.layoutPreference || null),
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.arrowSize + 4
