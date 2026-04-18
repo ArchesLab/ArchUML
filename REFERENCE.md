@@ -264,7 +264,7 @@ ConcreteService ..> Request : depends on
 
 ```
 A "multiplicity" -- "multiplicity" B : label
-A "1" -- "0..*" B : label
+A "1" -- "*" B : label
 A "1" *-- "1..*" B
 ```
 
@@ -285,8 +285,8 @@ class Student {
   + id: int
 }
 University "1" *-- "1..*" Department : contains
-Department "1" -- "0..*" Professor : employs
-Professor "1" -- "0..*" Student : advises
+Department "1" -- "*" Professor : employs
+Professor "1" -- "*" Student : advises
 @enduml
 ```
 
@@ -305,8 +305,8 @@ class Student {
   + id: int
 }
 University "1" *-- "1..*" Department : contains
-Department "1" -- "0..*" Professor : employs
-Professor "1" -- "0..*" Student : advises
+Department "1" -- "*" Professor : employs
+Professor "1" -- "*" Student : advises
 @enduml
 </code></pre>
 
@@ -425,7 +425,7 @@ class ConcreteObserver {
 }
 ConcreteSubject ..|> Subject
 ConcreteObserver ..|> Observer
-Subject "1" -- "0..*" Observer : observers
+Subject "1" -- "*" Observer : observers
 ConcreteObserver --> ConcreteSubject : subject
 note right of Subject.notifyObservers
   for each o in observers {
@@ -462,7 +462,7 @@ class ConcreteObserver {
 }
 ConcreteSubject ..|> Subject
 ConcreteObserver ..|> Observer
-Subject "1" -- "0..*" Observer : observers
+Subject "1" -- "*" Observer : observers
 ConcreteObserver --> ConcreteSubject : subject
 note right of Subject.notifyObservers
   for each o in observers {

@@ -10366,17 +10366,19 @@
       var preferred = defaultPortSide(entry.comp.name, portDef);
       var centerX = entry.x + entry.box.width / 2;
       var edgeX = side === 'left' ? entry.x : entry.x + entry.box.width;
-      var score = side === preferred ? 0 : (portDef.kind ? 110 : portDef.direction ? 30 : 12);
+      var score = side === preferred ? 0 : (portDef.kind ? 110 : portDef.direction ? 100 : 12);
 
       for (var psi = 0; psi < partnerSamples.length; psi++) {
         var sample = partnerSamples[psi];
         var horizontalSpan = Math.abs(sample.x - edgeX);
         score += horizontalSpan * 0.08;
 
+        // Cap the wrong-side penalty per partner so a single distant
+        // back-edge cannot overwhelm majority-side or direction preferences.
         if (side === 'left' && sample.x > centerX + 18) {
-          score += 32 + (sample.x - centerX) * 0.6;
+          score += Math.min(150, 32 + (sample.x - centerX) * 0.6);
         } else if (side === 'right' && sample.x < centerX - 18) {
-          score += 32 + (centerX - sample.x) * 0.6;
+          score += Math.min(150, 32 + (centerX - sample.x) * 0.6);
         }
       }
 
@@ -12333,10 +12335,30 @@
       }
     })();
 
+    // ── Sort connectors: forward edges first, then by span length ──
+    // Routing forward (left-to-right) edges first establishes clean paths;
+    // back-edges then route around them, reducing crossings.
+    var connectorOrder = [];
+    for (var coi = 0; coi < connectors.length; coi++) connectorOrder.push(coi);
+    connectorOrder.sort(function(a, b) {
+      var ca = connectors[a], cb = connectors[b];
+      var ea = entries[ca.from], eb = entries[cb.from];
+      var ta = entries[ca.to], tb = entries[cb.to];
+      if (!ea || !ta) return 1;
+      if (!eb || !tb) return -1;
+      var dxA = (ta.x + ta.box.width / 2) - (ea.x + ea.box.width / 2);
+      var dxB = (tb.x + tb.box.width / 2) - (eb.x + eb.box.width / 2);
+      var isBackA = dxA < -20 ? 1 : 0;
+      var isBackB = dxB < -20 ? 1 : 0;
+      if (isBackA !== isBackB) return isBackA - isBackB;
+      return Math.abs(dxA) - Math.abs(dxB);
+    });
+
     // ── Draw connectors ──
     var placedLabels = [];
     var connectorRoutes = [];
-    for (var ci = 0; ci < connectors.length; ci++) {
+    for (var cii = 0; cii < connectorOrder.length; cii++) {
+      var ci = connectorOrder[cii];
       var conn = connectors[ci];
       var fromE = entries[conn.from];
       var toE = entries[conn.to];
