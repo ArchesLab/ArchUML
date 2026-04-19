@@ -105,22 +105,23 @@ B --> C
 
 ## Element Highlighting
 
-Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill. The suffix is recognised across all diagram types and pairs with any stereotype or block body.
+Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill, optionally with a texture keyword to overlay a pattern. The suffix is recognised across all diagram types and pairs with any stereotype or block body.
 
 ```
 class Alice #lightblue
 class Bob <<service>> #FFEB3B
+class Draft #pink hatched               ← colour + texture overlay
+class Legacy dotted                     ← texture only
 abstract class Shape #pink { ... }
-state Active #lightgreen
+state Active #lightgreen crosshatch
 [Frontend] #orange
-component Backend #lightcoral
-node WebServer #lightblue
+component Backend #lightcoral grid
+node WebServer #lightblue striped
 actor User #lightgreen
-usecase "Login" as UC1 #FFEB3B
-participant Alice #lightblue
-:Task; #lightgreen        (activity — standalone action)
-"Validate" --> "Save" #lightgreen   (activity — tints the target node)
-box "Input" as a #lightblue         (freeform)
+usecase "Login" as UC1 #FFEB3B hatched
+participant Alice #lightblue dotted
+"Validate" --> "Save" #lightgreen       (activity — tints the target node)
+box "Input" as a #lightblue hatched     (freeform)
 ```
 
 Color formats accepted:
@@ -132,6 +133,27 @@ Color formats accepted:
 | Hex (6-digit) | `#FFEB3B` | Standard RGB |
 | Hex (8-digit) | `#FFEB3BCC` | RGB + alpha |
 | Named | `#lightblue`, `#Red`, `#salmon` | Any CSS color name |
+
+### Texture Overlays
+
+A texture keyword may follow the `#color` suffix (or stand alone) to draw a pattern on top of the fill. The pattern is a semi-transparent SVG overlay, so the underlying colour still shows through:
+
+| Keyword | Pattern |
+|---|---|
+| `hatched` | Diagonal lines |
+| `crosshatch` | Diagonal cross-hatching |
+| `dotted` | Dot grid |
+| `grid` | Fine rectangular grid |
+| `striped` | Bold stripes |
+
+```
+class Draft dotted                  ← texture only (default fill)
+class WIP #FFEB3B hatched           ← colour + diagonal lines
+state Broken #FF9999 crosshatch
+component Legacy #lightcoral grid
+```
+
+### Compartment Shading
 
 For class diagrams, when a class has both a header and body compartments the header is rendered with a slightly darker shade of the highlight for visual separation. Classes without members use the exact colour supplied. Stroke, text, and default theme colours are not altered, so highlighted elements remain legible under any theme.
 
@@ -166,6 +188,44 @@ Alice --> Bob
 Bob --> Charlie
 Shape <|-- Charlie
 Drawable <|.. Bob
+@enduml
+</code></pre>
+
+**Example — mixed textures in a class diagram:**
+
+```
+@startuml
+class Plain
+class Colour #lightblue
+class Hatched #lightblue hatched
+class Cross #FFEB3B crosshatch
+class Dotted dotted
+class Grid #99FF99 grid
+class Stripe #pink striped { + go() }
+Plain --> Colour
+Colour --> Hatched
+Hatched --> Cross
+Cross --> Dotted
+Dotted --> Grid
+Grid --> Stripe
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+class Plain
+class Colour #lightblue
+class Hatched #lightblue hatched
+class Cross #FFEB3B crosshatch
+class Dotted dotted
+class Grid #99FF99 grid
+class Stripe #pink striped { + go() }
+Plain --> Colour
+Colour --> Hatched
+Hatched --> Cross
+Cross --> Dotted
+Dotted --> Grid
+Grid --> Stripe
 @enduml
 </code></pre>
 
@@ -215,6 +275,8 @@ enum EnumName
 class Name <<StereotypeName>>
 class Name #color                 ← highlight (see Element Highlighting)
 class Name <<Stereotype>> #color
+class Name #color hatched         ← highlight + texture overlay
+class Name dotted                 ← texture only
 ```
 
 **Example:**
