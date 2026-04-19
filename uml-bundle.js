@@ -17146,25 +17146,33 @@
 
       if (!currentBranch) continue;
 
+      // Strip optional #color and texture keyword before matching commit/merge syntax.
+      var cHL = UMLShared.parseHighlightColor(line);
+      var cLine = cHL.stripped;
+
       // <id> merge <branch> ["message"]
-      var mergeMatch = line.match(/^(\S+)\s+merge\s+(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/i);
+      var mergeMatch = cLine.match(/^(\S+)\s+merge\s+(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/i);
       if (mergeMatch) {
         currentBranch.commits.push({
           id: mergeMatch[1],
           message: mergeMatch[3] ? mergeMatch[3].replace(/\\"/g, '"') : ('Merge ' + mergeMatch[2] + ' into ' + currentBranch.name),
           merge: true,
-          mergeFrom: mergeMatch[2]
+          mergeFrom: mergeMatch[2],
+          highlight: cHL.highlight,
+          texture: cHL.texture
         });
         continue;
       }
 
       // <id> ["message"]
-      var commitMatch = line.match(/^(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/);
+      var commitMatch = cLine.match(/^(\S+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/);
       if (commitMatch) {
         currentBranch.commits.push({
           id: commitMatch[1],
           message: commitMatch[2] ? commitMatch[2].replace(/\\"/g, '"') : '',
-          merge: false
+          merge: false,
+          highlight: cHL.highlight,
+          texture: cHL.texture
         });
         continue;
       }
@@ -17206,6 +17214,8 @@
           col: 0,
           row: 0,
           branchColor: null,
+          highlight: c.highlight || null,
+          texture: c.texture || null,
         };
         commitMap[c.id] = commit;
         commitsInDeclOrder.push(commit);
@@ -17372,8 +17382,15 @@
         annotation = annotMatch[2].trim();
       }
 
+      var ftHL = UMLShared.parseHighlightColor(content);
+      var ftHighlight = null, ftTexture = null;
+      if (ftHL.highlight || ftHL.texture) {
+        content = ftHL.stripped;
+        ftHighlight = ftHL.highlight;
+        ftTexture = ftHL.texture;
+      }
       var isFolder = content.length > 0 && content.charAt(content.length - 1) === '/';
-      rows.push({ depth: depth, name: content, isFolder: isFolder, annotation: annotation });
+      rows.push({ depth: depth, name: content, isFolder: isFolder, annotation: annotation, highlight: ftHighlight, texture: ftTexture });
     }
 
     // Pre-compute sibling / ancestor continuation info for connector drawing.
@@ -17487,8 +17504,19 @@
 
       var iconX = row2.depth * CFG.indentPx + 2;
       var iconY = yMid - CFG.iconSize / 2;
-      if (row2.isFolder) drawFolderIcon(svg, iconX, iconY, colors);
-      else drawFileIcon(svg, iconX, iconY, colors);
+      var rowColors = row2.highlight
+        ? { headerFill: row2.highlight, fill: row2.highlight, stroke: colors.stroke, text: colors.text }
+        : colors;
+      if (row2.highlight) {
+        svg.push('<rect x="0" y="' + yTop + '" width="' + maxRowW + '" height="' + CFG.rowHeight +
+          '" fill="' + row2.highlight + '" fill-opacity="0.22" rx="3" stroke="none"/>');
+      }
+      if (row2.texture) {
+        svg.push('<rect x="0" y="' + yTop + '" width="' + maxRowW + '" height="' + CFG.rowHeight +
+          '" fill="url(#uml-tx-' + row2.texture + ')" rx="3" stroke="none"/>');
+      }
+      if (row2.isFolder) drawFolderIcon(svg, iconX, iconY, rowColors);
+      else drawFileIcon(svg, iconX, iconY, rowColors);
 
       var textX = iconX + CFG.iconSize + CFG.iconGap;
       var textY = yMid + CFG.fontSize * 0.35;
