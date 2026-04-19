@@ -84,6 +84,78 @@
     };
   }
 
+  // ─── Element Highlighting ──────────────────────────────────────
+  //
+  // PlantUML-compatible `#color` suffix on element declarations. Accepts
+  // 3/4/6/8-digit hex (`#F0A`, `#ff9900`) or CSS color names (`#lightblue`,
+  // `#Red`). The suffix appears after the element name and any stereotype,
+  // optionally followed by a trailing `{` that opens a body block.
+  //
+  //   class Alice #lightblue
+  //   class Bob <<service>> #FFEB3B {
+  //   [Frontend] #pink
+  //   state Active #99FF99
+  //
+  // Element parsers strip the suffix via parseHighlightColor and store the
+  // color string on the parsed element. Renderers consult highlightFills to
+  // substitute fill / headerFill with the highlight, preserving stroke so
+  // borders stay visually consistent with the rest of the diagram.
+
+  function parseHighlightColor(line) {
+    // Match a trailing `#color` token, optionally followed by an opening `{`.
+    // Hex alternatives are listed longest-first so `#abcdef` is hex, not a
+    // name. Named colors must start with a letter so `#123` stays hex.
+    var m = line.match(/\s(#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3}|[A-Za-z][A-Za-z0-9]*))(\s*\{?\s*)$/);
+    if (!m) return { stripped: line, highlight: null };
+    var token = m[1]; // "#red" or "#FFEB3B"
+    var tail = m[2];
+    var head = line.substring(0, line.length - m[0].length);
+    var stripped = (tail.indexOf('{') !== -1) ? (head + ' {') : head;
+    // Normalize for SVG: hex keeps the `#`, named colors drop it so the
+    // resulting `fill="red"` is a valid CSS/SVG color. `#lightblue` is not.
+    var body = token.substring(1);
+    var color = /^[0-9a-fA-F]+$/.test(body) ? token : body;
+    return { stripped: stripped.trim(), highlight: color };
+  }
+
+  function _expandHex(h) {
+    if (h.length === 3) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (h.length === 4) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
+    return h;
+  }
+
+  function darkenHexColor(color, amount) {
+    if (!color || color[0] !== '#') return null;
+    var h = color.substring(1);
+    if (!/^[0-9a-fA-F]+$/.test(h)) return null;
+    h = _expandHex(h);
+    if (h.length !== 6 && h.length !== 8) return null;
+    var r = parseInt(h.substr(0, 2), 16);
+    var g = parseInt(h.substr(2, 2), 16);
+    var b = parseInt(h.substr(4, 2), 16);
+    var a = h.length === 8 ? h.substr(6, 2) : '';
+    var k = 1 - (amount || 0.12);
+    r = Math.max(0, Math.min(255, Math.round(r * k)));
+    g = Math.max(0, Math.min(255, Math.round(g * k)));
+    b = Math.max(0, Math.min(255, Math.round(b * k)));
+    var hex2 = function (n) { return (n < 16 ? '0' : '') + n.toString(16); };
+    return '#' + hex2(r) + hex2(g) + hex2(b) + a;
+  }
+
+  function highlightFills(baseColors, highlight) {
+    if (!highlight) {
+      return { fill: baseColors.fill, headerFill: baseColors.headerFill };
+    }
+    var darker = darkenHexColor(highlight, 0.14);
+    return {
+      fill: highlight,
+      // For hex colors we can compute a proper darker shade for the header;
+      // for named colors we fall back to the same tint (rendering will still
+      // be readable since stroke and text keep their defaults).
+      headerFill: darker || highlight
+    };
+  }
+
   // ─── SVG Wrapper ────────────────────────────────────────────────
 
   function svgOpen(w, h, ox, oy, fontFamily, options) {
@@ -2191,7 +2263,7 @@
    * Draw an actor stick figure centered at (cx, topY).
    * Returns the total height of the figure (excluding label text).
    */
-  function drawActorStickFigure(svg, cx, topY, colors, sw) {
+  function drawActorStickFigure(svg, cx, topY, colors, sw, highlight) {
     var headR = 10;
     var bodyLen = 18;
     var armSpan = 16;
@@ -2199,6 +2271,7 @@
     var legLen = 14;
     var legSpan = 12;
     var strokeW = sw || 1.5;
+    var headFill = highlight || 'none';
 
     var headCy = topY + headR;
     var bodyTop = headCy + headR;
@@ -2207,7 +2280,7 @@
 
     svg.push('<g class="uml-node-shadow">');
     svg.push('<circle cx="' + cx + '" cy="' + headCy + '" r="' + headR +
-      '" fill="none" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
+      '" fill="' + headFill + '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
     svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot +
       '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
     svg.push('<line x1="' + (cx - armSpan) + '" y1="' + armBaseY + '" x2="' + (cx + armSpan) + '" y2="' + armBaseY +
@@ -2230,6 +2303,9 @@
     textWidth: textWidth,
     escapeXml: escapeXml,
     parseLayoutDirective: parseLayoutDirective,
+    parseHighlightColor: parseHighlightColor,
+    highlightFills: highlightFills,
+    darkenHexColor: darkenHexColor,
     getThemeColors: getThemeColors,
     prepareDiagramContainer: prepareDiagramContainer,
     svgOpen: svgOpen,
@@ -4515,11 +4591,24 @@
     var name = '';
     var stereotype = null;
 
+    // Extract trailing `#color` highlight (PlantUML-compatible).
+    // Strip before stereotype extraction so the two can combine freely.
+    var hl = UMLShared.parseHighlightColor(cleanLine);
+    cleanLine = hl.stripped;
+    var highlight = hl.highlight;
+
     // Extract stereotype <<...>> if present
     var stereoMatch = cleanLine.match(/<<([^>]+)>>/);
     if (stereoMatch) {
       stereotype = stereoMatch[1];
       cleanLine = cleanLine.replace(/\s*<<[^>]+>>/, '').trim();
+    }
+
+    // `#color` may also appear before the stereotype (`class Foo #red <<s>>`).
+    if (!highlight) {
+      var hl2 = UMLShared.parseHighlightColor(cleanLine);
+      cleanLine = hl2.stripped;
+      highlight = hl2.highlight;
     }
 
     if (/^abstract\s+class\s+/.test(cleanLine)) {
@@ -4544,6 +4633,7 @@
       name: name,
       type: classType,
       stereotype: stereotype,
+      highlight: highlight,
       attributes: [],
       methods: [],
     };
@@ -6581,23 +6671,28 @@
       var x = e.x, y = e.y;
       var isInterface = cls.type === 'interface';
       var boxDash = '';  // All class boxes use solid borders (including interfaces)
+      var fills = UMLShared.highlightFills(colors, cls.highlight);
+      // When a class has no body compartments the "header" is the whole box,
+      // so skip the darker shade — the user's color should show verbatim.
+      var hasBody = box.attrH > 0 || box.methH > 0;
+      var headerFill = (cls.highlight && !hasBody) ? fills.fill : fills.headerFill;
 
       svg.push('<g class="uml-node-shadow">');
 
       // Header compartment
       svg.push('<rect x="' + x + '" y="' + y + '" width="' + box.width + '" height="' + box.nameH +
-        '" fill="' + colors.headerFill + '" stroke="none"/>');
+        '" fill="' + headerFill + '" stroke="none"/>');
 
       // Attribute compartment (if non-empty)
       if (box.attrH > 0) {
         svg.push('<rect x="' + x + '" y="' + (y + box.nameH) + '" width="' + box.width + '" height="' + box.attrH +
-          '" fill="' + colors.fill + '" stroke="none"/>');
+          '" fill="' + fills.fill + '" stroke="none"/>');
       }
 
       // Method compartment (if non-empty)
       if (box.methH > 0) {
         svg.push('<rect x="' + x + '" y="' + (y + box.nameH + box.attrH) + '" width="' + box.width + '" height="' + box.methH +
-          '" fill="' + colors.fill + '" stroke="none"/>');
+          '" fill="' + fills.fill + '" stroke="none"/>');
       }
 
       // Overall border
@@ -7641,8 +7736,13 @@
         continue;
       }
 
+      // Strip optional trailing `#color` highlight for participant/actor decls.
+      var seqHl = UMLShared.parseHighlightColor(line);
+      var seqLine = seqHl.stripped;
+      var seqHighlight = seqHl.highlight;
+
       // Participant declaration
-      var partMatch = line.match(/^participant\s+(.+)$/);
+      var partMatch = seqLine.match(/^participant\s+(.+)$/);
       if (partMatch) {
         var partDecl = partMatch[1].trim();
         var id, label;
@@ -7661,13 +7761,15 @@
         }
         if (!participantMap.hasOwnProperty(id)) {
           participantMap[id] = participants.length;
-          participants.push({ id: id, label: label });
+          participants.push({ id: id, label: label, highlight: seqHighlight });
+        } else if (seqHighlight) {
+          participants[participantMap[id]].highlight = seqHighlight;
         }
         continue;
       }
 
       // Actor declaration
-      var actorMatch = line.match(/^actor\s+(.+)$/);
+      var actorMatch = seqLine.match(/^actor\s+(.+)$/);
       if (actorMatch) {
         var actorDecl = actorMatch[1].trim();
         var actorId, actorLabel;
@@ -7685,7 +7787,9 @@
         }
         if (!participantMap.hasOwnProperty(actorId)) {
           participantMap[actorId] = participants.length;
-          participants.push({ id: actorId, label: actorLabel, isActor: true });
+          participants.push({ id: actorId, label: actorLabel, isActor: true, highlight: seqHighlight });
+        } else if (seqHighlight) {
+          participants[participantMap[actorId]].highlight = seqHighlight;
         }
         continue;
       }
@@ -8530,9 +8634,10 @@
       var isInstance = (part.id !== part.label);
       if (isInstance) displayText = part.id + ': ' + part.label;
 
+      var partFills = UMLShared.highlightFills(colors, part.highlight);
       if (part.isActor) {
         // Stick figure actor
-        UMLShared.drawActorStickFigure(svg, partX[i], y + 2, colors, CFG.strokeWidth);
+        UMLShared.drawActorStickFigure(svg, partX[i], y + 2, colors, CFG.strokeWidth, part.highlight);
         var actorTextY = y + UMLShared.ACTOR_H + CFG.fontSizeBold + 2;
         svg.push('<text x="' + partX[i] + '" y="' + actorTextY +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
@@ -8540,7 +8645,7 @@
       } else {
         // Rectangle participant
         svg.push('<rect class="uml-node-shadow" x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + partFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         var textY = y + partH / 2 + CFG.fontSize * 0.35;
         svg.push('<text x="' + partX[i] + '" y="' + textY +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
@@ -8705,23 +8810,30 @@
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
+      // Strip optional `#color` highlight suffix on state declarations.
+      var stateHl = UMLShared.parseHighlightColor(line);
+      var lineForState = stateHl.stripped;
+      var stateHighlight = stateHl.highlight;
+
       // Choice pseudostate: state Name <<choice>>
-      var choiceMatch = line.match(/^state\s+(\S+)\s+<<choice>>\s*$/);
+      var choiceMatch = lineForState.match(/^state\s+(\S+)\s+<<choice>>\s*$/);
       if (choiceMatch) {
         var cName = choiceMatch[1];
         ensureState(cName);
         states[cName].type = 'choice';
+        if (stateHighlight) states[cName].highlight = stateHighlight;
         continue;
       }
 
       // State declaration: state Name { ... }
-      var stateMatch = line.match(/^state\s+(\S+)\s*\{?/);
+      var stateMatch = lineForState.match(/^state\s+(\S+)\s*\{?/);
       if (stateMatch) {
         var sName = stateMatch[1];
         ensureState(sName);
-        if (line.indexOf('{') !== -1) {
+        if (stateHighlight) states[sName].highlight = stateHighlight;
+        if (lineForState.indexOf('{') !== -1) {
           braceDepth = 1;
-          if (line.indexOf('}') !== -1 && line.indexOf('}') > line.indexOf('{')) {
+          if (lineForState.indexOf('}') !== -1 && lineForState.indexOf('}') > lineForState.indexOf('{')) {
             braceDepth = 0;
           } else {
             inState = sName;
@@ -9682,11 +9794,12 @@
     for (var cen in entries) {
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
+      var cFills = UMLShared.highlightFills(colors, ce.state.highlight);
       svg.push('<g class="uml-node-shadow">');
       // Large rounded rectangle
       svg.push('<rect x="' + ce.x + '" y="' + ce.y + '" width="' + ce.box.width + '" height="' + ce.box.height +
         '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + cFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       // Header with name
       var chY = ce.y + CFG.padY + CFG.lineHeight * 0.75;
       svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + chY +
@@ -9716,18 +9829,20 @@
         svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
           '" fill="' + colors.line + '" stroke="none"/>');
       } else if (s.type === 'choice') {
+        var choiceFills = UMLShared.highlightFills(colors, s.highlight);
         // Diamond (rotated square)
         var dh = e.box.width / 2;
         svg.push('<polygon class="uml-node-shadow" points="' +
           cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+          '" fill="' + choiceFills.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
       } else {
+        var stateFills = UMLShared.highlightFills(colors, s.highlight);
         // Regular state: rounded rectangle
         svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + stateFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
         // State name (centered in top area)
         var nameY = e.y + CFG.padY + CFG.lineHeight * 0.75;
@@ -9911,13 +10026,18 @@
         continue;
       }
 
+      // Strip optional `#color` highlight suffix before other declarations.
+      var compHl = UMLShared.parseHighlightColor(line);
+      var compLine = compHl.stripped;
+      var compHighlight = compHl.highlight;
+
       // Component declaration with optional port block
-      var compMatch = line.match(/^component\s+(\S+)(?:\s*\{)?/);
+      var compMatch = compLine.match(/^component\s+(\S+)(?:\s*\{)?/);
       if (compMatch) {
         var cName = compMatch[1];
         var ports = []; // { name, alias, direction }
 
-        if (line.indexOf('{') !== -1) {
+        if (compLine.indexOf('{') !== -1) {
           if (line.indexOf('}') !== -1) {
             // Inline: component Foo { portout "p1" as a1 portin "p2" as a2 }
             var inlineBody = line.match(/\{([^}]*)\}/);
@@ -9953,7 +10073,22 @@
 
         if (!componentMap.hasOwnProperty(cName)) {
           componentMap[cName] = components.length;
-          components.push({ name: cName, ports: ports });
+          components.push({ name: cName, ports: ports, highlight: compHighlight });
+        } else if (compHighlight) {
+          components[componentMap[cName]].highlight = compHighlight;
+        }
+        continue;
+      }
+
+      // Bracket form: [ComponentName]  (optional `#color`)
+      var bracketMatch = compLine.match(/^\[([^\]]+)\]\s*$/);
+      if (bracketMatch) {
+        var bName = bracketMatch[1].trim();
+        if (!componentMap.hasOwnProperty(bName)) {
+          componentMap[bName] = components.length;
+          components.push({ name: bName, ports: [], highlight: compHighlight });
+        } else if (compHighlight) {
+          components[componentMap[bName]].highlight = compHighlight;
         }
         continue;
       }
@@ -9963,7 +10098,7 @@
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
       // Connector: alias --> alias  or  Comp.port --> Comp.port  or  Comp --> Comp
-      var connMatch = line.match(/^(\S+)\s+(-->|\.\.>|--)\s+(\S+)\s*(?::\s*(.*))?$/);
+      var connMatch = compLine.match(/^(\S+)\s+(-->|\.\.>|--)\s+(\S+)\s*(?::\s*(.*))?$/);
       if (connMatch) {
         var fromToken = connMatch[1], arrow = connMatch[2], toToken = connMatch[3];
         var label = (connMatch[4] || '').trim();
@@ -12811,10 +12946,11 @@
     for (var en in entries) {
       var e = entries[en];
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
+      var compFills = UMLShared.highlightFills(colors, e.comp.highlight);
 
       // Main rectangle
       svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
       // Component icon (top-right): small rectangle with two tabs
       var ix = bx + bw - CFG.iconW - 8;
@@ -13171,19 +13307,26 @@
         continue;
       }
 
+      // Strip optional trailing `#color` highlight
+      var depHl = UMLShared.parseHighlightColor(line);
+      var depLine = depHl.stripped;
+      var depHighlight = depHl.highlight;
+
       // Node declaration
-      var nodeMatch = line.match(/^node\s+(\S+)\s*\{?/);
+      var nodeMatch = depLine.match(/^node\s+(\S+)\s*\{?/);
       if (nodeMatch) {
         var nName = nodeMatch[1];
         if (!nodeMap[nName]) {
           // Support instance notation: "instanceName:TypeName" (underlined per UML spec Fig 9-3)
           var isInstance = nName.indexOf(':') !== -1;
-          nodeMap[nName] = { name: nName, isInstance: isInstance, components: [] };
+          nodeMap[nName] = { name: nName, isInstance: isInstance, components: [], highlight: depHighlight };
           nodes.push(nodeMap[nName]);
+        } else if (depHighlight) {
+          nodeMap[nName].highlight = depHighlight;
         }
-        if (line.indexOf('{') !== -1) {
+        if (depLine.indexOf('{') !== -1) {
           braceDepth = 1;
-          if (line.indexOf('}') !== -1 && line.indexOf('}') > line.indexOf('{')) {
+          if (depLine.indexOf('}') !== -1 && depLine.indexOf('}') > depLine.indexOf('{')) {
             braceDepth = 0;
           } else {
             currentNode = nName;
@@ -13776,6 +13919,7 @@
       var n = e.node;
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
       var d = CFG.node3dDepth;
+      var nodeFills = UMLShared.highlightFills(colors, n.highlight);
 
       svg.push('<g class="uml-node-shadow">');
 
@@ -13785,7 +13929,7 @@
         (bx + d) + ',' + (by - d) + ' ' +
         (bx + bw + d) + ',' + (by - d) + ' ' +
         (bx + bw) + ',' + by +
-        '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
       // 3D effect: right face (parallelogram)
       svg.push('<polygon points="' +
@@ -13793,11 +13937,11 @@
         (bx + bw + d) + ',' + (by - d) + ' ' +
         (bx + bw + d) + ',' + (by + bh - d) + ' ' +
         (bx + bw) + ',' + (by + bh) +
-        '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '" opacity="0.8"/>');
+        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '" opacity="0.8"/>');
 
       // Front face (main rectangle)
       svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + nodeFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
       svg.push('</g>');
 
@@ -14031,30 +14175,35 @@
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
+      // Strip trailing `#color` highlight before declaration matching
+      var ucHl = UMLShared.parseHighlightColor(line);
+      var ucLine = ucHl.stripped;
+      var ucHighlight = ucHl.highlight;
+
       // Actor declaration
-      var actorMatch = line.match(/^actor\s+"?([^"]+?)"?\s*(?:as\s+(\S+))?\s*$/);
+      var actorMatch = ucLine.match(/^actor\s+"?([^"]+?)"?\s*(?:as\s+(\S+))?\s*$/);
       if (actorMatch) {
         var aName = actorMatch[1].trim();
         var aId = actorMatch[2] || aName;
-        actors[aId] = { id: aId, name: aName };
+        actors[aId] = { id: aId, name: aName, highlight: ucHighlight };
         aliasToId[aId] = aId;
         if (actorMatch[2]) aliasToId[actorMatch[2]] = aId;
         continue;
       }
 
       // Use case declaration
-      var ucMatch = line.match(/^usecase\s+"([^"]+)"\s+as\s+(\S+)/);
+      var ucMatch = ucLine.match(/^usecase\s+"([^"]+)"\s+as\s+(\S+)/);
       if (ucMatch) {
         var ucId2 = ucMatch[2];
-        usecases[ucId2] = { id: ucId2, name: ucMatch[1] };
+        usecases[ucId2] = { id: ucId2, name: ucMatch[1], highlight: ucHighlight };
         aliasToId[ucId2] = ucId2;
         continue;
       }
       // Use case without alias: usecase "Name"
-      var ucNoAlias = line.match(/^usecase\s+"([^"]+)"\s*$/);
+      var ucNoAlias = ucLine.match(/^usecase\s+"([^"]+)"\s*$/);
       if (ucNoAlias) {
         var ucName = ucNoAlias[1];
-        usecases[ucName] = { id: ucName, name: ucName };
+        usecases[ucName] = { id: ucName, name: ucName, highlight: ucHighlight };
         aliasToId[ucName] = ucName;
         continue;
       }
@@ -14896,8 +15045,9 @@
       var cy = e.y + e.box.height / 2;
       var rx = e.box.width / 2;
       var ry = e.box.height / 2;
+      var ucFills = UMLShared.highlightFills(colors, e.data.highlight);
       svg.push('<ellipse class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + ucFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
         '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(e.data.name) + '</text>');
@@ -14909,7 +15059,7 @@
       if (e2.type !== 'actor') continue;
       var aCx = e2.x + e2.box.width / 2;
       var aTopY = e2.y;
-      UMLShared.drawActorStickFigure(svg, aCx, aTopY, colors, CFG.strokeWidth);
+      UMLShared.drawActorStickFigure(svg, aCx, aTopY, colors, CFG.strokeWidth, e2.data.highlight);
       // Label below stick figure
       var labelY = aTopY + UMLShared.ACTOR_H + CFG.actorLabelGap + CFG.fontSize * 0.75;
       svg.push('<text x="' + aCx + '" y="' + labelY +
@@ -15339,8 +15489,13 @@
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
+      // Strip `#color` from any activity declaration or transition line.
+      var actHl = UMLShared.parseHighlightColor(line);
+      var actLine = actHl.stripped;
+      var actHighlight = actHl.highlight;
+
       // Swimlane: |LaneName|
-      var laneMatch = line.match(/^\|([^|]+)\|$/);
+      var laneMatch = actLine.match(/^\|([^|]+)\|$/);
       if (laneMatch) {
         currentLane = laneMatch[1].trim();
         if (!laneSet[currentLane]) {
@@ -15348,6 +15503,16 @@
           lanes.push(currentLane);
         }
         continue;
+      }
+
+      // Standalone action declaration with color: "Action Name" #color
+      if (actHighlight) {
+        var declMatch = actLine.match(/^"([^"]+)"\s*$/);
+        if (declMatch) {
+          var declNode = getOrCreateAction(declMatch[1]);
+          declNode.highlight = actHighlight;
+          continue;
+        }
       }
 
       // Fork
@@ -15391,12 +15556,13 @@
       }
 
       // if "Condition?" then
-      var ifMatch = line.match(/^if\s+"([^"]+)"\s+then$/i);
+      var ifMatch = actLine.match(/^if\s+"([^"]+)"\s+then$/i);
       if (ifMatch) {
         decisionCount++;
         var decId = 'decision_' + decisionCount;
         ensureNode(decId, 'decision', ifMatch[1]);
         nodes[decId].lane = currentLane;
+        if (actHighlight) nodes[decId].highlight = actHighlight;
         if (currentNode) {
           addEdge(currentNode, decId);
           flushPendingMergeEnds(decId);
@@ -15469,11 +15635,12 @@
       }
 
       // Transition line: --> [guard] "Name"  (continuation from currentNode)
-      var contMatch = line.match(/^-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
+      var contMatch = actLine.match(/^-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
       if (contMatch) {
         var guard = contMatch[1] || '';
         var targetLabel = contMatch[2];
         var targetNode = getOrCreateAction(targetLabel);
+        if (actHighlight) targetNode.highlight = actHighlight;
         if (currentNode) {
           addEdge(currentNode, targetNode.id, guard);
           flushPendingMergeEnds(targetNode.id);
@@ -15510,13 +15677,14 @@
       }
 
       // Full transition: (*) --> "Name"
-      var initialMatch = line.match(/^\(\*\)\s*-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
+      var initialMatch = actLine.match(/^\(\*\)\s*-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
       if (initialMatch) {
         if (!nodes['__initial__']) {
           ensureNode('__initial__', 'initial', '');
           nodes['__initial__'].lane = currentLane;
         }
         var tgt = getOrCreateAction(initialMatch[2]);
+        if (actHighlight) tgt.highlight = actHighlight;
         addEdge('__initial__', tgt.id, initialMatch[1] || '');
         currentNode = tgt.id;
         continue;
@@ -15536,10 +15704,11 @@
       }
 
       // Full transition: "From" --> [guard] "To"
-      var transMatch = line.match(/^"([^"]+)"\s*-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
+      var transMatch = actLine.match(/^"([^"]+)"\s*-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
       if (transMatch) {
         var fromNode = getOrCreateAction(transMatch[1]);
         var toNode = getOrCreateAction(transMatch[3]);
+        if (actHighlight) toNode.highlight = actHighlight;
         addEdge(fromNode.id, toNode.id, transMatch[2] || '');
         currentNode = toNode.id;
         continue;
@@ -16053,13 +16222,14 @@
         svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
           '" fill="' + colors.line + '" stroke="none"/>');
       } else if (n.type === 'decision' || n.type === 'merge') {
+        var decFills = UMLShared.highlightFills(colors, n.highlight);
         // Diamond shape
         var dh = e.box.height / 2;
         var dw = e.box.width / 2;
         svg.push('<polygon class="uml-node-shadow" points="' +
           cx + ',' + (cy - dh) + ' ' + (cx + dw) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dw) + ',' + cy +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+          '" fill="' + decFills.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
         // Decision condition text inside diamond
         if (n.type === 'decision' && n.label) {
@@ -16070,12 +16240,13 @@
       } else if (n.type === 'fork' || n.type === 'join') {
         // Thick horizontal bar
         svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
-          '" rx="2" ry="2" fill="' + colors.line + '" stroke="none"/>');
+          '" rx="2" ry="2" fill="' + (n.highlight || colors.line) + '" stroke="none"/>');
       } else {
+        var actFills = UMLShared.highlightFills(colors, n.highlight);
         // Action node: rounded rectangle
         svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.actionRx + '" ry="' + CFG.actionRx +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + actFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         // Action name centered
         svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
@@ -16291,8 +16462,13 @@
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
+      // Strip optional `#color` highlight suffix (box decls only).
+      var ffHl = UMLShared.parseHighlightColor(line);
+      var ffLine = ffHl.stripped;
+      var ffHighlight = ffHl.highlight;
+
       // box [shape] "Label" as ID
-      var boxMatch = line.match(/^box(?:\s+([a-z]+))?\s+"((?:[^"\\]|\\.)*)"\s+as\s+(\S+)\s*$/i);
+      var boxMatch = ffLine.match(/^box(?:\s+([a-z]+))?\s+"((?:[^"\\]|\\.)*)"\s+as\s+(\S+)\s*$/i);
       if (boxMatch) {
         var shape = (boxMatch[1] || 'rect').toLowerCase();
         if (!VALID_SHAPES[shape]) shape = 'rect';
@@ -16304,7 +16480,8 @@
           id: id,
           shape: shape,
           label: rawLabel,
-          lines: labelLines
+          lines: labelLines,
+          highlight: ffHighlight
         };
         continue;
       }
@@ -16444,7 +16621,8 @@
     var x = e.x, y = e.y, w = e.box.width, h = e.box.height;
     var cx = x + w / 2, cy = y + h / 2;
     var stroke = colors.stroke;
-    var fill = colors.headerFill;
+    var fills = UMLShared.highlightFills(colors, n.highlight);
+    var fill = fills.headerFill;
     var strw = CFG.strokeWidth;
 
     if (n.shape === 'circle') {

@@ -10,18 +10,19 @@ Each section shows the syntax as a code block followed by an HTML rendering div 
 
 1. [Setup & Embedding](#setup--embedding)
 2. [Global Directives](#global-directives)
-3. [Class Diagrams](#class-diagrams)
-4. [Sequence Diagrams](#sequence-diagrams)
-5. [State Machine Diagrams](#state-machine-diagrams)
-6. [Component Diagrams](#component-diagrams)
-7. [Deployment Diagrams](#deployment-diagrams)
-8. [Use Case Diagrams](#use-case-diagrams)
-9. [Activity Diagrams](#activity-diagrams)
-10. [Freeform Diagrams](#freeform-diagrams)
-11. [Git Commit Graphs](#git-commit-graphs)
-12. [Notes & Annotations](#notes--annotations)
-13. [CSS Theming](#css-theming)
-14. [CLI / Node.js API](#cli--nodejs-api)
+3. [Element Highlighting](#element-highlighting)
+4. [Class Diagrams](#class-diagrams)
+5. [Sequence Diagrams](#sequence-diagrams)
+6. [State Machine Diagrams](#state-machine-diagrams)
+7. [Component Diagrams](#component-diagrams)
+8. [Deployment Diagrams](#deployment-diagrams)
+9. [Use Case Diagrams](#use-case-diagrams)
+10. [Activity Diagrams](#activity-diagrams)
+11. [Freeform Diagrams](#freeform-diagrams)
+12. [Git Commit Graphs](#git-commit-graphs)
+13. [Notes & Annotations](#notes--annotations)
+14. [CSS Theming](#css-theming)
+15. [CLI / Node.js API](#cli--nodejs-api)
 
 ---
 
@@ -102,6 +103,106 @@ B --> C
 
 ---
 
+## Element Highlighting
+
+Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill. The suffix is recognised across all diagram types and pairs with any stereotype or block body.
+
+```
+class Alice #lightblue
+class Bob <<service>> #FFEB3B
+abstract class Shape #pink { ... }
+state Active #lightgreen
+[Frontend] #orange
+component Backend #lightcoral
+node WebServer #lightblue
+actor User #lightgreen
+usecase "Login" as UC1 #FFEB3B
+participant Alice #lightblue
+:Task; #lightgreen        (activity — standalone action)
+"Validate" --> "Save" #lightgreen   (activity — tints the target node)
+box "Input" as a #lightblue         (freeform)
+```
+
+Color formats accepted:
+
+| Form | Example | Notes |
+|---|---|---|
+| Hex (3-digit) | `#F0A` | Expanded to `#FF00AA` |
+| Hex (4-digit) | `#F0AC` | Includes alpha channel |
+| Hex (6-digit) | `#FFEB3B` | Standard RGB |
+| Hex (8-digit) | `#FFEB3BCC` | RGB + alpha |
+| Named | `#lightblue`, `#Red`, `#salmon` | Any CSS color name |
+
+For class diagrams, when a class has both a header and body compartments the header is rendered with a slightly darker shade of the highlight for visual separation. Classes without members use the exact colour supplied. Stroke, text, and default theme colours are not altered, so highlighted elements remain legible under any theme.
+
+**Example — class diagram with mixed highlights:**
+
+```
+@startuml
+class Alice
+class Bob #lightblue
+class Charlie #FFEB3B {
+  + important()
+}
+abstract class Shape <<base>> #pink
+interface Drawable #99FF99
+Alice --> Bob
+Bob --> Charlie
+Shape <|-- Charlie
+Drawable <|.. Bob
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+class Alice
+class Bob #lightblue
+class Charlie #FFEB3B {
+  + important()
+}
+abstract class Shape <<base>> #pink
+interface Drawable #99FF99
+Alice --> Bob
+Bob --> Charlie
+Shape <|-- Charlie
+Drawable <|.. Bob
+@enduml
+</code></pre>
+
+**Example — highlighting states and transitions:**
+
+```
+@startuml
+[*] --> Idle
+state Idle
+state Active #lightgreen
+state Waiting #FFEB3B
+state Broken #FF9999
+Idle --> Active : start
+Active --> Waiting : pause
+Waiting --> Active : resume
+Active --> Broken : fail
+Broken --> [*]
+@enduml
+```
+
+<pre><code class="language-uml-state">
+@startuml
+[*] --> Idle
+state Idle
+state Active #lightgreen
+state Waiting #FFEB3B
+state Broken #FF9999
+Idle --> Active : start
+Active --> Waiting : pause
+Waiting --> Active : resume
+Active --> Broken : fail
+Broken --> [*]
+@enduml
+</code></pre>
+
+---
+
 ## Class Diagrams
 
 ### Element Declarations
@@ -112,6 +213,8 @@ abstract class AbstractName
 interface InterfaceName
 enum EnumName
 class Name <<StereotypeName>>
+class Name #color                 ← highlight (see Element Highlighting)
+class Name <<Stereotype>> #color
 ```
 
 **Example:**
