@@ -975,6 +975,7 @@
   function applyAutoFitSVG(container, pad) {
     var svg = container.querySelector('svg');
     if (!svg) return false;
+    if (!isPlaceholderAutoFit(svg)) return false;
     var g = svg.querySelector('g');
     if (!g) return false;
     try {
