@@ -8072,29 +8072,15 @@
     var messages = parsed.messages;
     var spacing = computeSequenceSpacing(participants);
 
-    // Compact mode: tighten spacing aggressively. Use a measured soft floor
-    // based on labels so messages stay readable, but scale gaps much smaller
-    // than the old 0.5× pass (which, combined with the new floor, made
-    // compact nearly indistinguishable from normal mode).
-    var seqMaxLabelW = 0;
-    for (var mli = 0; mli < messages.length; mli++) {
-      var mm = messages[mli];
-      if (mm && mm.label) {
-        seqMaxLabelW = Math.max(seqMaxLabelW, UMLShared.textWidth(mm.label, false, CFG.fontSize));
-      }
-    }
-    // Soft floor for compact mode (labels can modestly overlap); hard floor
-    // for non-compact so participants move apart to fit long message labels.
-    var seqSoftFloorGap = Math.max(20, Math.round(seqMaxLabelW * 0.5) + 8);
-    var seqHardFloorGap = Math.max(30, seqMaxLabelW + 16);
+    // Compact-mode sizing adjustments (shrinks participant boxes only; the
+    // per-gap constraint below handles spacing in a label-aware way).
     if (parsed.layoutPreference === 'compact') {
-      spacing.participantGap = Math.max(seqSoftFloorGap, Math.round(spacing.participantGap * 0.45));
       spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.55));
       spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.6));
-    } else {
-      spacing.participantGap = Math.max(spacing.participantGap, seqHardFloorGap);
     }
-    var messageGapY = parsed.layoutPreference === 'compact' ? Math.max(18, Math.round(CFG.messageGapY * 0.5)) : CFG.messageGapY;
+    var messageGapY = parsed.layoutPreference === 'compact'
+      ? Math.max(18, Math.round(CFG.messageGapY * 0.5))
+      : CFG.messageGapY;
 
     // ── Measure participant boxes ──
     var partWidths = [];
@@ -8116,15 +8102,63 @@
       }
     }
 
+    // ── Per-gap spacing constraint ──
+    // For every message with a label, the horizontal distance between its
+    // endpoints (partX[from] → partX[to]) must be at least labelWidth + margin.
+    // Instead of inflating every gap to fit the longest label globally (which
+    // wastes space even where labels are short), compute the requirement per
+    // span and distribute it across the gaps the arrow actually crosses. The
+    // result: compact output when labels are short; roomy output exactly
+    // where long labels need the space; labels never clip neighbouring
+    // lifelines or activation bars.
+    //
+    // Labels are centered on the arrow, so the required arrow span =
+    // labelWidth + 2 × sideMargin. The half-widths of the two endpoint
+    // participant boxes and the full widths of any intermediate boxes count
+    // toward that span; whatever is left must be covered by gaps.
+    var labelSideMargin = 16;
+    var gapMin = new Array(Math.max(0, participants.length - 1));
+    for (var gi0 = 0; gi0 < gapMin.length; gi0++) gapMin[gi0] = spacing.participantGap;
+
+    function findPIdxByIdName(id) {
+      for (var pp = 0; pp < participants.length; pp++) {
+        if (participants[pp].id === id) return pp;
+      }
+      return -1;
+    }
+
+    for (var mli = 0; mli < messages.length; mli++) {
+      var mm = messages[mli];
+      if (!mm || mm.type !== 'message' || !mm.label || mm.from === mm.to) continue;
+      var aIdx = findPIdxByIdName(mm.from);
+      var bIdx = findPIdxByIdName(mm.to);
+      if (aIdx < 0 || bIdx < 0) continue;
+      var lo = Math.min(aIdx, bIdx), hi = Math.max(aIdx, bIdx);
+      var labelW = UMLShared.textWidth(mm.label, false, CFG.fontSize);
+      var requiredSpan = labelW + labelSideMargin * 2;
+      var intermediateW = 0;
+      for (var ki = lo + 1; ki < hi; ki++) intermediateW += partWidths[ki];
+      var availableFromBoxes = partWidths[lo] / 2 + intermediateW + partWidths[hi] / 2;
+      var gapNeedTotal = Math.max(0, requiredSpan - availableFromBoxes);
+      var nGapsCrossed = hi - lo;
+      var share = Math.ceil(gapNeedTotal / nGapsCrossed);
+      for (var gi3 = lo; gi3 < hi; gi3++) {
+        if (share > gapMin[gi3]) gapMin[gi3] = share;
+      }
+    }
+
     // ── Compute participant X positions ──
     var partX = []; // center X of each participant
     var curX = CFG.svgPad;
     for (var pi2 = 0; pi2 < participants.length; pi2++) {
       var w = partWidths[pi2];
       partX.push(curX + w / 2);
-      curX += w + spacing.participantGap;
+      curX += w;
+      if (pi2 < participants.length - 1) {
+        curX += gapMin[pi2];
+      }
     }
-    var totalW = curX - spacing.participantGap + CFG.svgPad;
+    var totalW = curX + CFG.svgPad;
 
     // ── Process messages to compute Y positions ──
     var curY = CFG.svgPad + partH + 20; // Start below participant boxes
@@ -8279,11 +8313,31 @@
       totalW += foundPad;
     }
 
-    // ── Compute activation bars ──
-    // Supports both explicit (activate/deactivate) and implicit (sync call activates
-    // target, response deactivates source of original call).
+    // ── Compute activation bars (execution specifications) ──
+    //
+    // Call-stack model. An activation bar represents one execution frame on a
+    // participant's lifeline. A frame is opened by a synchronous-style call
+    // arriving at a participant, and closed (with the bar's endY set) by any
+    // of three events:
+    //
+    //   (R) a response arrow from the callee back to the caller —
+    //       the explicit return;
+    //   (C) the caller itself sending a new outgoing message —
+    //       the caller can only resume once its call has returned, so every
+    //       frame it initiated must close *just before* that next message;
+    //   (B) the diagram ending — any still-open frames close at the bottom.
+    //
+    // Rule (C) implements the property "activation bars for synchronous calls
+    // without a return close before the next message sent by the original
+    // sender". The frame remembers its caller, so when the caller resumes we
+    // pop everything stacked on top of the caller-initiated frame plus the
+    // frame itself (LIFO call-stack semantics).
+    //
+    // Explicit `activate` / `deactivate` directives coexist: they push/pop
+    // frames on the named participant, inferring the caller from the most
+    // recent incoming message to that participant.
     var activationBars = [];
-    var activeStarts = {}; // participantId -> [{y, depth} stack]
+    var callStack = []; // [{ pIdx, caller, startY, depth }] — global, LIFO
 
     function findPIdx(id) {
       for (var p = 0; p < participants.length; p++) {
@@ -8292,52 +8346,106 @@
       return 0;
     }
 
-    // If the diagram uses any explicit activate/deactivate, disable implicit activation
-    // from sync/response arrows (matching PlantUML behaviour — no accidental stacking).
-    var hasExplicitActivation = false;
-    for (var eai = 0; eai < messages.length; eai++) {
-      if (messages[eai].type === 'activate' || messages[eai].type === 'deactivate') {
-        hasExplicitActivation = true; break;
+    function depthOnLifeline(pIdx) {
+      var d = 0;
+      for (var k = 0; k < callStack.length; k++) {
+        if (callStack[k].pIdx === pIdx) d++;
       }
+      return d;
+    }
+
+    function pushFrame(pIdx, caller, startY) {
+      callStack.push({ pIdx: pIdx, caller: caller, startY: startY, depth: depthOnLifeline(pIdx) });
+    }
+
+    function popAndRecord(idxInStack, endY) {
+      var frame = callStack.splice(idxInStack, 1)[0];
+      activationBars.push({ pIdx: frame.pIdx, startY: frame.startY, endY: endY, depth: frame.depth });
+    }
+
+    // Rule (C): when `sender` resumes, close every frame down to (and
+    // including) the first frame whose caller is `sender`. Any frames
+    // stacked above it were nested calls made during its execution and must
+    // have already returned.
+    function closeFramesInitiatedBy(sender, endY) {
+      var lowestIdx = -1;
+      for (var k = 0; k < callStack.length; k++) {
+        if (callStack[k].caller === sender) { lowestIdx = k; break; }
+      }
+      if (lowestIdx < 0) return;
+      while (callStack.length > lowestIdx) {
+        popAndRecord(callStack.length - 1, endY);
+      }
+    }
+
+    // A small visible gap between the end of a closing activation and the
+    // start of the arrow that triggered the close — prevents the arrow
+    // and activation box touching visually.
+    var activationEndGap = Math.max(3, Math.round(messageGapY * 0.12));
+
+    // Does this message open a frame in the call stack? Sync and async
+    // arrows do (the receiver begins execution); response arrows close
+    // a frame instead; `<<create>>` is pure notation — it creates an
+    // instance but is not a call in the call-stack sense, so it neither
+    // opens nor closes a frame.
+    function messageOpensFrame(m) {
+      if (m.label === '<<create>>') return false;
+      if (m.msgType === 'response') return false;
+      return true;
     }
 
     for (var ai = 0; ai < messages.length; ai++) {
       var am = messages[ai];
+      var amy = msgYs[ai];
 
       if (am.type === 'activate') {
-        // Explicit activate
-        if (!activeStarts[am.target]) activeStarts[am.target] = [];
-        var depthA = activeStarts[am.target].length;
-        activeStarts[am.target].push({ y: msgYs[ai], depth: depthA });
+        // Explicit activate: infer caller from the most recent message that
+        // targeted this participant (falls back to self if none exists).
+        var explicitCaller = am.target;
+        for (var sh = ai - 1; sh >= 0; sh--) {
+          var prev = messages[sh];
+          if (prev && prev.type === 'message' && prev.to === am.target) {
+            explicitCaller = prev.from; break;
+          }
+        }
+        pushFrame(findPIdx(am.target), explicitCaller, amy);
 
       } else if (am.type === 'deactivate') {
-        // Explicit deactivate
-        if (activeStarts[am.target] && activeStarts[am.target].length > 0) {
-          var entryD = activeStarts[am.target].pop();
-          activationBars.push({ pIdx: findPIdx(am.target), startY: entryD.y, endY: msgYs[ai], depth: entryD.depth });
+        // Explicit deactivate: close the topmost open frame on this lifeline.
+        for (var csi = callStack.length - 1; csi >= 0; csi--) {
+          if (callStack[csi].pIdx === findPIdx(am.target)) {
+            popAndRecord(csi, amy);
+            break;
+          }
         }
 
-      } else if (am.type === 'message' && !hasExplicitActivation) {
-        // Implicit activation: only when no explicit activate/deactivate in diagram
-        if (am.msgType === 'sync' && am.from !== am.to) {
-          if (!activeStarts[am.to]) activeStarts[am.to] = [];
-          var depthS = activeStarts[am.to].length;
-          activeStarts[am.to].push({ y: msgYs[ai], depth: depthS });
-        } else if (am.msgType === 'response' && am.from !== am.to) {
-          if (activeStarts[am.from] && activeStarts[am.from].length > 0) {
-            var entryR = activeStarts[am.from].pop();
-            activationBars.push({ pIdx: findPIdx(am.from), startY: entryR.y, endY: msgYs[ai], depth: entryR.depth });
+      } else if (am.type === 'message') {
+        if (am.label === '<<create>>') {
+          // Notation only — doesn't touch the call stack.
+        } else if (am.msgType === 'response') {
+          // Rule (R): pop the callee's topmost frame whose caller matches
+          // the message target. This is the frame that was waiting to return.
+          var respFromIdx = findPIdx(am.from);
+          for (var csi2 = callStack.length - 1; csi2 >= 0; csi2--) {
+            var fr = callStack[csi2];
+            if (fr.pIdx === respFromIdx && fr.caller === am.to) {
+              popAndRecord(csi2, amy);
+              break;
+            }
           }
+        } else if (messageOpensFrame(am)) {
+          // Rule (C): before this sender emits another message, close any
+          // frame it initiated earlier that never returned. Then open a new
+          // frame on the receiver.
+          closeFramesInitiatedBy(am.from, amy - activationEndGap);
+          pushFrame(findPIdx(am.to), am.from, amy);
         }
       }
     }
 
-    // Close any still-open activations at the bottom of the diagram
-    for (var openId in activeStarts) {
-      while (activeStarts[openId].length > 0) {
-        var oEntry = activeStarts[openId].pop();
-        activationBars.push({ pIdx: findPIdx(openId), startY: oEntry.y, endY: totalH - 20, depth: oEntry.depth });
-      }
+    // Rule (B): close anything still open at the bottom of the diagram.
+    while (callStack.length > 0) {
+      popAndRecord(callStack.length - 1, totalH - 20);
     }
     // Helper to find the visible connection anchor.
     // Bare lifelines attach on the centerline; activation boxes attach on their painted border.
@@ -8544,11 +8652,14 @@
           var arrowDir = isLeft ? 1 : -1;
           drawMsgArrow(svg, x2, my, arrowDir, m.msgType, colors);
 
-          // Label above the line (above the created box if this is a create message)
+          // Label sits just above the arrow line, regardless of whether
+          // the target is a newly-created participant. The arrow for a
+          // create message enters the left or right edge of the target box,
+          // so a label centered on the midpoint of the arrow stays in the
+          // open space between the source lifeline and the target box edge.
           if (m.label) {
             var labelX = (x1 + x2) / 2;
-            var isCreateTarget = createYs.hasOwnProperty(m.to) && my <= createYs[m.to] + partH;
-            var labelY = isCreateTarget ? my - partH / 2 - 6 : my - 6;
+            var labelY = my - 6;
             svg.push('<text x="' + labelX + '" y="' + labelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
               '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
