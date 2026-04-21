@@ -17765,6 +17765,7 @@
   'use strict';
 
   var W = 80, H = 24, CY = 12, PAD = 4;
+  var DH = 15.68, DW = 4.76;
 
   function getColors(el) {
     var cs = window.getComputedStyle(el);
@@ -17847,9 +17848,9 @@
   }
 
   function diamond(filled, c, fill) {
-    var dx = PAD, cx = dx + 7, ex = dx + 14;
-    return '<polygon points="' + dx + ',' + CY + ' ' + cx + ',' + (CY - 6) + ' ' + ex + ',' + CY + ' ' + cx + ',' + (CY + 6) +
-      '" fill="' + (filled ? c : fill) + '" stroke="' + c + '" stroke-width="1.5"/>';
+    var dx = PAD, cx = dx + DH / 2, ex = dx + DH;
+    return '<polygon points="' + dx + ',' + CY + ' ' + cx + ',' + (CY - DW) + ' ' + ex + ',' + CY + ' ' + cx + ',' + (CY + DW) +
+      '" fill="' + (filled ? c : fill) + '" stroke="' + c + '" stroke-width="1.5" stroke-linejoin="miter"/>';
   }
 
   function portBox(x, c, fill) {
@@ -17966,28 +17967,28 @@
         return ln(PAD, W - PAD, c.line, false) + crossMarkerLeft(PAD, c.line) + crossMarker(W - PAD, c.line);
       },
       '*--': function (c) {
-        return diamond(true, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false);
+        return diamond(true, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false);
       },
       '*-->': function (c) {
-        return diamond(true, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + openArrow(W - PAD, c.line);
+        return diamond(true, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + openArrow(W - PAD, c.line);
       },
       '*<-->': function (c) {
-        return diamond(true, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + openArrowLeft(PAD + 16, c.line) + openArrow(W - PAD, c.line);
+        return diamond(true, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + openArrowLeft(PAD + DH + 2, c.line) + openArrow(W - PAD, c.line);
       },
       '*--x': function (c) {
-        return diamond(true, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + crossMarker(W - PAD, c.line);
+        return diamond(true, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + crossMarker(W - PAD, c.line);
       },
       'o--': function (c) {
-        return diamond(false, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false);
+        return diamond(false, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false);
       },
       'o-->': function (c) {
-        return diamond(false, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + openArrow(W - PAD, c.line);
+        return diamond(false, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + openArrow(W - PAD, c.line);
       },
       'o<-->': function (c) {
-        return diamond(false, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + openArrowLeft(PAD + 16, c.line) + openArrow(W - PAD, c.line);
+        return diamond(false, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + openArrowLeft(PAD + DH + 2, c.line) + openArrow(W - PAD, c.line);
       },
       'o--x': function (c) {
-        return diamond(false, c.line, c.fill) + ln(PAD + 14, W - PAD, c.line, false) + crossMarker(W - PAD, c.line);
+        return diamond(false, c.line, c.fill) + ln(PAD + DH, W - PAD, c.line, false) + crossMarker(W - PAD, c.line);
       },
       '..>': function (c) {
         return ln(PAD, W - PAD, c.line, true) + openArrow(W - PAD, c.line);
