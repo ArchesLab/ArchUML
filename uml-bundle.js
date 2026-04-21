@@ -7827,15 +7827,22 @@
       if (partMatch) {
         var partDecl = partMatch[1].trim();
         var id, label;
-        // "id: Label" or "id as Label" or just "id"
-        var colonIdx = partDecl.indexOf(':');
+        // Forms supported:
+        //   participant id           →  id used for both
+        //   participant id : Label   →  "id: Label"
+        //   participant id as Label  →  "id: Label" (alternate syntax)
+        //   participant id as : Cls  →  "id: Label" where label is ": Cls"
+        //                               (anonymous-instance display)
+        // `as` wins over `:` because `as` is a stronger delimiter and may
+        // itself be followed by a label that contains `:`.
         var asIdx = partDecl.indexOf(' as ');
-        if (colonIdx !== -1) {
-          id = partDecl.substring(0, colonIdx).trim();
-          label = partDecl.substring(colonIdx + 1).trim();
-        } else if (asIdx !== -1) {
+        var colonIdx = partDecl.indexOf(':');
+        if (asIdx !== -1) {
           id = partDecl.substring(0, asIdx).trim();
           label = partDecl.substring(asIdx + 4).trim();
+        } else if (colonIdx !== -1) {
+          id = partDecl.substring(0, colonIdx).trim();
+          label = partDecl.substring(colonIdx + 1).trim();
         } else {
           id = partDecl;
           label = partDecl;
@@ -7850,19 +7857,21 @@
         continue;
       }
 
-      // Actor declaration
+      // Actor declaration (same id/label forms as `participant`; `as` wins
+      // over `:` so anonymous-instance labels like "as : Cls" are parsed
+      // correctly).
       var actorMatch = seqLine.match(/^actor\s+(.+)$/);
       if (actorMatch) {
         var actorDecl = actorMatch[1].trim();
         var actorId, actorLabel;
-        var ac = actorDecl.indexOf(':');
         var aa = actorDecl.indexOf(' as ');
-        if (ac !== -1) {
-          actorId = actorDecl.substring(0, ac).trim();
-          actorLabel = actorDecl.substring(ac + 1).trim();
-        } else if (aa !== -1) {
+        var ac = actorDecl.indexOf(':');
+        if (aa !== -1) {
           actorId = actorDecl.substring(0, aa).trim();
           actorLabel = actorDecl.substring(aa + 4).trim();
+        } else if (ac !== -1) {
+          actorId = actorDecl.substring(0, ac).trim();
+          actorLabel = actorDecl.substring(ac + 1).trim();
         } else {
           actorId = actorDecl;
           actorLabel = actorDecl;
@@ -8015,6 +8024,31 @@
     }
   }
 
+  // Compute how a participant should be rendered (name string + whether its
+  // name should be underlined to indicate "instance of a class").
+  //
+  // Three shapes of declaration are supported:
+  //   participant Student            →  "Student"                (class / role — no underline)
+  //   participant s : Student        →  "s: Student" underlined  (named instance)
+  //   participant X as : Student     →  ": Student" underlined   (anonymous instance — label begins with ':')
+  //
+  // The third form matches UML convention for an unnamed runtime object
+  // (e.g. an entry-point or a per-request actor without a stable name).
+  function participantDisplay(part) {
+    var label = (part.label || '').toString();
+    var id = (part.id || '').toString();
+    if (label.charAt(0) === ':') {
+      // Anonymous instance: display the label verbatim (already starts with
+      // ':') and underline.
+      var trimmed = label.replace(/^:\s*/, ': ');
+      return { text: trimmed, isInstance: true };
+    }
+    if (id !== label) {
+      return { text: id + ': ' + label, isInstance: true };
+    }
+    return { text: label, isInstance: false };
+  }
+
   function computeSequenceSpacing(participants) {
     var metrics = {
       participantPadX: CFG.participantPadX,
@@ -8028,7 +8062,7 @@
     var totalLabelWidth = 0;
     for (var i = 0; i < participants.length; i++) {
       var part = participants[i];
-      var displayText = (part.id !== part.label) ? (part.id + ': ' + part.label) : part.label;
+      var displayText = participantDisplay(part).text;
       var labelWidth = UMLShared.textWidth(displayText, true, CFG.fontSizeBold);
       widestLabel = Math.max(widestLabel, labelWidth);
       totalLabelWidth += labelWidth;
@@ -8087,7 +8121,7 @@
     var partMaxW = 0;
     for (var pi = 0; pi < participants.length; pi++) {
       var part = participants[pi];
-      var displayText = (part.id !== part.label) ? (part.id + ': ' + part.label) : part.label;
+      var displayText = participantDisplay(part).text;
       var pw = UMLShared.textWidth(displayText, true, CFG.fontSizeBold) + spacing.participantPadX * 2;
       pw = Math.max(pw, spacing.participantMinW);
       partWidths.push(pw);
@@ -8677,11 +8711,12 @@
         svg.push('<rect class="uml-node-shadow" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         pushSequenceRectObstacle(cpx, my, partWidths[cIdx], partH);
-        var cDispText = (cpart.id !== cpart.label) ? cpart.id + ': ' + cpart.label : cpart.label;
+        var cDisp = participantDisplay(cpart);
         var cTextY = my + partH / 2 + CFG.fontSize * 0.35;
         svg.push('<text x="' + partX[cIdx] + '" y="' + cTextY +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
-          UMLShared.escapeXml(cDispText) + '</text>');
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
+          (cDisp.isInstance ? ' text-decoration="underline"' : '') + '>' +
+          UMLShared.escapeXml(cDisp.text) + '</text>');
       } else if (m.type === 'destroy') {
         // Draw X mark on the participant
         var dIdx = 0;
@@ -8824,9 +8859,9 @@
       if (createYs && createYs.hasOwnProperty(participants[i].id)) continue;
       var px = partX[i] - partWidths[i] / 2;
       var part = participants[i];
-      var displayText = part.label;
-      var isInstance = (part.id !== part.label);
-      if (isInstance) displayText = part.id + ': ' + part.label;
+      var disp = participantDisplay(part);
+      var displayText = disp.text;
+      var isInstance = disp.isInstance;
 
       var partFills = UMLShared.highlightFills(colors, part.highlight, part.texture);
       if (part.isActor) {
@@ -8834,7 +8869,8 @@
         UMLShared.drawActorStickFigure(svg, partX[i], y + 2, colors, CFG.strokeWidth, part.highlight);
         var actorTextY = y + UMLShared.ACTOR_H + CFG.fontSizeBold + 2;
         svg.push('<text x="' + partX[i] + '" y="' + actorTextY +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
+          (isInstance ? ' text-decoration="underline"' : '') + '>' +
           UMLShared.escapeXml(displayText) + '</text>');
       } else {
         // Rectangle participant
