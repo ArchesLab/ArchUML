@@ -8561,8 +8561,9 @@
     for (var abi = 0; abi < activationBars.length; abi++) {
       var ab = activationBars[abi];
       var abx = partX[ab.pIdx] - CFG.activationW / 2 + (ab.depth || 0) * CFG.activationOffset;
+      var abH = Math.max(2, ab.endY - ab.startY);
       svg.push('<rect class="uml-node-shadow" x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
-        '" height="' + (ab.endY - ab.startY) +
+        '" height="' + abH +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     }
 
