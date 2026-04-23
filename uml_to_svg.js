@@ -53,6 +53,8 @@ async function renderUML(type, text) {
             activity:   window.UMLActivityDiagram,
             freeform:   window.UMLFreeformDiagram,
             gitgraph:   window.UMLGitGraphDiagram,
+            venn:       window.UMLVennDiagram,
+            er:         window.UMLERDiagram,
         };
         const R = RENDERERS[type];
         if (!R) return 'Error: Unknown renderer type: ' + type;
@@ -101,6 +103,9 @@ if (require.main === module) {
                     deployment: window.UMLDeploymentDiagram,
                     usecase:    window.UMLUseCaseDiagram,
                     activity:   window.UMLActivityDiagram,
+                    freeform:   window.UMLFreeformDiagram,
+                    gitgraph:   window.UMLGitGraphDiagram,
+                    venn:       window.UMLVennDiagram,
                 };
                 const R = RENDERERS[type];
                 if (!R) return 'Error: Unknown renderer type: ' + type;

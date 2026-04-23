@@ -1901,6 +1901,426 @@ head main
 
 ---
 
+## Venn Diagrams
+
+Venn diagrams show how collections of items relate by shared membership. The `diagram-venn` type renders **schematic** (not area-proportional) Venn diagrams for 2–5 sets, using circles for 2–3 sets and carefully tilted ellipses for 4–5 sets so that every possible intersection region is drawn and labelled.
+
+Items are placed into regions by naming the sets whose intersection they belong to. The renderer automatically:
+
+- Picks a distinct colour per set from a built-in palette (or uses colours you specify).
+- Blends overlapping fills via `mix-blend-mode: multiply`, just like a physical transparency overlay.
+- **Chooses readable text colour per region** by computing the WCAG relative luminance of the blended fill and picking white or near-black for each label — so items sitting on a dark three-way overlap stay legible without you tuning anything.
+
+### Syntax
+
+```
+@startuml
+title Optional Title
+
+set SetA
+set SetB
+set SetC
+
+SetA         : items only in A
+SetB         : items only in B
+SetA & SetB  : items in A ∩ B
+SetA & SetB & SetC : items in A ∩ B ∩ C
+outside      : items in none of the sets
+@enduml
+```
+
+- `set <name>` declares a set. Order of declaration controls colour assignment and position.
+- A region line is `<set-names> : <comma-separated items>`. Set names can be joined by `&`, `∩`, `+`, or `,` — all mean set intersection.
+- `outside`, `none`, or `*` puts items in the universe outside every set.
+- Items separate on commas. Escape a literal comma with `\,`.
+- Lines starting with `#` (without a colon) or `//` are comments.
+
+### 2-Set Example
+
+<pre><code class="diagram-venn">
+@startuml
+title Programming Languages
+
+set Compiled
+set "Memory Safe"
+
+Compiled               : C, C++
+"Memory Safe"          : Python, Ruby, JavaScript
+Compiled & "Memory Safe" : Rust, Go, Swift
+outside                : Assembly
+@enduml
+</code></pre>
+
+Quoted set names (`"Memory Safe"`) let you use spaces. Unquoted names must be a single token.
+
+### 3-Set Example
+
+The canonical three-circle Venn — seven regions plus the outside bin.
+
+<pre><code class="diagram-venn">
+@startuml
+title Web Technologies
+
+set Frontend
+set Backend
+set Database
+
+Frontend                      : React, Vue
+Backend                       : Django, Rails
+Database                      : PostgreSQL, Redis
+Frontend & Backend            : Next.js, SvelteKit
+Backend & Database            : Prisma, SQLAlchemy
+Frontend & Database           : PouchDB
+Frontend & Backend & Database : Firebase, Supabase
+outside                       : Docker
+@enduml
+</code></pre>
+
+### 4-Set Example
+
+Four sets cannot be drawn with circles while still producing all 16 regions. The renderer uses Venn's construction of **four tilted congruent ellipses** so every one of the 2⁴ = 16 subsets (including every pairwise and the centre four-way overlap) has its own visible region.
+
+<pre><code class="diagram-venn">
+@startuml
+title Developer Skills
+
+set Frontend
+set Backend
+set DevOps
+set Design
+
+Frontend                                   : React, CSS
+Backend                                    : APIs, SQL
+DevOps                                     : Docker, K8s
+Design                                     : Figma, UX
+Frontend & Design                          : UI libs
+Backend & DevOps                           : SRE
+Frontend & Backend                         : Full-stack
+DevOps & Design                            : Design ops
+Frontend & Backend & DevOps                : Platform eng
+Frontend & Backend & Design                : Product eng
+Frontend & DevOps & Design                 : Frontend infra
+Backend & DevOps & Design                  : Backend infra
+Frontend & Backend & DevOps & Design       : Unicorn
+@enduml
+</code></pre>
+
+### 5-Set Example
+
+For five sets the renderer uses **Grünbaum's five rotated congruent ellipses** arranged with 72° symmetry — giving all 2⁵ = 32 regions.
+
+<pre><code class="diagram-venn">
+@startuml
+title Meals
+
+set Breakfast
+set Lunch
+set Dinner
+set Vegetarian
+set Quick
+
+Breakfast                             : Pancakes
+Lunch                                 : Club sandwich
+Dinner                                : Steak
+Vegetarian                            : Tofu
+Quick                                 : Toast
+Breakfast & Quick                     : Cereal
+Lunch & Vegetarian                    : Salad
+Dinner & Vegetarian                   : Risotto
+Breakfast & Vegetarian & Quick        : Yogurt
+Lunch & Dinner & Vegetarian           : Veggie bowl
+Breakfast & Lunch & Dinner & Vegetarian & Quick : Smoothie
+@enduml
+</code></pre>
+
+### Custom Colours
+
+Append a colour after the set name. Hex codes (`#RRGGBB`, `#RGB`, `#RRGGBBAA`) and CSS named colours both work.
+
+```
+set A #e74c3c
+set B #3498db
+set C lightgreen
+```
+
+<pre><code class="diagram-venn">
+@startuml
+title Custom Palette
+
+set Ocean #0077be
+set Forest #228b22
+set Desert #edc9af
+
+Ocean            : whale, kelp
+Forest           : oak, deer
+Desert           : cactus, scorpion
+Ocean & Forest   : mangrove
+Forest & Desert  : savanna scrub
+Ocean & Desert   : coastal dunes
+Ocean & Forest & Desert : biosphere
+@enduml
+</code></pre>
+
+If you declare fewer custom colours than sets, the remaining sets fall back to the default palette. Colours you declare are also respected by the contrast-detection pipeline — overlap regions re-compute their blended luminance and flip text to white or near-black automatically.
+
+### Outside Bin
+
+Items that belong to none of the sets live below the diagram in an "outside" block:
+
+```
+outside : item1, item2, item3
+none    : alias for outside
+*       : alias for outside
+```
+
+This is useful to signal "these were considered but don't fit anywhere", e.g. items left out of a taxonomy.
+
+### Notes on Contrast Detection
+
+The automatic text-colour picker:
+
+1. Resolves every set fill to a 6-digit hex.
+2. For each region, approximates the rendered colour as the multiply-blend of the contributing set colours over white.
+3. Computes WCAG relative luminance and compares the contrast ratio of white vs. near-black text against that blended colour.
+4. Picks whichever of the two clears the higher ratio (both typically clear AA 4.5:1 against reasonable palettes).
+
+You don't need to think about this — it just works. But if you pick pathological custom colours (e.g. pure yellow `#ffff00` over white, which stays very light even after multiply), the renderer will still choose near-black over white. There is no manual override for region text colour.
+
+### Titles and Layout
+
+`title <text>` adds a centred title above the diagram. `layout shadows on|off` toggles drop shadows. Other `layout` directives are accepted but ignored — the canonical Venn layout has no landscape/portrait orientation.
+
+### Notes on Regions
+
+Attach a callout to any region — including single sets, intersections, and the outside bin — with `note <side> of <region>`:
+
+```
+note right of SetA & SetB : full-stack engineers
+note left of SetA         : specialists
+note top of SetA & SetB & SetC : the triple overlap
+note bottom of outside    : dropped items
+```
+
+`<side>` is `left`, `right`, `top`, `bottom`, or their synonyms `above` / `below`. The note is pushed outside the diagram in that direction, and a dotted connector runs from the note to the target region's interior. Multiple notes on the same side stack automatically.
+
+Multi-line notes use the block form:
+
+```
+note right of SetA & SetB
+  Full-stack frameworks
+  live in this region.
+end note
+```
+
+For single-line notes you can also use `\n` as a literal line break inside the text:
+
+```
+note left of SetA : First line\nSecond line
+```
+
+<pre><code class="diagram-venn">
+@startuml
+title Developer Skills
+
+set Frontend
+set Backend
+set DevOps
+
+Frontend                    : React
+Backend                     : Django
+DevOps                      : Docker
+Frontend & Backend          : Next.js
+Backend & DevOps            : Platform
+Frontend & Backend & DevOps : SRE
+
+note left of Frontend : Pure UI\nwork
+note right of Frontend & Backend : Popular full-stack\nframeworks
+note top of Frontend & Backend & DevOps : Rare but valuable
+note bottom of DevOps
+  Infrastructure
+  specialists
+end note
+@enduml
+</code></pre>
+
+### Limits
+
+- Fewer than 2 sets: the renderer shows an error message.
+- More than 5 sets: not supported — there is no known rotationally-symmetric construction for n ≥ 6 that yields all 2ⁿ regions in a readable way. Split the data into multiple diagrams.
+- Unknown set references in a region line (e.g. `Typo : x`) surface a warning banner below the diagram so you notice the typo instead of silently losing items.
+
+---
+
+## ER Diagrams (Chen Notation)
+
+Entity-Relationship diagrams in Peter Chen's classic 1976 notation (with 1989 extensions). Use `diagram-er` to render them.
+
+**Visual conventions** (all automatic from the spec):
+
+| Element | Shape |
+|---|---|
+| Entity | Rectangle |
+| Weak entity | Double rectangle |
+| Relationship | Diamond |
+| Identifying relationship | Double diamond |
+| Attribute | Ellipse, connected by a line |
+| Primary key | Attribute name underlined |
+| Partial key (weak entity) | Attribute name with dashed underline |
+| Derived attribute | Dashed ellipse |
+| Multivalued attribute | Double ellipse |
+| Cardinality | Label on the connector line |
+| Total participation | Double line from entity to relationship |
+
+### Syntax
+
+```
+@startuml
+title Library System
+
+entity Student {
+  # student_id          ' # prefix = primary key (underlined)
+  name
+  email
+  / age                 ' / prefix = derived attribute (dashed ellipse)
+  * phones              ' * prefix = multivalued (double ellipse)
+}
+
+weak entity Dependent {
+  ~ dep_name            ' ~ prefix = partial key (dashed underline)
+  dob
+}
+
+entity Book {
+  # isbn
+  title
+  * authors
+}
+
+relationship Borrows {
+  date_out              ' attributes inside a relationship attach to the diamond
+  date_due
+}
+
+identifying relationship Has
+
+' Connection lines: Entity "cardinality" -- Relationship
+'   -- = partial participation, == = total participation (double line)
+Student "N"  -- Borrows
+Book    "M"  -- Borrows
+Student "1"  == Has
+Dependent "N" == Has
+@enduml
+```
+
+### Attribute Markers
+
+The first non-space character on an attribute line selects its kind:
+
+| Prefix | Meaning | Rendering |
+|---|---|---|
+| `#` | Primary key | Underlined text |
+| `~` | Partial key | Dashed-underlined text (for weak entities) |
+| `/` | Derived | Dashed ellipse outline |
+| `*` | Multivalued | Double ellipse outline |
+| *(none)* | Regular attribute | Plain ellipse |
+
+Attributes live inside the `{ ... }` block of an `entity`, `weak entity`, or `relationship`. Relationship-attributes hang off the diamond.
+
+### Connections
+
+A connection line has an **entity**, a **relationship**, and — optionally — a **cardinality** label and **participation** style:
+
+```
+Student "N" -- Borrows    ' N:M, partial participation (single line)
+Student "1" == Has        ' 1:N, total participation (double line)
+Book -- Borrows           ' no cardinality label
+Borrows "N" -- Student    ' reverse order also fine
+```
+
+Cardinality labels are whatever you write in the quoted string — `1`, `N`, `M`, `(0,N)`, `(1,1)`, etc. — so you can mix Chen's original `1/N/M` notation with Merise-style `(min,max)`.
+
+For ternary or higher-arity relationships, connect three or more entities to the same relationship:
+
+```
+relationship Enrolls { grade }
+Student  "N" -- Enrolls
+Course   "M" -- Enrolls
+Semester "1" -- Enrolls
+```
+
+### Complete Example — Library System
+
+<pre><code class="diagram-er">
+@startuml
+title Library System
+
+entity Student {
+  # student_id
+  name
+  email
+  / age
+  * phones
+}
+
+entity Book {
+  # isbn
+  title
+  * authors
+}
+
+relationship Borrows {
+  date_out
+  date_due
+}
+
+Student "N" -- Borrows
+Book    "M" -- Borrows
+@enduml
+</code></pre>
+
+### Complete Example — Weak Entity
+
+<pre><code class="diagram-er">
+@startuml
+title Employee Dependents
+
+entity Employee {
+  # emp_id
+  name
+  salary
+}
+
+weak entity Dependent {
+  ~ dep_name
+  dob
+  relationship_type
+}
+
+identifying relationship Has
+
+Employee "1" == Has
+Dependent "N" == Has
+@enduml
+</code></pre>
+
+### Layout
+
+The renderer places entities automatically:
+
+- **1 entity** — centred, attributes fan around it.
+- **2 entities** — horizontal, relationships between them.
+- **3+ entities** — on a circle, relationships at the centroid of their connected entities. When two relationships connect the same pair of entities, the second is offset perpendicular to the first so the diamonds don't overlap.
+
+Attributes radiate outward from their host entity or relationship. Directions pointing at connected partners are "blocked" (± ~25°) so attribute ellipses never sit on a connector line.
+
+### Notes on Style
+
+- Entity and relationship names can be quoted — `entity "Library Branch" { ... }` — for names with spaces.
+- Entities referenced on a connection line without being declared are auto-created as plain entities, which is helpful for quick sketches. Declare them explicitly to control their attributes.
+- `title <text>` adds a heading above the diagram. `layout shadows on|off` toggles drop shadows; other `layout` directives are ignored.
+
+---
+
 ## Notes & Annotations
 
 Notes are supported in all diagram types.

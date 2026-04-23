@@ -220,8 +220,8 @@
       'viewBox="0 0 ' + w + ' ' + h + '" ' +
       'style="font-family: ' + ff + '; max-width: 100%; height: auto;">' +
       '<defs>' +
-      '<filter id="uml-node-shadow" x="-14%" y="-14%" width="144%" height="156%" color-interpolation-filters="sRGB">' +
-      '<feDropShadow dx="0" dy="2.5" stdDeviation="2.6" flood-color="#000" flood-opacity="0.22"/>' +
+      '<filter id="uml-node-shadow" x="-20%" y="-20%" width="150%" height="170%" color-interpolation-filters="sRGB">' +
+      '<feDropShadow dx="1.5" dy="3" stdDeviation="3" flood-color="#000" flood-opacity="0.35"/>' +
       '</filter>' +
       patternDefs +
       '</defs>' +
@@ -432,7 +432,9 @@
     activity: 'uml-activity-diagram-container',
     freeform: 'uml-freeform-diagram-container',
     gitgraph: 'uml-gitgraph-diagram-container',
-    'folder-tree': 'uml-folder-tree-diagram-container'
+    'folder-tree': 'uml-folder-tree-diagram-container',
+    venn: 'uml-venn-diagram-container',
+    er: 'uml-er-diagram-container'
   };
 
   function prepareDiagramContainer(container, type) {
@@ -2485,6 +2487,8 @@
         freeform:   function () { return window.UMLFreeformDiagram; },
         gitgraph:   function () { return window.UMLGitGraphDiagram; },
         'folder-tree': function () { return window.UMLFolderTreeDiagram; },
+        venn:       function () { return window.UMLVennDiagram; },
+        er:         function () { return window.UMLERDiagram; },
       };
 
       // 1. Process data-uml-type attributes
@@ -2520,6 +2524,8 @@
         freeform:   'pre > code.diagram-freeform, pre > code.language-freeform',
         gitgraph:   'pre > code.diagram-gitgraph, pre > code.language-gitgraph',
         'folder-tree': 'pre > code.diagram-folder-tree, pre > code.language-folder-tree',
+        venn:       'pre > code.diagram-venn, pre > code.language-venn',
+        er:         'pre > code.diagram-er, pre > code.language-er',
       };
       for (var key in RENDERERS) {
         var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
@@ -12373,6 +12379,108 @@
       return candidates;
     }
 
+    function componentEntriesShareRow(fromEntry, toEntry) {
+      if (!fromEntry || !toEntry) return false;
+      var fromTop = fromEntry.y;
+      var fromBottom = fromEntry.y + fromEntry.box.height;
+      var toTop = toEntry.y;
+      var toBottom = toEntry.y + toEntry.box.height;
+      var overlap = Math.min(fromBottom, toBottom) - Math.max(fromTop, toTop);
+      var minHeight = Math.min(fromEntry.box.height, toEntry.box.height);
+      if (overlap >= Math.max(18, minHeight * 0.4)) return true;
+      var fromCy = fromEntry.y + fromEntry.box.height / 2;
+      var toCy = toEntry.y + toEntry.box.height / 2;
+      return Math.abs(fromCy - toCy) <= Math.max(20, minHeight * 0.32);
+    }
+
+    function countSameRowIntermediateComponents(fromEntry, toEntry) {
+      if (!componentEntriesShareRow(fromEntry, toEntry)) return 0;
+      var left = Math.min(fromEntry.x + fromEntry.box.width / 2, toEntry.x + toEntry.box.width / 2);
+      var right = Math.max(fromEntry.x + fromEntry.box.width / 2, toEntry.x + toEntry.box.width / 2);
+      var rowTop = Math.min(fromEntry.y, toEntry.y) - 10;
+      var rowBottom = Math.max(fromEntry.y + fromEntry.box.height, toEntry.y + toEntry.box.height) + 10;
+      var count = 0;
+      for (var name in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, name)) continue;
+        if (name === fromEntry.comp.name || name === toEntry.comp.name) continue;
+        var entry = entries[name];
+        var entryLeft = entry.x;
+        var entryRight = entry.x + entry.box.width;
+        var entryTop = entry.y;
+        var entryBottom = entry.y + entry.box.height;
+        if (entryRight <= left + 2 || entryLeft >= right - 2) continue;
+        if (entryBottom <= rowTop || entryTop >= rowBottom) continue;
+        count++;
+      }
+      return count;
+    }
+
+    function buildSameRowLaneRoute(sourceCandidate, targetCandidate, laneY) {
+      if (!sourceCandidate || !targetCandidate) return null;
+      if ((sourceCandidate.side !== 'left' && sourceCandidate.side !== 'right') ||
+          (targetCandidate.side !== 'left' && targetCandidate.side !== 'right')) {
+        return null;
+      }
+
+      var sourceStubX = sourceCandidate.x + (sourceCandidate.side === 'right' ? sourceCandidate.stub : -sourceCandidate.stub);
+      var targetStubX = targetCandidate.x + (targetCandidate.side === 'right' ? targetCandidate.stub : -targetCandidate.stub);
+      return simplifyRoute([
+        { x: sourceCandidate.x, y: sourceCandidate.y },
+        { x: sourceStubX, y: sourceCandidate.y },
+        { x: sourceStubX, y: laneY },
+        { x: targetStubX, y: laneY },
+        { x: targetStubX, y: targetCandidate.y },
+        { x: targetCandidate.x, y: targetCandidate.y }
+      ]);
+    }
+
+    function buildSameRowLaneCandidates(fromEntry, toEntry, sourceCandidate, targetCandidate) {
+      var candidates = [];
+      if (!componentEntriesShareRow(fromEntry, toEntry)) return candidates;
+      if ((sourceCandidate.side !== 'left' && sourceCandidate.side !== 'right') ||
+          (targetCandidate.side !== 'left' && targetCandidate.side !== 'right')) {
+        return candidates;
+      }
+
+      var blockerCount = countSameRowIntermediateComponents(fromEntry, toEntry);
+      var sourceCenterX = fromEntry.x + fromEntry.box.width / 2;
+      var targetCenterX = toEntry.x + toEntry.box.width / 2;
+      var isBackEdge = targetCenterX < sourceCenterX - 20;
+      if (!isBackEdge && blockerCount <= 0) return candidates;
+
+      var span = Math.abs(targetCenterX - sourceCenterX);
+      var baseGap = Math.max(26, Math.min(42, Math.round(CFG.gapY * 0.28)));
+      var laneStep = Math.max(24, Math.min(34, Math.round(CFG.gapY * 0.2)));
+      var rowTop = Math.min(fromEntry.y, toEntry.y);
+      var rowBottom = Math.max(fromEntry.y + fromEntry.box.height, toEntry.y + toEntry.box.height);
+      var preferredSlot = Math.max(blockerCount, span > (fromEntry.box.width + toEntry.box.width) * 1.1 ? 1 : 0);
+      var laneYs = [];
+
+      function pushLane(y) {
+        for (var i = 0; i < laneYs.length; i++) {
+          if (Math.abs(laneYs[i] - y) < 1) return;
+        }
+        laneYs.push(y);
+      }
+
+      pushLane(rowBottom + baseGap + preferredSlot * laneStep);
+      pushLane(rowBottom + baseGap + (preferredSlot + 1) * laneStep);
+      if (isBackEdge) pushLane(rowTop - baseGap - preferredSlot * laneStep);
+
+      for (var li = 0; li < laneYs.length; li++) {
+        var points = buildSameRowLaneRoute(sourceCandidate, targetCandidate, laneYs[li]);
+        if (!points) continue;
+        candidates.push({
+          points: points,
+          sameRowLane: true,
+          laneY: laneYs[li],
+          blockerCount: blockerCount,
+          isBackEdge: isBackEdge
+        });
+      }
+      return candidates;
+    }
+
     function applySourceLaneSmoothing(points, newY) {
       var updated = [];
       for (var i = 0; i < points.length; i++) updated.push({ x: points[i].x, y: points[i].y });
@@ -12638,8 +12746,9 @@
           // so their detouring routes don't cross shorter direct routes.
           var fpSide = fp.side;
           var horizontalDist = Math.abs(pcToE.x - pcFromE.x);
+          var routeDx = (pcToE.x + pcToE.box.width / 2) - (pcFromE.x + pcFromE.box.width / 2);
           var isLongRoute = horizontalDist > (pcFromE.box.width + pcToE.box.width) * 1.5;
-          if (isLongRoute) {
+          if (isLongRoute && routeDx < -20) {
             // Long routes typically go via the bottom margin (below all boxes).
             // Push effective Y to bottom so port is placed lowest.
             otherY = 9999;
@@ -12657,8 +12766,9 @@
             : pcFromE.y + pcFromE.box.height / 2;
           var tpSide = tp.side;
           var horizontalDist2 = Math.abs(pcFromE.x - pcToE.x);
+          var routeDx2 = (pcToE.x + pcToE.box.width / 2) - (pcFromE.x + pcFromE.box.width / 2);
           var isLongRoute2 = horizontalDist2 > (pcFromE.box.width + pcToE.box.width) * 1.5;
-          if (isLongRoute2) {
+          if (isLongRoute2 && routeDx2 < -20) {
             otherY2 = 9999;
           }
           var tKey = pc.to + ':' + tpSide;
@@ -12890,6 +13000,7 @@
         var sourceCandidate = sourceCandidates[sci];
         for (var tci = 0; tci < targetCandidates.length; tci++) {
           var targetCandidate = targetCandidates[tci];
+          var routeVariants = [];
           var routed = UMLShared.routeOrthogonalConnector(sourceCandidate, targetCandidate, obstacles, {
             skipNames: skipN,
             occupied: occupiedSegments,
@@ -12899,45 +13010,79 @@
             extraXs: [fromE.x + fromE.box.width / 2, toE.x + toE.box.width / 2],
             extraYs: [fromE.y + fromE.box.height / 2, toE.y + toE.box.height / 2]
           });
-          var candidatePoints = UMLShared.simplifyOrthogonalPath(routed.points);
-          if (UMLShared.routeHitsObstacle(candidatePoints, obstacles, skipN, null)) continue;
+          routeVariants.push({ points: routed.points, kind: 'router' });
 
-          var bends = UMLShared.countOrthogonalBends(candidatePoints);
-          var crosses = UMLShared.countRouteCrossings(candidatePoints, occupiedSegments);
-
-          // Penalize routes that pass through source or target component boxes
-          var compSelfHit = 0;
-          if (candidatePoints.length > 2) {
-            var cFromBox = { l: fromE.x - 2, t: fromE.y - 2, r: fromE.x + fromE.box.width + 2, b: fromE.y + fromE.box.height + 2 };
-            var cToBox = { l: toE.x - 2, t: toE.y - 2, r: toE.x + toE.box.width + 2, b: toE.y + toE.box.height + 2 };
-            for (var cshi = 0; cshi < candidatePoints.length - 1; cshi++) {
-              var csP0 = candidatePoints[cshi], csP1 = candidatePoints[cshi + 1];
-              var csMidX = (csP0.x + csP1.x) / 2, csMidY = (csP0.y + csP1.y) / 2;
-              // Check if segment midpoint is inside source box
-              if (csMidX > cFromBox.l + 6 && csMidX < cFromBox.r - 6 &&
-                  csMidY > cFromBox.t + 6 && csMidY < cFromBox.b - 6) {
-                compSelfHit += 200000;
-              }
-              // Check if segment midpoint is inside target box
-              if (csMidX > cToBox.l + 6 && csMidX < cToBox.r - 6 &&
-                  csMidY > cToBox.t + 6 && csMidY < cToBox.b - 6) {
-                compSelfHit += 200000;
-              }
-            }
+          var sameRowLaneRoutes = buildSameRowLaneCandidates(fromE, toE, sourceCandidate, targetCandidate);
+          for (var srci = 0; srci < sameRowLaneRoutes.length; srci++) {
+            routeVariants.push({
+              points: sameRowLaneRoutes[srci].points,
+              kind: 'same-row-lane',
+              blockerCount: sameRowLaneRoutes[srci].blockerCount,
+              isBackEdge: sameRowLaneRoutes[srci].isBackEdge
+            });
           }
 
-          var score = UMLShared.measureOrthogonalRoute(candidatePoints) + bends * 36 +
-            sourceCandidate.movePenalty + targetCandidate.movePenalty +
-            crosses * 5000 + compSelfHit;
-          if (isJoinedAssembly && bends > 3) score += 12;
+          for (var rvi = 0; rvi < routeVariants.length; rvi++) {
+            var routeVariant = routeVariants[rvi];
+            var candidatePoints = UMLShared.simplifyOrthogonalPath(routeVariant.points);
+            if (UMLShared.routeHitsObstacle(candidatePoints, obstacles, skipN, null)) continue;
 
-          if (!bestRoute || score + 0.01 < bestRoute.score) {
-            bestRoute = {
-              score: score,
-              points: candidatePoints,
-              source: sourceCandidate,
-              target: targetCandidate
-            };
+            var bends = UMLShared.countOrthogonalBends(candidatePoints);
+            var crosses = UMLShared.countRouteCrossings(candidatePoints, occupiedSegments);
+
+            // Penalize routes that pass through source or target component boxes
+            var compSelfHit = 0;
+            if (candidatePoints.length > 2) {
+              var cFromBox = { l: fromE.x - 2, t: fromE.y - 2, r: fromE.x + fromE.box.width + 2, b: fromE.y + fromE.box.height + 2 };
+              var cToBox = { l: toE.x - 2, t: toE.y - 2, r: toE.x + toE.box.width + 2, b: toE.y + toE.box.height + 2 };
+              for (var cshi = 0; cshi < candidatePoints.length - 1; cshi++) {
+                var csP0 = candidatePoints[cshi], csP1 = candidatePoints[cshi + 1];
+                var csMidX = (csP0.x + csP1.x) / 2, csMidY = (csP0.y + csP1.y) / 2;
+                // Check if segment midpoint is inside source box
+                if (csMidX > cFromBox.l + 6 && csMidX < cFromBox.r - 6 &&
+                    csMidY > cFromBox.t + 6 && csMidY < cFromBox.b - 6) {
+                  compSelfHit += 200000;
+                }
+                // Check if segment midpoint is inside target box
+                if (csMidX > cToBox.l + 6 && csMidX < cToBox.r - 6 &&
+                    csMidY > cToBox.t + 6 && csMidY < cToBox.b - 6) {
+                  compSelfHit += 200000;
+                }
+              }
+            }
+
+            var routeLen = UMLShared.measureOrthogonalRoute(candidatePoints);
+            var directDist = Math.abs(candidatePoints[0].x - candidatePoints[candidatePoints.length - 1].x) +
+              Math.abs(candidatePoints[0].y - candidatePoints[candidatePoints.length - 1].y);
+            if (routeVariant.kind === 'same-row-lane') {
+              // Same-row wrap lanes are a general fallback for connectors that
+              // must hop around intermediate components. Keep them opt-in:
+              // only consider them when the resulting detour stays bounded.
+              var maxExtra = Math.max(
+                120,
+                routeVariant.blockerCount * 84 + (routeVariant.isBackEdge ? 52 : 0)
+              );
+              if (routeLen - directDist > maxExtra) continue;
+            }
+
+            var score = routeLen + bends * 36 +
+              sourceCandidate.movePenalty + targetCandidate.movePenalty +
+              crosses * 5000 + compSelfHit;
+            if (isJoinedAssembly && bends > 3) score += 12;
+            if (routeVariant.kind === 'same-row-lane') {
+              score -= 18;
+              score -= Math.min(36, routeVariant.blockerCount * 10);
+              if (routeVariant.isBackEdge) score -= 12;
+            }
+
+            if (!bestRoute || score + 0.01 < bestRoute.score) {
+              bestRoute = {
+                score: score,
+                points: candidatePoints,
+                source: sourceCandidate,
+                target: targetCandidate
+              };
+            }
           }
         }
       }
@@ -17705,6 +17850,2077 @@
   // `language-folder-tree` (from marked.js / Rouge).
   UMLShared.createAutoInit('pre > code.diagram-folder-tree, pre > code.language-folder-tree', render, { type: 'folder-tree' });
   window.UMLFolderTreeDiagram = { render: render, parse: parse };
+})();
+/**
+ * Venn Diagram Renderer
+ *
+ * Schematic (non-area-proportional) Venn diagrams for 2–5 sets. Not UML, so
+ * the auto-init selector uses `diagram-venn` rather than `language-uml-venn`
+ * (same convention as freeform and git graph).
+ *
+ * ─── Why schematic, not area-proportional ─────────────────────────
+ * Teaching-focused diagrams use canonical, symmetric layouts that render
+ * deterministically. Area-proportional Venns (venn.js, eulerr) need
+ * numerical optimisation and often can't be drawn exactly with circles —
+ * out of scope for this renderer.
+ *
+ * ─── Why circles for 2-3 and ellipses for 4-5 ────────────────────
+ * It is mathematically impossible to draw a proper n-set Venn diagram
+ * with circles when n ≥ 4: circles only intersect at 2 points, which
+ * isn't enough combinatorial freedom for 2^n regions. For 4 sets we use
+ * Venn's classical four-ellipse construction; for 5, Grünbaum's five
+ * rotationally-symmetric ellipses. Above 5 we error out — UpSet plots
+ * are the modern answer there.
+ *
+ * ─── Text format ───────────────────────────────────────────────────
+ *   @startuml
+ *   title Animal Classification
+ *
+ *   set Mammals                      ← set, auto-assigned colour
+ *   set Pets #4ecdc4                 ← set, custom colour
+ *   set Cute #ffe66d
+ *
+ *   Mammals : Whale, Dolphin         ← items in the "only A" region
+ *   Mammals & Pets : Dog, Cat        ← items in A ∩ B (but not C)
+ *   Mammals & Pets & Cute : Puppy    ← items in A ∩ B ∩ C
+ *   Pets & Cute : Hamster
+ *   Cute : Ladybug
+ *   outside : Fish                   ← items in none of the sets
+ *   @enduml
+ *
+ * Regions are identified by `&`-joining set names (order-insensitive).
+ * An element goes in exactly one region — the region of sets it belongs
+ * to. `outside`, `none`, or `*` all alias the exterior region.
+ *
+ * ─── Colour picking and contrast ─────────────────────────────────
+ * Each set gets a distinct hue from a perceptually-spaced palette
+ * (evenly rotated around the HSL wheel). Fill colours are rendered at
+ * 55 % opacity inside a `mix-blend-mode: multiply` group, so overlaps
+ * naturally deepen into a third colour — the classic CMY look.
+ *
+ * Region labels pick their text colour (white or near-black) using WCAG
+ * relative-luminance and contrast-ratio. The estimated blended region
+ * colour (multiply of the fills) determines luminance, then whichever
+ * text colour yields the higher contrast ratio wins. Users can override
+ * set colours with `#hex`; the contrast picker still adapts.
+ */
+(function () {
+  'use strict';
+
+  // ─── Configuration ─────────────────────────────────────────────
+
+  var CFG = {
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+    fontSize: 14,
+    titleFontSize: 18,
+    setLabelFontSize: 15,
+    radius: 82,                 // base radius (also ellipse rx-baseline)
+    fillOpacity: 0.55,          // per-set fill opacity under multiply blend
+    svgPad: 30,
+    setLabelOffset: 14,         // distance from set boundary to set label
+    outsideBoxPad: 10,
+  };
+
+  // Perceptually-distinct default palette — selected so that any pair has
+  // clearly different hue under multiply-blend, and so singleton fills
+  // pass WCAG AA against black text at 55% opacity on white.
+  var DEFAULT_PALETTE = [
+    '#ef6b6b', // warm red
+    '#4ecdc4', // teal
+    '#ffd54f', // amber
+    '#a78bfa', // lavender
+    '#81c784', // sage green
+  ];
+
+  // ─── Parsing ───────────────────────────────────────────────────
+
+  function parse(text) {
+    var lines = text.split('\n');
+    var title = null;
+    var shadowEnabled = null;
+    var setList = [];                  // preserves declaration order
+    var setByKey = {};                 // lowercased name -> set object
+    var regionEntries = [];            // { mask: int, items: [str], raw: str }
+    var outsideItems = [];
+    var noteEntries = [];              // { side, rawRefs, lines, targetOutside }
+    var pendingNote = null;            // a multi-line note currently being collected
+
+    for (var i = 0; i < lines.length; i++) {
+      var rawLine = lines[i];
+      var line = rawLine.trim();
+
+      // Inside a multi-line note, collect verbatim until `end note`.
+      if (pendingNote) {
+        if (/^end\s*note$/i.test(line)) {
+          noteEntries.push(pendingNote);
+          pendingNote = null;
+        } else {
+          pendingNote.lines.push(rawLine);
+        }
+        continue;
+      }
+
+      if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (line.charAt(0) === '#' && line.indexOf('#') === 0 && line.indexOf(':') === -1 &&
+          !line.match(/^#[0-9a-fA-F]/)) {
+        // Line starting with `#` and no colon and not a hex code -> comment
+        continue;
+      }
+      if (line.indexOf('//') === 0) continue;
+
+      // title <text>
+      var titleMatch = line.match(/^title\s+(.+)$/i);
+      if (titleMatch) { title = titleMatch[1].trim(); continue; }
+
+      // layout shadows on|off — the only layout directive Venn diagrams honour.
+      // Other `layout *` directives are accepted but ignored (the canonical
+      // Venn layout has no orientation knobs).
+      var layoutDir = UMLShared.parseLayoutDirective(line);
+      if (layoutDir) {
+        if (layoutDir.shadowEnabled !== null) shadowEnabled = layoutDir.shadowEnabled;
+        continue;
+      }
+
+      // Notes — attach a callout to a region (or the outside bin).
+      //   note <side> of <refs> : <text>           single-line
+      //   note <side> of <refs>                    followed by lines then `end note`
+      //     multi-line text
+      //   end note
+      // <side> ∈ left | right | top | bottom | above | below
+      // <refs> is a region spec (same grammar as region lines) OR `outside|none|*`.
+      var noteMatch = line.match(/^note\s+(left|right|top|bottom|above|below)\s+of\s+(.+?)(?:\s*:\s*(.*))?$/i);
+      if (noteMatch) {
+        var side = noteMatch[1].toLowerCase();
+        if (side === 'above') side = 'top';
+        if (side === 'below') side = 'bottom';
+        var targetSpec = noteMatch[2].trim();
+        var inline = noteMatch[3];
+        var targetOutside = /^(outside|none|\*)$/i.test(targetSpec);
+        var noteRefs = targetOutside ? [] : splitRefs(targetSpec);
+        var noteObj = { side: side, rawRefs: noteRefs, lines: [], targetOutside: targetOutside };
+        if (inline !== undefined) {
+          if (inline.length) {
+            // Support literal \n escapes so single-line notes can wrap.
+            var parts = inline.split(/\\n/);
+            for (var pp = 0; pp < parts.length; pp++) noteObj.lines.push(parts[pp]);
+          }
+          noteEntries.push(noteObj);
+        } else {
+          pendingNote = noteObj;
+        }
+        continue;
+      }
+
+      // set <name> [#color]
+      //   name allows a quoted string ("My Set") or a bare identifier.
+      var setMatch = line.match(/^set\s+(?:"([^"]+)"|(\S+))(?:\s+(#(?:[0-9a-fA-F]{3,8}|[A-Za-z][A-Za-z0-9]*)))?\s*$/i);
+      if (setMatch) {
+        var setName = setMatch[1] || setMatch[2];
+        var setColor = setMatch[3] || null;
+        var key = setName.toLowerCase();
+        if (!setByKey[key]) {
+          var setObj = { name: setName, color: setColor, index: setList.length };
+          setList.push(setObj);
+          setByKey[key] = setObj;
+        } else if (setColor) {
+          setByKey[key].color = setColor;
+        }
+        continue;
+      }
+
+      // Region lines — `<names-joined-by-& or ,> : items`
+      // Also: `outside : items`, `none : items`, `* : items`
+      var colonIdx = line.indexOf(':');
+      if (colonIdx === -1) continue;
+      var left = line.substring(0, colonIdx).trim();
+      var right = line.substring(colonIdx + 1).trim();
+
+      if (!left) continue;
+      if (/^(outside|none|\*)$/i.test(left)) {
+        appendItems(outsideItems, right);
+        continue;
+      }
+
+      var refs = splitRefs(left);
+      if (refs.length === 0) continue;
+      regionEntries.push({ rawRefs: refs, items: splitItems(right) });
+    }
+
+    // Flush any unterminated multi-line note (missing `end note`).
+    if (pendingNote) noteEntries.push(pendingNote);
+
+    // Resolve region refs -> bitmask. Unknown set names cause a warning entry
+    // we surface at render time so the user notices typos rather than having
+    // items silently vanish.
+    var unknownRefs = [];
+    var regionsByMask = {};
+    for (var r = 0; r < regionEntries.length; r++) {
+      var entry = regionEntries[r];
+      var mask = 0;
+      var bad = false;
+      for (var j = 0; j < entry.rawRefs.length; j++) {
+        var s = setByKey[entry.rawRefs[j].toLowerCase()];
+        if (!s) { unknownRefs.push(entry.rawRefs[j]); bad = true; continue; }
+        mask |= (1 << s.index);
+      }
+      if (bad || mask === 0) continue;
+      if (!regionsByMask[mask]) regionsByMask[mask] = [];
+      for (var k = 0; k < entry.items.length; k++) {
+        regionsByMask[mask].push(entry.items[k]);
+      }
+    }
+
+    // Resolve note refs -> bitmask. Drop notes with unknown refs (and
+    // surface the typo via unknownRefs).
+    var notes = [];
+    for (var ni = 0; ni < noteEntries.length; ni++) {
+      var ne = noteEntries[ni];
+      if (ne.targetOutside) {
+        notes.push({ side: ne.side, mask: 0, targetOutside: true, lines: ne.lines });
+        continue;
+      }
+      var nmask = 0;
+      var nbad = false;
+      for (var nj = 0; nj < ne.rawRefs.length; nj++) {
+        var ns = setByKey[ne.rawRefs[nj].toLowerCase()];
+        if (!ns) { unknownRefs.push(ne.rawRefs[nj]); nbad = true; continue; }
+        nmask |= (1 << ns.index);
+      }
+      if (nbad || nmask === 0) continue;
+      notes.push({ side: ne.side, mask: nmask, targetOutside: false, lines: ne.lines });
+    }
+
+    return {
+      title: title,
+      sets: setList,
+      regions: regionsByMask,       // bitmask -> items[]
+      outsideItems: outsideItems,
+      notes: notes,                 // [{ side, mask, targetOutside, lines }]
+      unknownRefs: unknownRefs,
+      shadowEnabled: shadowEnabled
+    };
+  }
+
+  function splitItems(str) {
+    if (!str) return [];
+    // Items are comma-separated. Support escaped commas via `\,` → `,`.
+    var out = [];
+    var buf = '';
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      if (ch === '\\' && str.charAt(i + 1) === ',') { buf += ','; i++; continue; }
+      if (ch === ',') { if (buf.trim()) out.push(buf.trim()); buf = ''; continue; }
+      buf += ch;
+    }
+    if (buf.trim()) out.push(buf.trim());
+    return out;
+  }
+
+  // Split a region-or-note target spec on `&`, `∩`, `+`, `,` *outside*
+  // quoted strings, then strip the surrounding quotes from each ref. This
+  // lets set names contain spaces ("Memory Safe") and be referenced in
+  // region lines with the same quoted form.
+  function splitRefs(input) {
+    var out = [];
+    var buf = '';
+    var inQ = false;
+    for (var i = 0; i < input.length; i++) {
+      var ch = input.charAt(i);
+      if (ch === '"') { inQ = !inQ; buf += ch; continue; }
+      if (!inQ && (ch === '&' || ch === '+' || ch === ',' || ch === '∩')) {
+        var t = buf.trim();
+        if (t) out.push(unquoteRef(t));
+        buf = '';
+        continue;
+      }
+      buf += ch;
+    }
+    var last = buf.trim();
+    if (last) out.push(unquoteRef(last));
+    return out;
+  }
+
+  function unquoteRef(s) {
+    var m = s.match(/^"([^"]*)"$/);
+    return m ? m[1] : s;
+  }
+
+  function appendItems(arr, str) {
+    var items = splitItems(str);
+    for (var i = 0; i < items.length; i++) arr.push(items[i]);
+  }
+
+  // ─── Colour Utilities (WCAG-based contrast detection) ──────────
+  //
+  // The contrast-detection pipeline:
+  //   1. Resolve every set fill to a concrete 6-digit hex (#abcdef).
+  //   2. For each region, estimate the visible blended fill using the
+  //      "multiply over white" approximation — mirrors the browser's
+  //      `mix-blend-mode: multiply` on translucent fills over white.
+  //   3. Compute WCAG relative luminance of the blended colour.
+  //   4. Pick white or near-black text, whichever yields the higher
+  //      contrast ratio. WCAG AA is 4.5:1; our threshold is just "which
+  //      of the two is better" because with reasonable palettes the
+  //      winner always clears AA against the simpler colour.
+
+  var CSS_NAMED_COLORS = {
+    black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000',
+    blue: '#0000ff', yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff',
+    orange: '#ffa500', purple: '#800080', pink: '#ffc0cb', brown: '#a52a2a',
+    gray: '#808080', grey: '#808080', lightblue: '#add8e6', lightgreen: '#90ee90',
+    lightpink: '#ffb6c1', lightyellow: '#ffffe0', lightgray: '#d3d3d3',
+    darkred: '#8b0000', darkgreen: '#006400', darkblue: '#00008b',
+    teal: '#008080', navy: '#000080', olive: '#808000', maroon: '#800000',
+    lime: '#00ff00', aqua: '#00ffff', silver: '#c0c0c0',
+    gold: '#ffd700', coral: '#ff7f50', salmon: '#fa8072', khaki: '#f0e68c',
+    violet: '#ee82ee', indigo: '#4b0082', tan: '#d2b48c', beige: '#f5f5dc',
+    lavender: '#e6e6fa', turquoise: '#40e0d0', mediumblue: '#0000cd'
+  };
+
+  function normalizeHex(color) {
+    if (!color) return null;
+    var s = String(color).trim();
+    if (s.charAt(0) !== '#') {
+      var named = CSS_NAMED_COLORS[s.toLowerCase()];
+      if (!named) return null;
+      s = named;
+    }
+    var body = s.substring(1);
+    if (!/^[0-9a-fA-F]+$/.test(body)) return null;
+    if (body.length === 3) body = body[0] + body[0] + body[1] + body[1] + body[2] + body[2];
+    if (body.length === 4) body = body[0] + body[0] + body[1] + body[1] + body[2] + body[2];  // drop alpha
+    if (body.length === 8) body = body.substring(0, 6);
+    if (body.length !== 6) return null;
+    return '#' + body.toLowerCase();
+  }
+
+  function hexToRgb(hex) {
+    var body = hex.substring(1);
+    return {
+      r: parseInt(body.substr(0, 2), 16),
+      g: parseInt(body.substr(2, 2), 16),
+      b: parseInt(body.substr(4, 2), 16)
+    };
+  }
+
+  function rgbToHex(r, g, b) {
+    function p(n) { return (n < 16 ? '0' : '') + n.toString(16); }
+    return '#' + p(Math.max(0, Math.min(255, Math.round(r)))) +
+                 p(Math.max(0, Math.min(255, Math.round(g)))) +
+                 p(Math.max(0, Math.min(255, Math.round(b))));
+  }
+
+  function relativeLuminance(hex) {
+    var rgb = hexToRgb(hex);
+    function linearize(c) {
+      c = c / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * linearize(rgb.r) + 0.7152 * linearize(rgb.g) + 0.0722 * linearize(rgb.b);
+  }
+
+  function contrastRatio(l1, l2) {
+    var a = Math.max(l1, l2), b = Math.min(l1, l2);
+    return (a + 0.05) / (b + 0.05);
+  }
+
+  function pickTextColor(bgHex) {
+    var bgL = relativeLuminance(bgHex);
+    var whiteRatio = contrastRatio(1.0, bgL);
+    var blackRatio = contrastRatio(bgL, 0.0);
+    return whiteRatio >= blackRatio ? '#ffffff' : '#1a1a1a';
+  }
+
+  // Approximate what the browser draws when stacking `<shape fill="X" fill-opacity="a">`
+  // under `mix-blend-mode: multiply` on a white background. Multiply under a
+  // translucent fill reduces the destination channel toward fg*bg. This is
+  // not pixel-exact but good enough for luminance-based contrast decisions.
+  function estimateMultiplyBlend(colors, opacity, bgHex) {
+    var bg = hexToRgb(bgHex || '#ffffff');
+    var r = bg.r / 255, g = bg.g / 255, b = bg.b / 255;
+    for (var i = 0; i < colors.length; i++) {
+      var c = hexToRgb(colors[i]);
+      var fr = c.r / 255, fg = c.g / 255, fb = c.b / 255;
+      // Multiply: result = bg * fg, then alpha-blend with original bg.
+      var mr = r * fr, mg = g * fg, mb = b * fb;
+      r = r * (1 - opacity) + mr * opacity;
+      g = g * (1 - opacity) + mg * opacity;
+      b = b * (1 - opacity) + mb * opacity;
+    }
+    return rgbToHex(r * 255, g * 255, b * 255);
+  }
+
+  // Derive an HSL-spaced colour for set index `i` when the palette runs out
+  // or the caller explicitly requested ≥ 6 sets (currently errored). Given
+  // here as a fallback — the default palette already covers 2–5.
+  function fallbackHue(i, n) {
+    var hue = (i * 360 / n) % 360;
+    return hslToHex(hue, 62, 60);
+  }
+
+  function hslToHex(h, s, l) {
+    h = ((h % 360) + 360) % 360; s /= 100; l /= 100;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r = 0, g = 0, b = 0;
+    if (h < 60)      { r = c; g = x; }
+    else if (h < 120){ r = x; g = c; }
+    else if (h < 180){ g = c; b = x; }
+    else if (h < 240){ g = x; b = c; }
+    else if (h < 300){ r = x; b = c; }
+    else             { r = c; b = x; }
+    return rgbToHex((r + m) * 255, (g + m) * 255, (b + m) * 255);
+  }
+
+  function resolveSetColors(sets) {
+    var out = [];
+    for (var i = 0; i < sets.length; i++) {
+      var requested = normalizeHex(sets[i].color);
+      if (requested) { out.push(requested); continue; }
+      if (i < DEFAULT_PALETTE.length) { out.push(DEFAULT_PALETTE[i]); continue; }
+      out.push(fallbackHue(i, sets.length));
+    }
+    return out;
+  }
+
+  // ─── Layout ────────────────────────────────────────────────────
+  //
+  // Every layout returns:
+  //   shapes[i]        = { kind, cx, cy, r|rx|ry, rot }  — per set
+  //   setLabels[i]     = { x, y, anchor }               — where to draw the set name
+  //   regionAnchors    = { mask: [x, y] }               — where to draw each region's items
+  //   outsideAnchor    = { x, y, anchor, side }         — where to place the 'outside' bin
+  //   bounds           = { minX, minY, maxX, maxY }     — tight bbox of all shapes
+  //
+  // Positions are in an unconstrained plane; the renderer shifts into SVG space.
+
+  function computeLayout(n, R) {
+    if (n === 1) return layout1(R);
+    if (n === 2) return layout2(R);
+    if (n === 3) return layout3(R);
+    if (n === 4) return layout4(R);
+    if (n === 5) return layout5(R);
+    return null;
+  }
+
+  function layout1(R) {
+    return {
+      shapes: [{ kind: 'circle', cx: 0, cy: 0, r: R, rot: 0 }],
+      setLabels: [{ x: 0, y: -R - CFG.setLabelOffset, anchor: 'middle' }],
+      regionAnchors: { 1: [0, 0] },
+      bounds: { minX: -R, minY: -R, maxX: R, maxY: R }
+    };
+  }
+
+  function layout2(R) {
+    var d = R * 1.0;                       // center-to-center (d = R ⇒ each center sits on the other circle)
+    var c1 = { cx: -d / 2, cy: 0 };
+    var c2 = { cx:  d / 2, cy: 0 };
+    return {
+      shapes: [
+        { kind: 'circle', cx: c1.cx, cy: c1.cy, r: R, rot: 0 },
+        { kind: 'circle', cx: c2.cx, cy: c2.cy, r: R, rot: 0 }
+      ],
+      setLabels: [
+        { x: c1.cx - R * 0.55, y: -R - CFG.setLabelOffset, anchor: 'middle' },
+        { x: c2.cx + R * 0.55, y: -R - CFG.setLabelOffset, anchor: 'middle' }
+      ],
+      regionAnchors: {
+        // Half-moon centres: A-only spans x ∈ [-3R/2, -R/2], centroid ≈ x = -R.
+        // Anchoring here keeps labels clear of the overlap boundary line.
+        1: [c1.cx - R * 0.5, 0],           // A only (centroid of half-moon)
+        2: [c2.cx + R * 0.5, 0],           // B only
+        3: [0, 0]                           // A & B
+      },
+      bounds: { minX: c1.cx - R, minY: -R, maxX: c2.cx + R, maxY: R }
+    };
+  }
+
+  function layout3(R) {
+    // Equilateral triangle of centres, circumradius s = R/√3, so every pair
+    // of centres is distance R apart (the canonical d = R look).
+    var s = R / Math.sqrt(3);
+    var centers = [];
+    for (var i = 0; i < 3; i++) {
+      var ang = -Math.PI / 2 + i * 2 * Math.PI / 3; // start at top, go CW in SVG
+      centers.push({ cx: s * Math.cos(ang), cy: s * Math.sin(ang), ang: ang });
+    }
+    var shapes = centers.map(function (c) {
+      return { kind: 'circle', cx: c.cx, cy: c.cy, r: R, rot: 0 };
+    });
+
+    // Set labels sit just outside each circle, along the vector from the
+    // origin through the centre.
+    var setLabels = centers.map(function (c) {
+      var len = Math.sqrt(c.cx * c.cx + c.cy * c.cy) || 1;
+      var ux = c.cx / len, uy = c.cy / len;
+      var lx = c.cx + ux * (R + CFG.setLabelOffset + 2);
+      var ly = c.cy + uy * (R + CFG.setLabelOffset + 2);
+      return { x: lx, y: ly, anchor: Math.abs(ux) < 0.1 ? 'middle' : (ux > 0 ? 'start' : 'end') };
+    });
+
+    // Region anchors: for single-set regions, push outward along the set's
+    // centre direction. For pairwise regions, take midpoint of the two set
+    // centres and nudge away from the third. Triple intersection is origin.
+    var anchors = {};
+    for (var i2 = 0; i2 < 3; i2++) {
+      var c = centers[i2];
+      var len2 = Math.sqrt(c.cx * c.cx + c.cy * c.cy) || 1;
+      var ux2 = c.cx / len2, uy2 = c.cy / len2;
+      anchors[1 << i2] = [c.cx + ux2 * R * 0.55, c.cy + uy2 * R * 0.55];
+    }
+    for (var a = 0; a < 3; a++) {
+      for (var b = a + 1; b < 3; b++) {
+        var ca = centers[a], cb = centers[b];
+        var mid = { x: (ca.cx + cb.cx) / 2, y: (ca.cy + cb.cy) / 2 };
+        var cc = centers[3 - a - b];          // the excluded set
+        var dx = mid.x - cc.cx, dy = mid.y - cc.cy;
+        var dl = Math.sqrt(dx * dx + dy * dy) || 1;
+        var nudge = R * 0.35;
+        anchors[(1 << a) | (1 << b)] = [mid.x + dx / dl * nudge, mid.y + dy / dl * nudge];
+      }
+    }
+    anchors[7] = [0, 0]; // A ∩ B ∩ C
+
+    return {
+      shapes: shapes,
+      setLabels: setLabels,
+      regionAnchors: anchors,
+      bounds: { minX: -R - R / 2, minY: -s - R, maxX: R + R / 2, maxY: s + R }
+    };
+  }
+
+  function layout4(R) {
+    // Venn's four-ellipse construction: two pairs of congruent ellipses
+    // rotated ±45°, offset so all 2⁴ = 16 regions appear. The exact
+    // parameters below are tuned empirically to make every region visibly
+    // non-empty at the default R (82 px).
+    var rx = R * 1.55;
+    var ry = R * 0.72;
+    var dx = R * 0.32;
+    var dy = R * 0.28;
+
+    var specs = [
+      { cx: -dx, cy: -dy, rot:  45, dir: { x: -0.7, y: -0.7 } }, // A: upper-left
+      { cx:  dx, cy: -dy, rot: -45, dir: { x:  0.7, y: -0.7 } }, // B: upper-right
+      { cx: -dx, cy:  dy, rot: -45, dir: { x: -0.7, y:  0.7 } }, // C: lower-left
+      { cx:  dx, cy:  dy, rot:  45, dir: { x:  0.7, y:  0.7 } }  // D: lower-right
+    ];
+
+    var shapes = specs.map(function (s) {
+      return { kind: 'ellipse', cx: s.cx, cy: s.cy, rx: rx, ry: ry, rot: s.rot };
+    });
+
+    var setLabels = specs.map(function (s) {
+      // Label along the ellipse major axis, on the outer side.
+      var rad = s.rot * Math.PI / 180;
+      // Major-axis unit vector points along +rx after rotation.
+      var mux = Math.cos(rad), muy = Math.sin(rad);
+      // Decide which major-axis end is "outer" by taking the one with greater
+      // |position| in the centre-from-origin direction.
+      var outerSign = (s.cx * mux + s.cy * muy) > 0 ? 1 : -1;
+      var lx = s.cx + mux * (rx + CFG.setLabelOffset + 4) * outerSign;
+      var ly = s.cy + muy * (rx + CFG.setLabelOffset + 4) * outerSign;
+      var ax = Math.abs(lx) < 4 ? 'middle' : (lx > 0 ? 'start' : 'end');
+      return { x: lx, y: ly, anchor: ax };
+    });
+
+    // The pole-of-inaccessibility sampler places every region label at the
+    // grid cell deepest inside the region. This handles the Venn-4
+    // geometry correctly even for the two diagonal-band regions (A∩D-only
+    // and B∩C-only), which are ring-shaped around the central 4-way
+    // intersection — a plain centroid puts them at the centre, on top of
+    // the "all four" label.
+    var pad = rx + CFG.setLabelOffset + 30;
+    return {
+      shapes: shapes,
+      setLabels: setLabels,
+      regionAnchors: computeSampledAnchors(shapes, R),
+      bounds: { minX: -pad, minY: -pad, maxX: pad, maxY: pad }
+    };
+  }
+
+  function layout5(R) {
+    // Grünbaum's five-ellipse construction: five congruent ellipses arranged
+    // with 5-fold rotational symmetry. Each ellipse is a 72°-rotated copy
+    // of the previous one, centred slightly off the origin.
+    var rx = R * 1.85;
+    var ry = R * 0.70;
+    var offset = R * 0.52;
+
+    var shapes = [];
+    var setLabels = [];
+    for (var i = 0; i < 5; i++) {
+      var rot = -90 + i * 72;                        // degrees
+      var ang = (rot + 90) * Math.PI / 180;          // radians, set-centre direction
+      var cx = offset * Math.cos(ang);
+      var cy = offset * Math.sin(ang);
+      shapes.push({ kind: 'ellipse', cx: cx, cy: cy, rx: rx, ry: ry, rot: rot });
+      // Label at the ellipse's outer major-axis tip.
+      var rrad = rot * Math.PI / 180;
+      var mux = Math.cos(rrad), muy = Math.sin(rrad);
+      var sign = (cx * mux + cy * muy) > 0 ? 1 : -1;
+      var lx = cx + mux * (rx + CFG.setLabelOffset + 6) * sign;
+      var ly = cy + muy * (rx + CFG.setLabelOffset + 6) * sign;
+      var ax = Math.abs(lx) < 6 ? 'middle' : (lx > 0 ? 'start' : 'end');
+      setLabels.push({ x: lx, y: ly, anchor: ax });
+    }
+
+    // For 5 sets (32 regions) hand-placing every region anchor is too noisy.
+    // We sample a dense grid inside the diagram once and find the geometric
+    // centre of each region-mask's pixels. This is done at render time from
+    // the actual shape equations (see computeSampledAnchors5 below) so a
+    // parameter tweak never requires updating a hand-tuned table.
+    return {
+      shapes: shapes,
+      setLabels: setLabels,
+      regionAnchors: computeSampledAnchors(shapes, R),
+      bounds: (function () {
+        var pad = rx + CFG.setLabelOffset + 30;
+        return { minX: -pad, minY: -pad, maxX: pad, maxY: pad };
+      })()
+    };
+  }
+
+  // Point-in-ellipse test for an ellipse with centre (cx,cy), axes (rx,ry),
+  // rotation `rot` (degrees).
+  function pointInEllipse(x, y, ell) {
+    var rad = -ell.rot * Math.PI / 180; // invert to de-rotate the test point
+    var dx = x - ell.cx, dy = y - ell.cy;
+    var rx2 = Math.cos(rad) * dx - Math.sin(rad) * dy;
+    var ry2 = Math.sin(rad) * dx + Math.cos(rad) * dy;
+    return (rx2 * rx2) / (ell.rx * ell.rx) + (ry2 * ry2) / (ell.ry * ell.ry) <= 1;
+  }
+
+  function pointInShape(x, y, shape) {
+    if (shape.kind === 'circle') {
+      var dx = x - shape.cx, dy = y - shape.cy;
+      return dx * dx + dy * dy <= shape.r * shape.r;
+    }
+    return pointInEllipse(x, y, shape);
+  }
+
+  // Compute a good label anchor per region using a "pole of inaccessibility"
+  // approximation: the grid cell inside the region that is maximally far
+  // from any cell belonging to a different mask.
+  //
+  // A plain centroid gives the wrong answer when a region is ring-shaped or
+  // symmetric around the origin (as happens for the two diagonal-band
+  // regions in Venn's 4-ellipse layout, which wrap around the central
+  // 4-intersection). The centroid lands in the hole — inside a neighbour
+  // mask — and the label overlaps the centre label.
+  //
+  // Algorithm:
+  //   1. Rasterise the diagram onto a coarse grid, tagging each cell with
+  //      its region mask.
+  //   2. Seed a multi-source BFS from every "boundary" cell — one whose
+  //      4-neighbour has a different mask or falls off-grid.
+  //   3. Each cell's BFS distance equals its shortest path (through cells
+  //      of the same mask) to a region edge.
+  //   4. For each mask, the cell with the highest distance is the anchor:
+  //      it sits as deep inside the region as possible.
+  function computeSampledAnchors(shapes, R) {
+    var pad = R * 3.2;
+    var step = 3;
+    var w = Math.ceil(2 * pad / step) + 1;
+    var h = w;
+    var total = w * h;
+    var maskGrid = new Int32Array(total);
+    var cellsByMask = {};
+
+    for (var yi = 0; yi < h; yi++) {
+      var yy = -pad + yi * step;
+      for (var xi = 0; xi < w; xi++) {
+        var xx = -pad + xi * step;
+        var mask = 0;
+        for (var si = 0; si < shapes.length; si++) {
+          if (pointInShape(xx, yy, shapes[si])) mask |= (1 << si);
+        }
+        maskGrid[yi * w + xi] = mask;
+        if (!mask) continue;
+        if (!cellsByMask[mask]) cellsByMask[mask] = [];
+        cellsByMask[mask].push(yi * w + xi);
+      }
+    }
+
+    // Distance transform via BFS. Initial distance = 0 for cells adjacent
+    // to a different mask (or to the grid edge); Infinity elsewhere.
+    var INF = 1e9;
+    var dist = new Float32Array(total);
+    var queue = new Int32Array(total);
+    var qStart = 0, qEnd = 0;
+
+    for (var i = 0; i < total; i++) dist[i] = INF;
+
+    for (var yi2 = 0; yi2 < h; yi2++) {
+      for (var xi2 = 0; xi2 < w; xi2++) {
+        var idx = yi2 * w + xi2;
+        var m = maskGrid[idx];
+        if (!m) continue;
+        var isBoundary = false;
+        if (xi2 === 0 || xi2 === w - 1 || yi2 === 0 || yi2 === h - 1) isBoundary = true;
+        else {
+          if (maskGrid[idx - 1] !== m) isBoundary = true;
+          else if (maskGrid[idx + 1] !== m) isBoundary = true;
+          else if (maskGrid[idx - w] !== m) isBoundary = true;
+          else if (maskGrid[idx + w] !== m) isBoundary = true;
+        }
+        if (isBoundary) {
+          dist[idx] = 0;
+          queue[qEnd++] = idx;
+        }
+      }
+    }
+
+    while (qStart < qEnd) {
+      var cur = queue[qStart++];
+      var curMask = maskGrid[cur];
+      var curDist = dist[cur];
+      var cx = cur % w, cy = (cur - cx) / w;
+      var nextD = curDist + 1;
+      // 4-neighbours
+      if (cx > 0) {
+        var n1 = cur - 1;
+        if (maskGrid[n1] === curMask && nextD < dist[n1]) { dist[n1] = nextD; queue[qEnd++] = n1; }
+      }
+      if (cx < w - 1) {
+        var n2 = cur + 1;
+        if (maskGrid[n2] === curMask && nextD < dist[n2]) { dist[n2] = nextD; queue[qEnd++] = n2; }
+      }
+      if (cy > 0) {
+        var n3 = cur - w;
+        if (maskGrid[n3] === curMask && nextD < dist[n3]) { dist[n3] = nextD; queue[qEnd++] = n3; }
+      }
+      if (cy < h - 1) {
+        var n4 = cur + w;
+        if (maskGrid[n4] === curMask && nextD < dist[n4]) { dist[n4] = nextD; queue[qEnd++] = n4; }
+      }
+    }
+
+    var anchors = {};
+    for (var mask2 in cellsByMask) {
+      if (!Object.prototype.hasOwnProperty.call(cellsByMask, mask2)) continue;
+      var cells = cellsByMask[mask2];
+      var bestIdx = cells[0], bestD = -1;
+      for (var ci = 0; ci < cells.length; ci++) {
+        var idx2 = cells[ci];
+        if (dist[idx2] > bestD) { bestD = dist[idx2]; bestIdx = idx2; }
+      }
+      var bx = bestIdx % w;
+      var by = (bestIdx - bx) / w;
+      anchors[mask2] = [-pad + bx * step, -pad + by * step];
+    }
+    return anchors;
+  }
+
+  // ─── Rendering ─────────────────────────────────────────────────
+
+  function maskFills(mask, setColors) {
+    var out = [];
+    for (var i = 0; i < setColors.length; i++) {
+      if (mask & (1 << i)) out.push(setColors[i]);
+    }
+    return out;
+  }
+
+  function formatItems(items) {
+    // Wrap at roughly 3-per-line so labels stay square-ish.
+    if (!items || items.length === 0) return [];
+    var lines = [];
+    var current = '';
+    for (var i = 0; i < items.length; i++) {
+      var nxt = current ? current + ', ' + items[i] : items[i];
+      if (current && nxt.length > 22) { lines.push(current); current = items[i]; }
+      else current = nxt;
+    }
+    if (current) lines.push(current);
+    return lines;
+  }
+
+  function shapeTag(s, fill, opacity, stroke, sw) {
+    var common = 'fill="' + fill + '" fill-opacity="' + opacity + '" stroke="' + stroke +
+                 '" stroke-width="' + sw + '"';
+    if (s.kind === 'circle') {
+      return '<circle cx="' + s.cx + '" cy="' + s.cy + '" r="' + s.r + '" ' + common + '/>';
+    }
+    var rot = s.rot ? ' transform="rotate(' + s.rot + ' ' + s.cx + ' ' + s.cy + ')"' : '';
+    return '<ellipse cx="' + s.cx + '" cy="' + s.cy + '" rx="' + s.rx + '" ry="' + s.ry + '"' + rot + ' ' + common + '/>';
+  }
+
+  function shapeOutlineTag(s, stroke, sw) {
+    var common = 'fill="none" stroke="' + stroke + '" stroke-width="' + sw + '"';
+    if (s.kind === 'circle') {
+      return '<circle cx="' + s.cx + '" cy="' + s.cy + '" r="' + s.r + '" ' + common + '/>';
+    }
+    var rot = s.rot ? ' transform="rotate(' + s.rot + ' ' + s.cx + ' ' + s.cy + ')"' : '';
+    return '<ellipse cx="' + s.cx + '" cy="' + s.cy + '" rx="' + s.rx + '" ry="' + s.ry + '"' + rot + ' ' + common + '/>';
+  }
+
+  // ─── Notes ─────────────────────────────────────────────────────
+  //
+  // Notes are pushed beyond the current diagram bounds in the user's
+  // requested direction. We stack multiple notes on the same side and
+  // route a dotted connector from the target region's anchor to the
+  // nearest edge of the note box.
+  //
+  // `bounds` here is the diagram's current bbox *before* notes — set
+  // labels and outside bin are already folded in.
+  function layoutNotes(notes, layout, bounds, outsideBox) {
+    if (!notes || notes.length === 0) return [];
+    var NOTE_GAP = 28;                         // gap between diagram edge and note box
+    var NOTE_STACK_GAP = 12;                   // between stacked notes on the same side
+    var cursors = {
+      left: bounds.minX - NOTE_GAP,
+      right: bounds.maxX + NOTE_GAP,
+      top: bounds.minY - NOTE_GAP,
+      bottom: bounds.maxY + NOTE_GAP
+    };
+    var stackY = { left: null, right: null };   // current y for vertical stacking
+    var stackX = { top: null, bottom: null };   // current x for horizontal stacking
+    var placements = [];
+
+    for (var i = 0; i < notes.length; i++) {
+      var note = notes[i];
+      var lines = note.lines && note.lines.length ? note.lines : [''];
+      var size = UMLShared.measureNote(lines);
+      var target = resolveNoteTarget(note, layout, outsideBox);
+      if (!target) continue;
+
+      var x, y, attachX, attachY;
+      if (note.side === 'right') {
+        x = cursors.right;
+        if (stackY.right === null) stackY.right = target.y - size.height / 2;
+        y = stackY.right;
+        stackY.right = y + size.height + NOTE_STACK_GAP;
+        attachX = x;                             // left edge of note
+        attachY = y + size.height / 2;
+      } else if (note.side === 'left') {
+        x = cursors.left - size.width;
+        if (stackY.left === null) stackY.left = target.y - size.height / 2;
+        y = stackY.left;
+        stackY.left = y + size.height + NOTE_STACK_GAP;
+        attachX = x + size.width;                // right edge of note
+        attachY = y + size.height / 2;
+      } else if (note.side === 'top') {
+        y = cursors.top - size.height;
+        if (stackX.top === null) stackX.top = target.x - size.width / 2;
+        x = stackX.top;
+        stackX.top = x + size.width + NOTE_STACK_GAP;
+        attachX = x + size.width / 2;
+        attachY = y + size.height;               // bottom edge of note
+      } else { // bottom
+        y = cursors.bottom;
+        if (stackX.bottom === null) stackX.bottom = target.x - size.width / 2;
+        x = stackX.bottom;
+        stackX.bottom = x + size.width + NOTE_STACK_GAP;
+        attachX = x + size.width / 2;
+        attachY = y;                             // top edge of note
+      }
+
+      placements.push({
+        x: x, y: y, size: size, lines: lines,
+        attachX: attachX, attachY: attachY,
+        targetX: target.x, targetY: target.y
+      });
+    }
+    return placements;
+  }
+
+  function resolveNoteTarget(note, layout, outsideBox) {
+    if (note.targetOutside) {
+      if (!outsideBox) return null;
+      return { x: outsideBox.x + outsideBox.w / 2, y: outsideBox.y + outsideBox.h / 2 };
+    }
+    var anchor = layout.regionAnchors[note.mask];
+    if (!anchor) return null;
+    return { x: anchor[0], y: anchor[1] };
+  }
+
+  // Size the circles/ellipses so every region label fits at its anchor.
+  // We look at the widest line in every populated region (after wrapping)
+  // and pick R so that even the tightest region — whose horizontal width
+  // at its anchor is roughly R * TIGHT_FACTOR[n] — has enough room.
+  //
+  // TIGHT_FACTOR[n] is the empirical ratio of (minimum region horizontal
+  // width at its anchor) / R for each set-count, with a safety margin built
+  // in. Smaller n → more room per region.
+  var TIGHT_FACTOR = { 1: 1.6, 2: 0.9, 3: 0.7, 4: 0.6, 5: 0.5 };
+
+  function computeRequiredRadius(parsed, n) {
+    var maxLineWidth = 0;
+    for (var mk in parsed.regions) {
+      if (!Object.prototype.hasOwnProperty.call(parsed.regions, mk)) continue;
+      var items = parsed.regions[mk];
+      if (!items || items.length === 0) continue;
+      var lines = formatItems(items);
+      for (var li = 0; li < lines.length; li++) {
+        var w = UMLShared.textWidth(lines[li], false, CFG.fontSize);
+        if (w > maxLineWidth) maxLineWidth = w;
+      }
+    }
+    if (maxLineWidth === 0) return CFG.radius;
+    var factor = TIGHT_FACTOR[n] || 0.5;
+    // +16 px padding (8 px on each side) so labels never hug the region edge.
+    var minR = (maxLineWidth + 16) / factor;
+    return Math.max(CFG.radius, Math.min(minR, CFG.radius * 3));
+  }
+
+  function generateSVG(parsed, themeColors) {
+    var n = parsed.sets.length;
+    if (n === 0) {
+      return '<div style="padding:20px;color:#888;text-align:center;">' +
+             'No sets declared. Use <code>set &lt;name&gt;</code> to add sets.</div>';
+    }
+    if (n > 5) {
+      return '<div style="padding:20px;color:#b00;text-align:center;">' +
+             'Venn diagrams support at most 5 sets (requested: ' + n + '). ' +
+             'For 6+ sets use an UpSet plot instead.</div>';
+    }
+
+    var R = computeRequiredRadius(parsed, n);
+    var layout = computeLayout(n, R);
+    var setColors = resolveSetColors(parsed.sets);
+
+    // Compute the rendered SVG bounds, accounting for title, set labels,
+    // region labels, and the outside bin.
+    var bounds = { minX: layout.bounds.minX, minY: layout.bounds.minY,
+                   maxX: layout.bounds.maxX, maxY: layout.bounds.maxY };
+
+    // Account for set labels (rough — based on text width).
+    for (var i = 0; i < layout.setLabels.length; i++) {
+      var sl = layout.setLabels[i];
+      var w = UMLShared.textWidth(parsed.sets[i].name, true, CFG.setLabelFontSize);
+      var left = sl.x - (sl.anchor === 'middle' ? w / 2 : (sl.anchor === 'end' ? w : 0));
+      bounds.minX = Math.min(bounds.minX, left - 4);
+      bounds.maxX = Math.max(bounds.maxX, left + w + 4);
+      bounds.minY = Math.min(bounds.minY, sl.y - CFG.setLabelFontSize);
+      bounds.maxY = Math.max(bounds.maxY, sl.y + 4);
+    }
+
+    // Title makes the box taller.
+    var titleH = parsed.title ? CFG.titleFontSize + 10 : 0;
+
+    // The "outside" bin (rendered to the right of the diagram) widens bounds.
+    var outsideBox = null;
+    if (parsed.outsideItems.length > 0) {
+      var outLines = formatItems(parsed.outsideItems);
+      var maxW = UMLShared.textWidth('outside', true, CFG.fontSize);
+      for (var ol = 0; ol < outLines.length; ol++) {
+        maxW = Math.max(maxW, UMLShared.textWidth(outLines[ol], false, CFG.fontSize));
+      }
+      var boxW = maxW + CFG.outsideBoxPad * 2;
+      var boxH = (outLines.length + 1) * 20 + CFG.outsideBoxPad;
+      var boxX = bounds.maxX + 20;
+      var boxY = (bounds.minY + bounds.maxY) / 2 - boxH / 2;
+      outsideBox = { x: boxX, y: boxY, w: boxW, h: boxH, lines: outLines };
+      bounds.maxX = boxX + boxW;
+      bounds.minY = Math.min(bounds.minY, boxY);
+      bounds.maxY = Math.max(bounds.maxY, boxY + boxH);
+    }
+
+    // Compute note placements. Each note is pushed out beyond the current
+    // bounds in its requested direction; multiple notes on the same side
+    // stack (vertically for left/right, horizontally for top/bottom).
+    var notePlacements = layoutNotes(parsed.notes, layout, bounds, outsideBox);
+    for (var npi = 0; npi < notePlacements.length; npi++) {
+      var npl = notePlacements[npi];
+      bounds.minX = Math.min(bounds.minX, npl.x);
+      bounds.minY = Math.min(bounds.minY, npl.y);
+      bounds.maxX = Math.max(bounds.maxX, npl.x + npl.size.width);
+      bounds.maxY = Math.max(bounds.maxY, npl.y + npl.size.height);
+    }
+
+    // Expand to account for a possible title band above.
+    bounds.minY -= titleH;
+
+    var pad = CFG.svgPad;
+    var ox = pad - bounds.minX;
+    var oy = pad - bounds.minY;
+    var svgW = bounds.maxX - bounds.minX + pad * 2;
+    var svgH = bounds.maxY - bounds.minY + pad * 2;
+
+    var svg = [];
+    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, {
+      shadowEnabled: parsed.shadowEnabled === true
+    }));
+
+    // Title
+    if (parsed.title) {
+      var titleY = bounds.minY + CFG.titleFontSize;
+      svg.push('<text x="' + ((bounds.minX + bounds.maxX) / 2) + '" y="' + titleY +
+        '" text-anchor="middle" font-size="' + CFG.titleFontSize +
+        '" font-weight="600" fill="' + themeColors.text + '">' +
+        UMLShared.escapeXml(parsed.title) + '</text>');
+    }
+
+    // ─ Fills go inside a `mix-blend-mode: multiply` group. This produces
+    //   the CMY-ish mixing effect in overlap regions without any region
+    //   path arithmetic. Outlines are drawn outside the group so they
+    //   stay crisp (blend modes would wash them out).
+    svg.push('<g style="mix-blend-mode: multiply">');
+    for (var si = 0; si < layout.shapes.length; si++) {
+      svg.push(shapeTag(layout.shapes[si], setColors[si], CFG.fillOpacity,
+                        darkenForStroke(setColors[si]), 0));
+    }
+    svg.push('</g>');
+
+    // Outlines
+    for (var sj = 0; sj < layout.shapes.length; sj++) {
+      svg.push(shapeOutlineTag(layout.shapes[sj], darkenForStroke(setColors[sj]), 1.6));
+    }
+
+    // Set labels
+    for (var sk = 0; sk < layout.setLabels.length; sk++) {
+      var lab = layout.setLabels[sk];
+      var lblColor = darkenForStroke(setColors[sk]);
+      svg.push('<text x="' + lab.x + '" y="' + lab.y +
+        '" text-anchor="' + lab.anchor + '" font-size="' + CFG.setLabelFontSize +
+        '" font-weight="600" fill="' + lblColor + '">' +
+        UMLShared.escapeXml(parsed.sets[sk].name) + '</text>');
+    }
+
+    // Notes — boxes + dotted connector lines rendered BEFORE region labels
+    // so the labels stay on top and remain readable. We also omit the
+    // anchor circle that UMLShared.drawNote normally draws, since it would
+    // occlude region item text at the target point.
+    for (var npi2 = 0; npi2 < notePlacements.length; npi2++) {
+      var np = notePlacements[npi2];
+      // Box + text only (pass no connector so drawNote doesn't draw line+circle).
+      UMLShared.drawNote(svg, np.x, np.y, np.lines, themeColors);
+      // Dotted connector line (no end circle).
+      svg.push('<line x1="' + np.attachX + '" y1="' + np.attachY +
+        '" x2="' + np.targetX + '" y2="' + np.targetY +
+        '" stroke="' + themeColors.secondaryLine +
+        '" stroke-width="1" stroke-linecap="round" stroke-dasharray="1,5"/>');
+    }
+
+    // Region labels — only for regions the user populated. Rendered AFTER
+    // note connectors so the labels stay on top of the connector lines.
+    for (var maskStr in parsed.regions) {
+      if (!Object.prototype.hasOwnProperty.call(parsed.regions, maskStr)) continue;
+      var mask = Number(maskStr);
+      if (!mask) continue;
+      var items = parsed.regions[mask];
+      if (!items || items.length === 0) continue;
+      var anchor = layout.regionAnchors[mask];
+      if (!anchor) continue;
+      var fillsHere = maskFills(mask, setColors);
+      var bgEstimate = estimateMultiplyBlend(fillsHere, CFG.fillOpacity, '#ffffff');
+      var textColor = pickTextColor(bgEstimate);
+      var lines = formatItems(items);
+      var lh = 18;
+      var totalH = lines.length * lh;
+      var startY = anchor[1] - totalH / 2 + 12;
+      for (var li = 0; li < lines.length; li++) {
+        svg.push('<text x="' + anchor[0] + '" y="' + (startY + li * lh) +
+          '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + textColor +
+          '" stroke="' + invertColor(textColor) +
+          '" stroke-width="3.2" stroke-opacity="0.55" stroke-linejoin="round" paint-order="stroke">' +
+          UMLShared.escapeXml(lines[li]) + '</text>');
+      }
+    }
+
+    // Outside bin — a light neutral box listing exterior items.
+    if (outsideBox) {
+      svg.push('<rect x="' + outsideBox.x + '" y="' + outsideBox.y +
+        '" width="' + outsideBox.w + '" height="' + outsideBox.h +
+        '" rx="6" fill="#f5f5f0" stroke="#8a8a82" stroke-width="1" stroke-dasharray="4,3"/>');
+      var titleX = outsideBox.x + outsideBox.w / 2;
+      var titleY2 = outsideBox.y + 20;
+      svg.push('<text x="' + titleX + '" y="' + titleY2 +
+        '" text-anchor="middle" font-size="' + CFG.fontSize + '" font-weight="600" fill="#555">' +
+        'outside</text>');
+      for (var obi = 0; obi < outsideBox.lines.length; obi++) {
+        svg.push('<text x="' + titleX + '" y="' + (titleY2 + 20 * (obi + 1)) +
+          '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="#333">' +
+          UMLShared.escapeXml(outsideBox.lines[obi]) + '</text>');
+      }
+    }
+
+    // Warning for typos in region references.
+    if (parsed.unknownRefs.length > 0) {
+      var uniq = {};
+      var msg = [];
+      for (var ui = 0; ui < parsed.unknownRefs.length; ui++) {
+        var u = parsed.unknownRefs[ui];
+        if (uniq[u]) continue;
+        uniq[u] = true; msg.push(u);
+      }
+      svg.push('<text x="' + (bounds.minX + 4) + '" y="' + (bounds.maxY - 4) +
+        '" font-size="12" fill="#b00">Unknown set(s): ' +
+        UMLShared.escapeXml(msg.join(', ')) + '</text>');
+    }
+
+    svg.push(UMLShared.svgClose());
+    return svg.join('\n');
+  }
+
+  function darkenForStroke(hex) {
+    var d = UMLShared.darkenHexColor(hex, 0.35);
+    return d || hex;
+  }
+
+  function invertColor(hex) {
+    return hex === '#ffffff' ? '#000000' : '#ffffff';
+  }
+
+  function render(container, text) {
+    var parsed = parse(text);
+    UMLShared.prepareDiagramContainer(container, 'venn');
+    var colors = UMLShared.getThemeColors(container);
+    container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.autoFitSVG(container);
+  }
+
+  UMLShared.createAutoInit('pre > code.diagram-venn, pre > code.language-venn', render, { type: 'venn' });
+  window.UMLVennDiagram = { render: render, parse: parse };
+})();
+/**
+ * UML ER Diagram Renderer (Chen Notation)
+ *
+ * Renders schematic Entity-Relationship diagrams in Peter Chen's classic
+ * 1976 notation (with 1989 extensions): rectangles for entities, diamonds
+ * for relationships, ellipses for attributes — all connected by lines.
+ *
+ * Visual conventions:
+ *   - Entity            = rectangle
+ *   - Weak entity       = double rectangle
+ *   - Relationship      = diamond
+ *   - Identifying rel.  = double diamond
+ *   - Attribute         = ellipse (solid line)
+ *   - Primary key       = underlined text
+ *   - Partial key       = dashed underline (weak entities)
+ *   - Derived attribute = dashed ellipse
+ *   - Multivalued       = double ellipse
+ *   - Cardinality       = label on the connector line
+ *   - Total participation = double line from entity to relationship
+ *
+ * Syntax:
+ *
+ *   @startuml
+ *   title Library System
+ *
+ *   entity Student {
+ *     # student_id         ' # = primary key (underlined)
+ *     name
+ *     email
+ *     / age                ' / = derived (dashed ellipse)
+ *     * phones             ' * = multivalued (double ellipse)
+ *   }
+ *
+ *   weak entity Dependent {
+ *     ~ name               ' ~ = partial key (dashed underline)
+ *     dob
+ *   }
+ *
+ *   entity Book {
+ *     # isbn
+ *     title
+ *   }
+ *
+ *   relationship Borrows {
+ *     date_out             ' relationship attributes attach to the diamond
+ *   }
+ *
+ *   identifying relationship DependsOn
+ *
+ *   ' Connect an entity to a relationship. Cardinality is the quoted label.
+ *   ' -- = partial participation, == = total participation (double line).
+ *   Student "N" -- Borrows
+ *   Book "M" -- Borrows
+ *   Student "1" == DependsOn
+ *   Dependent "N" == DependsOn
+ *   @enduml
+ */
+(function () {
+  'use strict';
+
+  var CFG = {
+    fontSize: 14,
+    titleFontSize: 18,
+    attrFontSize: 13,
+    entityPadX: 20,
+    entityPadY: 12,
+    entityMinWidth: 90,
+    diamondPadX: 24,
+    diamondPadY: 12,
+    diamondMinWidth: 110,
+    attrEllipsePadX: 14,
+    attrEllipsePadY: 8,
+    attrMinWidth: 50,
+    attrSpoke: 80,            // line length from entity/relationship to attribute ellipse centre
+    entityRadius: 240,        // radius of the entity ring for N >= 3
+    lineSpacing: 60,          // horizontal spacing for N == 2 linear layout
+    svgPad: 36,
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+    doubleInset: 4,           // inset for the inner border on weak entities / identifying rels / multivalued / composite
+    cardPadX: 4,
+    cardPadY: 2,
+    minAttrGap: 14,           // min angular gap between attributes (px at ellipse edge)
+    strokeWidth: 1.5          // border stroke width — matches CFG.strokeWidth used by other UML renderers
+  };
+
+  function parse(text) {
+    var lines = text.split('\n');
+    var title = null;
+    var shadowEnabled = null;
+    var entities = [];            // { name, weak, attrs, _key }
+    var entityByKey = {};
+    var relationships = [];       // { name, identifying, attrs, _key }
+    var relByKey = {};
+    var connections = [];         // { entityIdx, relIdx, cardinality, total }
+    var warnings = [];
+
+    var i = 0;
+    while (i < lines.length) {
+      var rawLine = lines[i];
+      var line = rawLine.trim();
+      i++;
+
+      if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (line.charAt(0) === '#' && line.indexOf(':') === -1 && !/^#[0-9a-fA-F]/.test(line)) continue;
+      if (line.indexOf("'") === 0 || line.indexOf('//') === 0) continue;
+
+      // title <text>
+      var titleMatch = line.match(/^title\s+(.+)$/i);
+      if (titleMatch) { title = titleMatch[1].trim(); continue; }
+
+      // layout shadows on|off (only layout directive ER honours)
+      var layoutDir = UMLShared.parseLayoutDirective(line);
+      if (layoutDir) {
+        if (layoutDir.shadowEnabled !== null) shadowEnabled = layoutDir.shadowEnabled;
+        continue;
+      }
+
+      // entity / weak entity / relationship / identifying relationship blocks
+      var entMatch = line.match(/^(weak\s+)?entity\s+(?:"([^"]+)"|(\S+))\s*\{?\s*$/i);
+      if (entMatch) {
+        var weak = !!entMatch[1];
+        var ename = entMatch[2] || entMatch[3];
+        var ekey = ename.toLowerCase();
+        var ent = entityByKey[ekey];
+        if (!ent) {
+          ent = { name: ename, weak: weak, attrs: [], _key: ekey };
+          entities.push(ent);
+          entityByKey[ekey] = ent;
+        } else if (weak) {
+          ent.weak = true;
+        }
+        if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, ent.attrs);
+        continue;
+      }
+
+      var relMatch = line.match(/^(identifying\s+|weak\s+)?relationship\s+(?:"([^"]+)"|(\S+))\s*\{?\s*$/i);
+      if (relMatch) {
+        var identifying = !!relMatch[1];
+        var rname = relMatch[2] || relMatch[3];
+        var rkey = rname.toLowerCase();
+        var rel = relByKey[rkey];
+        if (!rel) {
+          rel = { name: rname, identifying: identifying, attrs: [], _key: rkey };
+          relationships.push(rel);
+          relByKey[rkey] = rel;
+        } else if (identifying) {
+          rel.identifying = true;
+        }
+        if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, rel.attrs);
+        continue;
+      }
+
+      // Connection lines — several shapes supported:
+      //   Entity "card" -- Rel
+      //   Entity "card" == Rel                    (total participation)
+      //   Entity -- Rel                           (no cardinality)
+      //   Rel "card" -- Entity                    (reverse order also fine)
+      //   Entity "c1" -- Rel "c2" -- OtherEntity  (convenience: two connections at once)
+      var conn = parseConnectionLine(line);
+      if (conn.length > 0) {
+        for (var c = 0; c < conn.length; c++) connections.push(conn[c]);
+        continue;
+      }
+
+      warnings.push('Unrecognized line: ' + line);
+    }
+
+    // Resolve connections — attach entities/relationships by name.
+    var resolved = [];
+    for (var ci = 0; ci < connections.length; ci++) {
+      var cn = connections[ci];
+      var eObj = entityByKey[cn.entityName.toLowerCase()];
+      var rObj = relByKey[cn.relName.toLowerCase()];
+      if (!eObj) {
+        // Auto-declare referenced entities to reduce friction. They'll render
+        // as plain entities with no attributes.
+        eObj = { name: cn.entityName, weak: false, attrs: [], _key: cn.entityName.toLowerCase() };
+        entities.push(eObj);
+        entityByKey[eObj._key] = eObj;
+      }
+      if (!rObj) {
+        rObj = { name: cn.relName, identifying: false, attrs: [], _key: cn.relName.toLowerCase() };
+        relationships.push(rObj);
+        relByKey[rObj._key] = rObj;
+      }
+      resolved.push({
+        entity: eObj,
+        relationship: rObj,
+        cardinality: cn.cardinality || '',
+        total: !!cn.total,
+        role: cn.role || ''
+      });
+    }
+
+    return {
+      title: title,
+      entities: entities,
+      relationships: relationships,
+      connections: resolved,
+      warnings: warnings,
+      shadowEnabled: shadowEnabled
+    };
+  }
+
+  function consumeAttrBlock(lines, startIdx, targetArr) {
+    var i = startIdx;
+    while (i < lines.length) {
+      var raw = lines[i];
+      var ln = raw.trim();
+      i++;
+      if (!ln) continue;
+      if (ln === '}') return i;
+
+      // Attribute marker prefixes — space-separated or adjacent.
+      //   # name       primary key (underlined)
+      //   ~ name       partial key (dashed underline, for weak entities)
+      //   / name       derived (dashed ellipse)
+      //   * name       multivalued (double ellipse)
+      //   plain name   regular attribute
+      var m = ln.match(/^([#~\/*])\s*(.+)$/);
+      var kind = 'regular';
+      var aname = ln;
+      if (m) {
+        if (m[1] === '#') kind = 'pk';
+        else if (m[1] === '~') kind = 'partial';
+        else if (m[1] === '/') kind = 'derived';
+        else if (m[1] === '*') kind = 'multivalued';
+        aname = m[2];
+      }
+      // Strip optional quotes
+      var qm = aname.match(/^"([^"]+)"$/);
+      if (qm) aname = qm[1];
+      targetArr.push({ name: aname.trim(), kind: kind });
+    }
+    return i;
+  }
+
+  function parseConnectionLine(line) {
+    // Tokenize the line into NAME, "QUOTED", and SEPARATOR (-- or ==).
+    // Names can be quoted ("Has Section") or bare.
+    var tokens = [];
+    var i = 0;
+    while (i < line.length) {
+      var ch = line.charAt(i);
+      if (ch === ' ' || ch === '\t') { i++; continue; }
+      if (ch === '"') {
+        var end = line.indexOf('"', i + 1);
+        if (end === -1) return [];
+        tokens.push({ type: 'quoted', value: line.substring(i + 1, end) });
+        i = end + 1;
+      } else if (ch === '-' && line.charAt(i + 1) === '-') {
+        tokens.push({ type: 'sep', value: '--' });
+        i += 2;
+      } else if (ch === '=' && line.charAt(i + 1) === '=') {
+        tokens.push({ type: 'sep', value: '==' });
+        i += 2;
+      } else {
+        var m = line.substring(i).match(/^[^\s"]+/);
+        if (!m) return [];
+        tokens.push({ type: 'name', value: m[0] });
+        i += m[0].length;
+      }
+    }
+
+    // Sequence must contain exactly one sep with optional quoted cardinality
+    // before it. Allow chaining: Name "c1" -- Name "c2" -- Name.
+    if (tokens.length === 0) return [];
+    var hasSep = tokens.some(function (t) { return t.type === 'sep'; });
+    if (!hasSep) return [];
+
+    // Split into "segments" separated by separators. Each segment has one
+    // name and optional preceding/following quoted cardinality.
+    var segments = [];
+    var buf = [];
+    var seps = [];
+    for (var ti = 0; ti < tokens.length; ti++) {
+      if (tokens[ti].type === 'sep') {
+        segments.push(buf);
+        seps.push(tokens[ti].value);
+        buf = [];
+      } else buf.push(tokens[ti]);
+    }
+    segments.push(buf);
+
+    // For each segment extract { name, cardBefore, cardAfter } — cards are
+    // quoted tokens flanking the name. At least one name required per segment.
+    //
+    // Names can be bare identifiers (`Student`) or quoted strings with
+    // spaces (`"is enrolled"`). Cardinalities are always quoted. The parser
+    // disambiguates positionally:
+    //   * A quoted token IS a cardinality if it appears adjacent to a bare
+    //     name token (e.g. `Student "N"` → card=N; `"N" Student` → card=N).
+    //   * If a segment has no bare name tokens, the single remaining quoted
+    //     token is the name.
+    //   * A segment with two quoted tokens and no bare name tokens treats
+    //     the first as cardinality and the second as the quoted name
+    //     (e.g. `"N" "is enrolled"`).
+    var parsed = [];
+    for (var si = 0; si < segments.length; si++) {
+      var seg = segments[si];
+      var name = null, cardBefore = null, cardAfter = null;
+      var bareName = null;
+      var quoted = [];
+      for (var sj = 0; sj < seg.length; sj++) {
+        if (seg[sj].type === 'name') {
+          if (bareName !== null) return [];
+          bareName = seg[sj].value;
+          if (quoted.length > 0) cardBefore = quoted.shift();
+        } else if (seg[sj].type === 'quoted') {
+          if (bareName !== null) cardAfter = seg[sj].value;
+          else quoted.push(seg[sj].value);
+        }
+      }
+      if (bareName) {
+        name = bareName;
+      } else if (quoted.length === 1) {
+        // Only a quoted token — it's the name, not a cardinality.
+        name = quoted[0];
+      } else if (quoted.length >= 2) {
+        // Two quoted tokens, no bare name: first is cardinality, rest is name.
+        cardBefore = quoted[0];
+        name = quoted[1];
+      }
+      if (!name) return [];
+      parsed.push({ name: name, cardBefore: cardBefore, cardAfter: cardAfter });
+    }
+    if (parsed.length < 2) return [];
+
+    // Build connections from the chain. For Name1 -- Name2 -- Name3, emit
+    // (Name1-Name2) and (Name2-Name3). A connection's cardinality is the
+    // label adjacent to the ENTITY, not the relationship — but since we
+    // don't yet know which side is the relationship, we capture the label
+    // on the entity side (i.e. cardAfter of left segment, cardBefore of
+    // right segment).
+    var out = [];
+    for (var pi = 0; pi < parsed.length - 1; pi++) {
+      var a = parsed[pi], b = parsed[pi + 1];
+      out.push({
+        rawLeft: a.name, leftCard: a.cardAfter || a.cardBefore || null,
+        rawRight: b.name, rightCard: b.cardBefore || b.cardAfter || null,
+        sep: seps[pi]
+      });
+    }
+
+    // Disambiguate entity vs relationship at resolve time in parse() — but
+    // we need to hand back a `{entityName, relName, cardinality, total}`
+    // shape. Use a heuristic now: if one endpoint is known as relationship
+    // (we can't tell here), otherwise default to left=entity, right=rel.
+    // We defer this to resolve() by returning the raw pairs.
+    return out.map(function (c) {
+      return {
+        rawLeft: c.rawLeft, leftCard: c.leftCard,
+        rawRight: c.rawRight, rightCard: c.rightCard,
+        sep: c.sep,
+        // Resolved later — but we also set placeholder fields so the
+        // resolver can check and fix up.
+        entityName: c.rawLeft, relName: c.rawRight,
+        cardinality: c.leftCard || '',
+        total: c.sep === '=='
+      };
+    });
+  }
+
+  // ─── Layout ────────────────────────────────────────────────────
+
+  function computeLayout(parsed) {
+    var entities = parsed.entities;
+    var relationships = parsed.relationships;
+    var connections = parsed.connections;
+
+    // After parse, connections store { entity, relationship } resolved
+    // objects but parseConnectionLine guessed at which side is which.
+    // Fix it up: if what parser called "entity" is actually a known
+    // relationship object, swap. (Happens when user writes `Rel "c" -- Entity`.)
+    // Build lookup by object identity.
+    var entitySet = {};
+    for (var ei = 0; ei < entities.length; ei++) entitySet[entities[ei]._key] = true;
+    var relSet = {};
+    for (var ri = 0; ri < relationships.length; ri++) relSet[relationships[ri]._key] = true;
+
+    // Connections already have { entity, relationship } populated but the
+    // resolver may have misclassified. Reclassify here.
+    var fixedConns = [];
+    for (var ci = 0; ci < connections.length; ci++) {
+      var cn = connections[ci];
+      // If "entity" is actually a relationship, swap. The resolved connection
+      // has both entity and relationship objects; checking ._key against
+      // relSet tells us.
+      var ent = cn.entity, rel = cn.relationship;
+      if (relSet[ent._key] && entitySet[rel._key]) {
+        var tmp = ent; ent = rel; rel = tmp;
+      }
+      fixedConns.push({ entity: ent, relationship: rel, cardinality: cn.cardinality, total: cn.total });
+    }
+
+    // Count connected relationships per entity (used to choose attribute sectors).
+    var entityConnMap = {};     // key -> [relationship objects]
+    for (var fci = 0; fci < fixedConns.length; fci++) {
+      var fc = fixedConns[fci];
+      if (!entityConnMap[fc.entity._key]) entityConnMap[fc.entity._key] = [];
+      entityConnMap[fc.entity._key].push(fc.relationship);
+    }
+    var relConnMap = {};        // key -> [entity objects]
+    for (var fci2 = 0; fci2 < fixedConns.length; fci2++) {
+      var fc2 = fixedConns[fci2];
+      if (!relConnMap[fc2.relationship._key]) relConnMap[fc2.relationship._key] = [];
+      relConnMap[fc2.relationship._key].push(fc2.entity);
+    }
+
+    // Place entities.
+    var n = entities.length;
+    var entityPos = {};        // key -> { cx, cy, box: {w, h} }
+
+    if (n === 0) {
+      return { entityPos: entityPos, relPos: {}, entityAttrs: {}, relAttrs: {},
+               connections: fixedConns, bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
+    }
+
+    for (var pi = 0; pi < n; pi++) {
+      var ent2 = entities[pi];
+      var box = measureEntity(ent2);
+      var cx, cy;
+      if (n === 1) {
+        cx = 0; cy = 0;
+      } else if (n === 2) {
+        // Horizontal: Entity1 ... [relationships] ... Entity2
+        cx = (pi === 0 ? -1 : 1) * (CFG.entityRadius * 0.9);
+        cy = 0;
+      } else {
+        var ang = -Math.PI / 2 + pi * 2 * Math.PI / n;  // start at top, CW
+        cx = CFG.entityRadius * Math.cos(ang);
+        cy = CFG.entityRadius * Math.sin(ang);
+      }
+      entityPos[ent2._key] = { cx: cx, cy: cy, box: box, entity: ent2 };
+    }
+
+    // Place relationships: centroid of connected entities. Offset if
+    // multiple relationships connect the same entity pair.
+    var relPos = {};
+    var pairOffsetCounter = {}; // "a|b" -> count
+    for (var rj = 0; rj < relationships.length; rj++) {
+      var rel = relationships[rj];
+      var ents = relConnMap[rel._key] || [];
+      if (ents.length === 0) {
+        // Isolated relationship — place it near the middle.
+        relPos[rel._key] = { cx: 0, cy: 0, box: measureDiamond(rel), relationship: rel };
+        continue;
+      }
+      var sumX = 0, sumY = 0;
+      for (var ei2 = 0; ei2 < ents.length; ei2++) {
+        var p = entityPos[ents[ei2]._key];
+        sumX += p.cx; sumY += p.cy;
+      }
+      var mx = sumX / ents.length, my = sumY / ents.length;
+
+      // If this is a binary relationship and another relationship already
+      // sits between the same pair, offset perpendicularly.
+      if (ents.length === 2) {
+        var k1 = ents[0]._key, k2 = ents[1]._key;
+        var pairKey = k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1;
+        var seen = pairOffsetCounter[pairKey] || 0;
+        if (seen > 0) {
+          // Offset perpendicular to entity-entity vector.
+          var dx = entityPos[ents[1]._key].cx - entityPos[ents[0]._key].cx;
+          var dy = entityPos[ents[1]._key].cy - entityPos[ents[0]._key].cy;
+          var dl = Math.sqrt(dx * dx + dy * dy) || 1;
+          var perpX = -dy / dl, perpY = dx / dl;
+          var side = (seen % 2 === 1) ? 1 : -1;
+          var mag = Math.ceil(seen / 2) * 70;
+          mx += perpX * mag * side;
+          my += perpY * mag * side;
+        }
+        pairOffsetCounter[pairKey] = seen + 1;
+      } else {
+        // N-ary: add jitter to avoid exact centre where a binary pair's
+        // midpoint might already sit.
+      }
+      relPos[rel._key] = { cx: mx, cy: my, box: measureDiamond(rel), relationship: rel };
+    }
+
+    // Place attributes around entities & relationships. For each host,
+    // compute "blocked angular sectors" pointing at connected partners,
+    // then fan the attributes into the free angular space.
+    var entityAttrs = {};
+    for (var ek = 0; ek < entities.length; ek++) {
+      var host = entities[ek];
+      var hp = entityPos[host._key];
+      var partners = (entityConnMap[host._key] || []).map(function (rel) { return relPos[rel._key]; });
+      entityAttrs[host._key] = placeAttributesAround(hp, partners, host.attrs);
+    }
+    var relAttrs = {};
+    for (var rk = 0; rk < relationships.length; rk++) {
+      var host2 = relationships[rk];
+      var hp2 = relPos[host2._key];
+      var partners2 = (relConnMap[host2._key] || []).map(function (ent) { return entityPos[ent._key]; });
+      relAttrs[host2._key] = placeAttributesAround(hp2, partners2, host2.attrs);
+    }
+
+    // Compute overall bounds from entities, relationships, and attributes.
+    var bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    function expandBox(cx, cy, w, h) {
+      bounds.minX = Math.min(bounds.minX, cx - w / 2);
+      bounds.minY = Math.min(bounds.minY, cy - h / 2);
+      bounds.maxX = Math.max(bounds.maxX, cx + w / 2);
+      bounds.maxY = Math.max(bounds.maxY, cy + h / 2);
+    }
+    for (var ek2 in entityPos) {
+      var ep = entityPos[ek2];
+      expandBox(ep.cx, ep.cy, ep.box.w, ep.box.h);
+    }
+    for (var rk2 in relPos) {
+      var rp = relPos[rk2];
+      expandBox(rp.cx, rp.cy, rp.box.w, rp.box.h);
+    }
+    function expandAttrs(arr) {
+      for (var i = 0; i < arr.length; i++) {
+        var a = arr[i];
+        expandBox(a.cx, a.cy, a.size.w, a.size.h);
+      }
+    }
+    for (var ek3 in entityAttrs) expandAttrs(entityAttrs[ek3]);
+    for (var rk3 in relAttrs) expandAttrs(relAttrs[rk3]);
+
+    if (!isFinite(bounds.minX)) bounds = { minX: -100, minY: -100, maxX: 100, maxY: 100 };
+
+    return {
+      entityPos: entityPos,
+      relPos: relPos,
+      entityAttrs: entityAttrs,
+      relAttrs: relAttrs,
+      connections: fixedConns,
+      bounds: bounds
+    };
+  }
+
+  function measureEntity(ent) {
+    var w = Math.max(CFG.entityMinWidth,
+      UMLShared.textWidth(ent.name, true, CFG.fontSize) + CFG.entityPadX * 2);
+    var h = CFG.fontSize + CFG.entityPadY * 2;
+    if (ent.weak) { w += CFG.doubleInset * 2; h += CFG.doubleInset * 2; }
+    return { w: w, h: h };
+  }
+
+  function measureDiamond(rel) {
+    var tw = UMLShared.textWidth(rel.name, true, CFG.fontSize);
+    var w = Math.max(CFG.diamondMinWidth, tw + CFG.diamondPadX * 2);
+    var h = CFG.fontSize + CFG.diamondPadY * 2;
+    if (rel.identifying) { w += CFG.doubleInset * 2; h += CFG.doubleInset * 2; }
+    return { w: w, h: h };
+  }
+
+  function measureAttr(attr) {
+    var tw = UMLShared.textWidth(attr.name, false, CFG.attrFontSize);
+    var w = Math.max(CFG.attrMinWidth, tw + CFG.attrEllipsePadX * 2);
+    var h = CFG.attrFontSize + CFG.attrEllipsePadY * 2;
+    if (attr.kind === 'multivalued') { w += CFG.doubleInset * 2; h += CFG.doubleInset * 2; }
+    return { w: w, h: h };
+  }
+
+  // For a host at (cx,cy) with `partners` objects (each has .cx, .cy),
+  // compute blocked sectors (± ~25° around each partner direction) and
+  // distribute `attrs` across the remaining angular space. Each attribute
+  // gets a position at radius CFG.attrSpoke + half-dim.
+  function placeAttributesAround(host, partners, attrs) {
+    if (!attrs || attrs.length === 0) return [];
+    var blocked = [];
+    for (var p = 0; p < partners.length; p++) {
+      var dx = partners[p].cx - host.cx;
+      var dy = partners[p].cy - host.cy;
+      var ang = Math.atan2(dy, dx);
+      blocked.push({ centre: ang, halfWidth: 25 * Math.PI / 180 });
+    }
+
+    // Build the set of "free" arcs as the full circle minus blocked sectors.
+    // Then distribute `attrs.length` angles across the free arcs proportional
+    // to their size.
+    var free = subtractBlockedArcs(blocked);
+    if (free.length === 0) {
+      // Fully blocked — fall back to full circle. Shouldn't happen for typical ER.
+      free = [{ start: -Math.PI, end: Math.PI }];
+    }
+    var totalFree = 0;
+    for (var f = 0; f < free.length; f++) totalFree += (free[f].end - free[f].start);
+
+    // Allocate attr slots to arcs proportional to their length.
+    var allocations = free.map(function (arc) {
+      return { arc: arc, len: arc.end - arc.start, count: 0 };
+    });
+    // Greedy round-robin to match proportions.
+    for (var ai = 0; ai < attrs.length; ai++) {
+      // Pick arc with the largest (len / (count + 1)) density.
+      var best = 0, bestScore = -Infinity;
+      for (var bi = 0; bi < allocations.length; bi++) {
+        var score = allocations[bi].len / (allocations[bi].count + 1);
+        if (score > bestScore) { bestScore = score; best = bi; }
+      }
+      allocations[best].count++;
+    }
+
+    // Emit positions.
+    var out = [];
+    var attrIdx = 0;
+    for (var ac = 0; ac < allocations.length; ac++) {
+      var alloc = allocations[ac];
+      if (alloc.count === 0) continue;
+      for (var k = 0; k < alloc.count; k++) {
+        var frac = (k + 1) / (alloc.count + 1);
+        var ang = alloc.arc.start + frac * (alloc.arc.end - alloc.arc.start);
+        var attr = attrs[attrIdx++];
+        var sz = measureAttr(attr);
+        // Push attr outward so the ellipse edge clears the host shape.
+        var spoke = CFG.attrSpoke + Math.max(sz.w, sz.h) / 2;
+        var cx = host.cx + spoke * Math.cos(ang);
+        var cy = host.cy + spoke * Math.sin(ang);
+        out.push({ attr: attr, cx: cx, cy: cy, size: sz, angle: ang });
+      }
+    }
+    return out;
+  }
+
+  // Subtract a set of blocked arcs (each { centre, halfWidth }) from the
+  // unit circle. Returns a list of free arcs {start, end} in (-π, π].
+  function subtractBlockedArcs(blocked) {
+    if (blocked.length === 0) return [{ start: -Math.PI, end: Math.PI }];
+    // Convert each blocked arc to a [start, end] interval and normalize to
+    // (-π, π]. Split across the ±π boundary if needed.
+    var intervals = [];
+    for (var i = 0; i < blocked.length; i++) {
+      var b = blocked[i];
+      var s = b.centre - b.halfWidth;
+      var e = b.centre + b.halfWidth;
+      if (e < -Math.PI || s > Math.PI) {
+        // Wrap: split
+        if (s < -Math.PI) {
+          intervals.push({ start: s + 2 * Math.PI, end: Math.PI });
+          intervals.push({ start: -Math.PI, end: e });
+        } else if (e > Math.PI) {
+          intervals.push({ start: s, end: Math.PI });
+          intervals.push({ start: -Math.PI, end: e - 2 * Math.PI });
+        } else {
+          intervals.push({ start: s, end: e });
+        }
+      } else if (s < -Math.PI) {
+        intervals.push({ start: -Math.PI, end: e });
+        intervals.push({ start: s + 2 * Math.PI, end: Math.PI });
+      } else if (e > Math.PI) {
+        intervals.push({ start: s, end: Math.PI });
+        intervals.push({ start: -Math.PI, end: e - 2 * Math.PI });
+      } else {
+        intervals.push({ start: s, end: e });
+      }
+    }
+    // Merge overlapping intervals.
+    intervals.sort(function (a, b) { return a.start - b.start; });
+    var merged = [];
+    for (var m = 0; m < intervals.length; m++) {
+      var cur = intervals[m];
+      if (merged.length && cur.start <= merged[merged.length - 1].end) {
+        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, cur.end);
+      } else {
+        merged.push({ start: cur.start, end: cur.end });
+      }
+    }
+    // Free = complement within [-π, π].
+    var free = [];
+    var cursor = -Math.PI;
+    for (var mi = 0; mi < merged.length; mi++) {
+      if (merged[mi].start > cursor) free.push({ start: cursor, end: merged[mi].start });
+      cursor = merged[mi].end;
+    }
+    if (cursor < Math.PI) free.push({ start: cursor, end: Math.PI });
+    return free;
+  }
+
+  // ─── Rendering ─────────────────────────────────────────────────
+
+  function generateSVG(parsed, themeColors) {
+    if (parsed.entities.length === 0 && parsed.relationships.length === 0) {
+      return '<div style="padding:20px;color:#888;text-align:center;">' +
+             'No entities declared. Use <code>entity &lt;name&gt; { ... }</code> to add entities.</div>';
+    }
+
+    var layout = computeLayout(parsed);
+    var bounds = {
+      minX: layout.bounds.minX, minY: layout.bounds.minY,
+      maxX: layout.bounds.maxX, maxY: layout.bounds.maxY
+    };
+
+    // Account for the title band above.
+    var titleH = parsed.title ? CFG.titleFontSize + 14 : 0;
+    bounds.minY -= titleH;
+
+    var pad = CFG.svgPad;
+    var ox = pad - bounds.minX;
+    var oy = pad - bounds.minY;
+    var svgW = bounds.maxX - bounds.minX + pad * 2;
+    var svgH = bounds.maxY - bounds.minY + pad * 2;
+
+    var svg = [];
+    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, {
+      shadowEnabled: parsed.shadowEnabled !== false
+    }));
+
+    // Title
+    if (parsed.title) {
+      var titleY = bounds.minY + CFG.titleFontSize;
+      svg.push('<text x="' + ((bounds.minX + bounds.maxX) / 2) + '" y="' + titleY +
+        '" text-anchor="middle" font-size="' + CFG.titleFontSize +
+        '" font-weight="600" fill="' + themeColors.text + '">' +
+        UMLShared.escapeXml(parsed.title) + '</text>');
+    }
+
+    // 1. Lines from entities/relationships to their attributes (behind shapes).
+    for (var ek in layout.entityAttrs) {
+      drawAttrSpokes(svg, layout.entityPos[ek], layout.entityAttrs[ek], themeColors);
+    }
+    for (var rk in layout.relAttrs) {
+      drawAttrSpokes(svg, layout.relPos[rk], layout.relAttrs[rk], themeColors);
+    }
+
+    // 2. Connection lines between entities and relationships.
+    for (var ci = 0; ci < layout.connections.length; ci++) {
+      drawConnection(svg, layout.connections[ci], layout, themeColors);
+    }
+
+    // 3. Entities (rectangles) on top of connection lines.
+    for (var ek2 in layout.entityPos) {
+      drawEntity(svg, layout.entityPos[ek2], themeColors);
+    }
+
+    // 4. Relationships (diamonds).
+    for (var rk2 in layout.relPos) {
+      drawRelationship(svg, layout.relPos[rk2], themeColors);
+    }
+
+    // 5. Attribute ellipses.
+    for (var ek3 in layout.entityAttrs) {
+      drawAttrs(svg, layout.entityAttrs[ek3], themeColors);
+    }
+    for (var rk3 in layout.relAttrs) {
+      drawAttrs(svg, layout.relAttrs[rk3], themeColors);
+    }
+
+    svg.push(UMLShared.svgClose());
+    return svg.join('\n');
+  }
+
+  function drawEntity(svg, pos, colors) {
+    var w = pos.box.w, h = pos.box.h;
+    var x = pos.cx - w / 2, y = pos.cy - h / 2;
+    // Filled rectangle with the same light-blue header colour used by
+    // other UML renderers (class headers, deployment nodes, component
+    // boxes). Wrapped in a uml-node-shadow group so drop shadows apply
+    // when `layout shadows on` is set.
+    svg.push('<g class="uml-node-shadow">');
+    svg.push('<rect x="' + x + '" y="' + y +
+      '" width="' + w + '" height="' + h +
+      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (pos.entity.weak) {
+      var d = CFG.doubleInset;
+      svg.push('<rect x="' + (x + d) + '" y="' + (y + d) +
+        '" width="' + (w - d * 2) + '" height="' + (h - d * 2) +
+        '" fill="none" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"/>');
+    }
+    svg.push('</g>');
+    svg.push('<text x="' + pos.cx + '" y="' + (pos.cy + CFG.fontSize * 0.35) +
+      '" text-anchor="middle" font-size="' + CFG.fontSize +
+      '" font-weight="bold" fill="' + colors.text + '">' +
+      UMLShared.escapeXml(pos.entity.name) + '</text>');
+  }
+
+  function drawRelationship(svg, pos, colors) {
+    var w = pos.box.w, h = pos.box.h;
+    var cx = pos.cx, cy = pos.cy;
+    var pts = [
+      cx + ',' + (cy - h / 2),
+      (cx + w / 2) + ',' + cy,
+      cx + ',' + (cy + h / 2),
+      (cx - w / 2) + ',' + cy
+    ].join(' ');
+    svg.push('<g class="uml-node-shadow">');
+    svg.push('<polygon points="' + pts +
+      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (pos.relationship.identifying) {
+      var d = CFG.doubleInset * 1.4;
+      var innerPts = [
+        cx + ',' + (cy - h / 2 + d),
+        (cx + w / 2 - d) + ',' + cy,
+        cx + ',' + (cy + h / 2 - d),
+        (cx - w / 2 + d) + ',' + cy
+      ].join(' ');
+      svg.push('<polygon points="' + innerPts +
+        '" fill="none" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"/>');
+    }
+    svg.push('</g>');
+    svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
+      '" text-anchor="middle" font-size="' + CFG.fontSize +
+      '" font-weight="bold" fill="' + colors.text + '">' +
+      UMLShared.escapeXml(pos.relationship.name) + '</text>');
+  }
+
+  function drawAttrSpokes(svg, hostPos, attrs, colors) {
+    if (!hostPos || !attrs) return;
+    for (var i = 0; i < attrs.length; i++) {
+      var a = attrs[i];
+      // Route from host edge toward attribute centre. Host edge is computed
+      // by intersecting the line with host bounding box (rectangle for
+      // entities / diamond approximation for relationships).
+      var edge = edgePointToward(hostPos, a.cx, a.cy);
+      var ellipseEdge = ellipseEdgeToward(a.cx, a.cy, a.size.w / 2, a.size.h / 2, edge.x, edge.y);
+      svg.push('<line x1="' + edge.x + '" y1="' + edge.y +
+        '" x2="' + ellipseEdge.x + '" y2="' + ellipseEdge.y +
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+    }
+  }
+
+  function drawAttrs(svg, attrs, colors) {
+    if (!attrs) return;
+    for (var i = 0; i < attrs.length; i++) {
+      var a = attrs[i];
+      var rx = a.size.w / 2, ry = a.size.h / 2;
+      var extra = '';
+      if (a.attr.kind === 'derived') extra = ' stroke-dasharray="5,4"';
+      svg.push('<g class="uml-node-shadow">');
+      svg.push('<ellipse cx="' + a.cx + '" cy="' + a.cy +
+        '" rx="' + rx + '" ry="' + ry +
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"' + extra + '/>');
+      if (a.attr.kind === 'multivalued') {
+        var d = CFG.doubleInset;
+        svg.push('<ellipse cx="' + a.cx + '" cy="' + a.cy +
+          '" rx="' + (rx - d) + '" ry="' + (ry - d) +
+          '" fill="none" stroke="' + colors.stroke +
+          '" stroke-width="' + CFG.strokeWidth + '"/>');
+      }
+      svg.push('</g>');
+      var isUnderlined = (a.attr.kind === 'pk' || a.attr.kind === 'partial');
+      var tw = UMLShared.textWidth(a.attr.name, false, CFG.attrFontSize);
+      var textY = a.cy + CFG.attrFontSize * 0.35;
+      svg.push('<text x="' + a.cx + '" y="' + textY +
+        '" text-anchor="middle" font-size="' + CFG.attrFontSize +
+        '" fill="' + colors.text + '">' + UMLShared.escapeXml(a.attr.name) + '</text>');
+      if (isUnderlined) {
+        var ulY = textY + 3;
+        var ulX1 = a.cx - tw / 2;
+        var ulX2 = a.cx + tw / 2;
+        var dashed = a.attr.kind === 'partial' ? ' stroke-dasharray="3,2"' : '';
+        svg.push('<line x1="' + ulX1 + '" y1="' + ulY + '" x2="' + ulX2 + '" y2="' + ulY +
+          '" stroke="' + colors.text + '" stroke-width="1.2"' + dashed + '/>');
+      }
+    }
+  }
+
+  function drawConnection(svg, conn, layout, colors) {
+    var ePos = layout.entityPos[conn.entity._key];
+    var rPos = layout.relPos[conn.relationship._key];
+    if (!ePos || !rPos) return;
+    var eEdge = edgePointToward(ePos, rPos.cx, rPos.cy);
+    var rEdge = diamondEdgeToward(rPos, ePos.cx, ePos.cy);
+
+    if (conn.total) {
+      // Double line for total participation — draw two parallel strokes.
+      var dx = rEdge.x - eEdge.x, dy = rEdge.y - eEdge.y;
+      var dl = Math.sqrt(dx * dx + dy * dy) || 1;
+      var px = -dy / dl * 2, py = dx / dl * 2;
+      svg.push('<line x1="' + (eEdge.x + px) + '" y1="' + (eEdge.y + py) +
+        '" x2="' + (rEdge.x + px) + '" y2="' + (rEdge.y + py) +
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      svg.push('<line x1="' + (eEdge.x - px) + '" y1="' + (eEdge.y - py) +
+        '" x2="' + (rEdge.x - px) + '" y2="' + (rEdge.y - py) +
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+    } else {
+      svg.push('<line x1="' + eEdge.x + '" y1="' + eEdge.y +
+        '" x2="' + rEdge.x + '" y2="' + rEdge.y +
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+    }
+
+    // Cardinality label — place near the entity side of the line with a
+    // rounded pill backdrop matching the association-label style in class
+    // and component diagrams.
+    if (conn.cardinality) {
+      var t = 0.32;  // 32% from the entity, to sit clearly on the entity side
+      var lx = eEdge.x + (rEdge.x - eEdge.x) * t;
+      var ly = eEdge.y + (rEdge.y - eEdge.y) * t;
+      var pw = UMLShared.textWidth(conn.cardinality, true, CFG.fontSize) + CFG.cardPadX * 2 + 6;
+      var ph = CFG.fontSize + CFG.cardPadY * 2 + 4;
+      svg.push('<rect x="' + (lx - pw / 2) + '" y="' + (ly - ph / 2) +
+        '" width="' + pw + '" height="' + ph +
+        '" rx="' + (ph / 2) + '" ry="' + (ph / 2) +
+        '" fill="' + colors.labelBg +
+        '" stroke="' + colors.labelStroke + '" stroke-width="1"/>');
+      svg.push('<text x="' + lx + '" y="' + (ly + CFG.fontSize * 0.35) +
+        '" text-anchor="middle" font-size="' + CFG.fontSize +
+        '" font-weight="600" fill="' + colors.text + '">' +
+        UMLShared.escapeXml(conn.cardinality) + '</text>');
+    }
+  }
+
+  // Intersect the ray from (pos.cx, pos.cy) toward (tx, ty) with pos's
+  // bounding box. Works for rectangles (entities); relationships use
+  // diamondEdgeToward instead.
+  function edgePointToward(pos, tx, ty) {
+    var dx = tx - pos.cx, dy = ty - pos.cy;
+    if (dx === 0 && dy === 0) return { x: pos.cx, y: pos.cy };
+    var hw = pos.box.w / 2, hh = pos.box.h / 2;
+    var sx = dx === 0 ? Infinity : hw / Math.abs(dx);
+    var sy = dy === 0 ? Infinity : hh / Math.abs(dy);
+    var s = Math.min(sx, sy);
+    return { x: pos.cx + dx * s, y: pos.cy + dy * s };
+  }
+
+  // Intersect the ray from diamond centre toward (tx, ty) with the
+  // diamond's edge. A diamond inscribed in a box of w×h has edges
+  // described by |x|/hw + |y|/hh = 1.
+  function diamondEdgeToward(pos, tx, ty) {
+    var dx = tx - pos.cx, dy = ty - pos.cy;
+    if (dx === 0 && dy === 0) return { x: pos.cx, y: pos.cy };
+    var hw = pos.box.w / 2, hh = pos.box.h / 2;
+    var s = 1 / (Math.abs(dx) / hw + Math.abs(dy) / hh);
+    return { x: pos.cx + dx * s, y: pos.cy + dy * s };
+  }
+
+  function ellipseEdgeToward(cx, cy, rx, ry, tx, ty) {
+    var dx = tx - cx, dy = ty - cy;
+    if (dx === 0 && dy === 0) return { x: cx + rx, y: cy };
+    // Parametric: point = (cx + rx*cos(t), cy + ry*sin(t)). For a ray from
+    // centre to (tx, ty), we want the intersection with the ellipse.
+    var ang = Math.atan2(dy, dx);
+    return { x: cx + rx * Math.cos(ang), y: cy + ry * Math.sin(ang) };
+  }
+
+  function render(container, text) {
+    var parsed = parse(text);
+    UMLShared.prepareDiagramContainer(container, 'er');
+    var colors = UMLShared.getThemeColors(container);
+    container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.autoFitSVG(container);
+  }
+
+  UMLShared.createAutoInit('pre > code.diagram-er, pre > code.language-er', render, { type: 'er' });
+  window.UMLERDiagram = { render: render, parse: parse };
 })();
 /**
  * UML Notation Symbol Renderer
