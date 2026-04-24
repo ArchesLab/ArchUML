@@ -8411,7 +8411,7 @@
           deactivateY = Math.max(lastEventY, curY - activationEndGap);
         }
         if (prevMsg && prevMsg.msgType !== 'response' && prevMsg.from === prevMsg.to && prevMsg.to === msg.target) {
-          var minSelfActivationH = Math.max(12, Math.round(CFG.messageGapY * 0.35));
+          var minSelfActivationH = Math.min(8, Math.max(6, Math.round(messageGapY * 0.18)));
           deactivateY = Math.max(deactivateY, prevOccurrenceY + minSelfActivationH);
         }
         curY = Math.max(curY, deactivateY + (nextIsFragmentStart ? 20 : activationEndGap));
@@ -13991,6 +13991,46 @@
     // ── Draw connectors ──
     var placedLabels = [];
     var connectorRoutes = [];
+    function componentRoutePairCrosses(pointsA, pointsB) {
+      if (!pointsA || !pointsB) return 0;
+      var crossings = 0;
+      for (var ai = 0; ai < pointsA.length - 1; ai++) {
+        var a0 = pointsA[ai], a1 = pointsA[ai + 1];
+        var aH = Math.abs(a0.y - a1.y) < 1;
+        var aV = Math.abs(a0.x - a1.x) < 1;
+        for (var bi = 0; bi < pointsB.length - 1; bi++) {
+          var b0 = pointsB[bi], b1 = pointsB[bi + 1];
+          var bH = Math.abs(b0.y - b1.y) < 1;
+          var bV = Math.abs(b0.x - b1.x) < 1;
+          if (aH && bV) {
+            var ax1 = Math.min(a0.x, a1.x), ax2 = Math.max(a0.x, a1.x);
+            var by1 = Math.min(b0.y, b1.y), by2 = Math.max(b0.y, b1.y);
+            if (b0.x > ax1 + 2 && b0.x < ax2 - 2 && a0.y > by1 + 2 && a0.y < by2 - 2) crossings++;
+          } else if (aV && bH) {
+            var ay1 = Math.min(a0.y, a1.y), ay2 = Math.max(a0.y, a1.y);
+            var bx1 = Math.min(b0.x, b1.x), bx2 = Math.max(b0.x, b1.x);
+            if (a0.x > bx1 + 2 && a0.x < bx2 - 2 && b0.y > ay1 + 2 && b0.y < ay2 - 2) crossings++;
+          }
+        }
+      }
+      return crossings;
+    }
+
+    function countPriorRouteCrossings(points) {
+      var total = 0;
+      for (var pri = 0; pri < connectorRoutes.length; pri++) {
+        total += componentRoutePairCrosses(points, connectorRoutes[pri].points);
+      }
+      return total;
+    }
+
+    function componentSideCandidate(entry, side) {
+      if (side === 'left') return { x: entry.x, y: entry.y + entry.box.height / 2, side: 'left', stub: 24 };
+      if (side === 'right') return { x: entry.x + entry.box.width, y: entry.y + entry.box.height / 2, side: 'right', stub: 24 };
+      if (side === 'top') return { x: entry.x + entry.box.width / 2, y: entry.y, side: 'top', stub: 24 };
+      return { x: entry.x + entry.box.width / 2, y: entry.y + entry.box.height, side: 'bottom', stub: 24 };
+    }
+
     for (var cii = 0; cii < connectorOrder.length; cii++) {
       var ci = connectorOrder[cii];
       var conn = connectors[ci];
@@ -14340,10 +14380,7 @@
           forcedTargetX += forcedOuterStub;
           forcedNearTargetX += forcedNearStub;
         }
-        var forcedApproachY = Math.min(
-          forcedLaneInfo.y - 24,
-          Math.max(bestRoute.target.y + 28, forcedBounds.maxY - 16)
-        );
+        var forcedApproachY = Math.min(forcedLaneInfo.y - 24, toE.y - 7);
         var forcedRoutePoints = [
           { x: bestRoute.source.x, y: bestRoute.source.y },
           { x: bestRoute.source.x, y: forcedLaneInfo.y },
@@ -14507,6 +14544,54 @@
         }
 
         if (safetyBest) points = safetyBest.points;
+      }
+
+      var priorCrossings = countPriorRouteCrossings(points);
+      if (priorCrossings > 0 && bestRoute.kind !== 'back-edge-lane') {
+        var priorBest = {
+          points: points,
+          score: UMLShared.measureOrthogonalRoute(points) +
+            UMLShared.countOrthogonalBends(points) * 36 +
+            priorCrossings * 100000 +
+            routeTrackOverlapLength(points, occupiedSegments) * 400
+        };
+
+        function considerPriorRoute(candidatePoints, penalty) {
+          if (!candidatePoints || candidatePoints.length < 2) return;
+          var priorPoints = UMLShared.simplifyOrthogonalPath(candidatePoints);
+          if (UMLShared.routeHitsObstacle(priorPoints, obstacles, skipN, null)) return;
+          var crossCount = countPriorRouteCrossings(priorPoints);
+          var priorScore = UMLShared.measureOrthogonalRoute(priorPoints) +
+            UMLShared.countOrthogonalBends(priorPoints) * 36 +
+            crossCount * 100000 +
+            routeTrackOverlapLength(priorPoints, occupiedSegments) * 400 +
+            (penalty || 0);
+          if (priorScore + 0.5 < priorBest.score) {
+            priorBest = { points: priorPoints, score: priorScore };
+          }
+        }
+
+        if (!conn.fromPort) {
+          var priorPref = getPreferredComponentSides(fromE, toE);
+          var altSource = componentSideCandidate(fromE, priorPref.fromSide);
+          var altRouted = UMLShared.routeOrthogonalConnector(altSource, bestRoute.target, obstacles, {
+            skipNames: skipN,
+            occupied: null,
+            stub: 24,
+            clearance: 18,
+            bendPenalty: 38,
+            extraXs: [fromE.x + fromE.box.width / 2, toE.x + toE.box.width / 2],
+            extraYs: [fromE.y + fromE.box.height / 2, toE.y + toE.box.height / 2]
+          });
+          considerPriorRoute(altRouted.points, -40);
+        }
+
+        var priorOuterRoutes = buildOuterLaneCandidates(bestRoute.source, bestRoute.target, obstacles);
+        for (var pori = 0; pori < priorOuterRoutes.length; pori++) {
+          considerPriorRoute(priorOuterRoutes[pori].points, 80);
+        }
+
+        points = priorBest.points;
       }
 
       // Remove the temporary interior obstacles added for this connection
