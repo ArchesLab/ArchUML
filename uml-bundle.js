@@ -37,6 +37,193 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function parseLabelDirectionCue(label) {
+    var text = (label || '').trim();
+    var hasDirection = false;
+
+    if (/^[<>]$/.test(text)) {
+      return { text: '', hasDirection: true };
+    }
+
+    var leading = text.match(/^([<>])\s+(.+)$/);
+    if (leading) {
+      hasDirection = true;
+      text = leading[2].trim();
+    }
+
+    var trailing = text.match(/^(.+?)\s+([<>])$/);
+    if (trailing) {
+      hasDirection = true;
+      text = trailing[1].trim();
+    }
+
+    return {
+      text: text,
+      hasDirection: hasDirection
+    };
+  }
+
+  function labelDirectionPlacementText(label, hasDirection) {
+    return label ? label : (hasDirection ? ' ' : '');
+  }
+
+  function labelDirectionTextWidth(label, hasDirection, fontSize, bold, fontFamily) {
+    var text = labelDirectionPlacementText(label, hasDirection);
+    var width = textWidth(text, !!bold, fontSize, fontFamily);
+    return width + (hasDirection ? 18 : 0);
+  }
+
+  function unionRects(a, b) {
+    if (!a) return b || null;
+    if (!b) return a;
+    return {
+      left: Math.min(a.left, b.left),
+      right: Math.max(a.right, b.right),
+      top: Math.min(a.top, b.top),
+      bottom: Math.max(a.bottom, b.bottom)
+    };
+  }
+
+  function labelTextRect(text, x, y, anchor, fontSize, bold, fontFamily) {
+    var fs = fontSize || BASE_CFG.fontSize;
+    var labelW = textWidth(text || '', !!bold, fs, fontFamily);
+    var labelH = fs + 6;
+    var left = anchor === 'middle' ? x - labelW / 2 : (anchor === 'end' ? x - labelW : x);
+    return {
+      left: left,
+      right: left + labelW,
+      top: y - labelH,
+      bottom: y + 4
+    };
+  }
+
+  function normalizeDirectionVector(direction, fallback) {
+    var dir = direction || fallback || { x: 1, y: 0 };
+    if (typeof dir === 'string') {
+      if (dir === 'left') return { x: -1, y: 0 };
+      if (dir === 'right') return { x: 1, y: 0 };
+      if (dir === 'up') return { x: 0, y: -1 };
+      if (dir === 'down') return { x: 0, y: 1 };
+      dir = fallback || { x: 1, y: 0 };
+    }
+
+    var dx = Number(dir.x) || 0;
+    var dy = Number(dir.y) || 0;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return { x: dx < 0 ? -1 : 1, y: 0 };
+    }
+    return { x: 0, y: dy < 0 ? -1 : 1 };
+  }
+
+  function routeDirectionAtPlacement(points, placement) {
+    var best = null;
+    var bestDist = Infinity;
+    if (!points || points.length < 2 || !placement) return { x: 1, y: 0 };
+
+    for (var di = 0; di < points.length - 1; di++) {
+      var p0d = points[di];
+      var p1d = points[di + 1];
+      var len = Math.abs(p1d.x - p0d.x) + Math.abs(p1d.y - p0d.y);
+      if (len < 1) continue;
+
+      var closestX;
+      var closestY;
+      var vx = 0;
+      var vy = 0;
+      if (Math.abs(p1d.y - p0d.y) < 1) {
+        closestX = Math.max(Math.min(p0d.x, p1d.x), Math.min(Math.max(p0d.x, p1d.x), placement.x));
+        closestY = p0d.y;
+        vx = p1d.x >= p0d.x ? 1 : -1;
+      } else if (Math.abs(p1d.x - p0d.x) < 1) {
+        closestX = p0d.x;
+        closestY = Math.max(Math.min(p0d.y, p1d.y), Math.min(Math.max(p0d.y, p1d.y), placement.y));
+        vy = p1d.y >= p0d.y ? 1 : -1;
+      } else {
+        continue;
+      }
+
+      var dist = Math.abs(placement.x - closestX) + Math.abs(placement.y - closestY) - len * 0.001;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = { x: vx, y: vy };
+      }
+    }
+
+    return best || { x: 1, y: 0 };
+  }
+
+  function buildLabelDirectionTriangle(label, hasDirection, placement, points, options) {
+    if (!hasDirection || !placement) return null;
+    var opts = options || {};
+    var fs = opts.fontSize || BASE_CFG.fontSize;
+    var text = label || '';
+    var rect = opts.textRect || labelTextRect(text, placement.x, placement.y, placement.anchor, fs, opts.bold, opts.fontFamily);
+    var dir = normalizeDirectionVector(opts.direction, routeDirectionAtPlacement(points, placement));
+    var size = opts.size || 5;
+    var gap = text ? (opts.gap !== undefined ? opts.gap : 7) : (opts.emptyGap || 0);
+    var cx = (rect.left + rect.right) / 2;
+    var cy = (rect.top + rect.bottom) / 2;
+
+    if (Math.abs(dir.x) >= Math.abs(dir.y)) {
+      cx = dir.x >= 0 ? rect.right + gap + size : rect.left - gap - size;
+    } else if (text) {
+      cx = opts.verticalSide === 'left' ? rect.left - gap - size : rect.right + gap + size;
+    }
+
+    var poly;
+    if (Math.abs(dir.x) >= Math.abs(dir.y)) {
+      if (dir.x >= 0) {
+        poly = [
+          { x: cx + size, y: cy },
+          { x: cx - size, y: cy - size },
+          { x: cx - size, y: cy + size }
+        ];
+      } else {
+        poly = [
+          { x: cx - size, y: cy },
+          { x: cx + size, y: cy - size },
+          { x: cx + size, y: cy + size }
+        ];
+      }
+    } else if (dir.y >= 0) {
+      poly = [
+        { x: cx, y: cy + size },
+        { x: cx - size, y: cy - size },
+        { x: cx + size, y: cy - size }
+      ];
+    } else {
+      poly = [
+        { x: cx, y: cy - size },
+        { x: cx - size, y: cy + size },
+        { x: cx + size, y: cy + size }
+      ];
+    }
+
+    return {
+      points: poly,
+      rect: {
+        left: Math.min(poly[0].x, poly[1].x, poly[2].x),
+        right: Math.max(poly[0].x, poly[1].x, poly[2].x),
+        top: Math.min(poly[0].y, poly[1].y, poly[2].y),
+        bottom: Math.max(poly[0].y, poly[1].y, poly[2].y)
+      }
+    };
+  }
+
+  function pushLabelDirectionTriangle(svgParts, label, hasDirection, placement, points, colors, options) {
+    var triangle = buildLabelDirectionTriangle(label, hasDirection, placement, points, options);
+    if (!triangle) return null;
+    var opts = options || {};
+    var pts = triangle.points.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+    var className = opts.className || 'uml-label-direction';
+    var fill = (opts.fill || (colors && colors.text) || '#222');
+    var stroke = (opts.stroke || (colors && colors.fill) || '#fff');
+    var strokeWidth = opts.strokeWidth !== undefined ? opts.strokeWidth : 3;
+    svgParts.push('<polygon class="' + className + '" points="' + pts + '" fill="' + fill + '" ' +
+      'stroke="' + stroke + '" stroke-width="' + strokeWidth + '" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"/>');
+    return triangle.rect;
+  }
+
   function parseLayoutDirective(line) {
     var layoutMatch = line.match(/^layout\s+(.+)$/i);
     if (!layoutMatch) return null;
@@ -2404,6 +2591,14 @@
     NOTE_CFG: NOTE_CFG,
     textWidth: textWidth,
     escapeXml: escapeXml,
+    parseLabelDirectionCue: parseLabelDirectionCue,
+    labelDirectionPlacementText: labelDirectionPlacementText,
+    labelDirectionTextWidth: labelDirectionTextWidth,
+    unionRects: unionRects,
+    labelTextRect: labelTextRect,
+    routeDirectionAtPlacement: routeDirectionAtPlacement,
+    buildLabelDirectionTriangle: buildLabelDirectionTriangle,
+    pushLabelDirectionTriangle: pushLabelDirectionTriangle,
     parseLayoutDirective: parseLayoutDirective,
     parseHighlightColor: parseHighlightColor,
     highlightFills: highlightFills,
@@ -4843,32 +5038,6 @@
     { token: '--',  type: 'association', navigability: 'unspecified' },
   ];
 
-  function parseRelationshipLabelDirection(label) {
-    var text = (label || '').trim();
-    var hasDirection = false;
-
-    if (/^[<>]$/.test(text)) {
-      return { text: '', hasDirection: true };
-    }
-
-    var leading = text.match(/^([<>])\s+(.+)$/);
-    if (leading) {
-      hasDirection = true;
-      text = leading[2].trim();
-    }
-
-    var trailing = text.match(/^(.+?)\s+([<>])$/);
-    if (trailing) {
-      hasDirection = true;
-      text = trailing[1].trim();
-    }
-
-    return {
-      text: text,
-      hasDirection: hasDirection
-    };
-  }
-
   /**
    * Parse a relationship line.
    * Format: From [mult] token [mult] To [: label]
@@ -4888,7 +5057,7 @@
       var colonIdx = rightPart.lastIndexOf(' : ');
       if (colonIdx !== -1) {
         label = rightPart.substring(colonIdx + 3).trim();
-        var labelInfo = parseRelationshipLabelDirection(label);
+        var labelInfo = UMLShared.parseLabelDirectionCue(label);
         label = labelInfo.text;
         labelDirection = labelInfo.hasDirection;
         rightPart = rightPart.substring(0, colonIdx).trim();
@@ -5135,13 +5304,11 @@
   }
 
   function classRelationLabelPlacementText(rel) {
-    return rel && rel.label ? rel.label : (rel && rel.labelDirection ? ' ' : '');
+    return UMLShared.labelDirectionPlacementText(rel && rel.label, rel && rel.labelDirection);
   }
 
   function classRelationLabelWidth(rel, fontSize) {
-    var text = classRelationLabelPlacementText(rel);
-    var width = UMLShared.textWidth(text, false, fontSize || CFG.fontSizeStereotype);
-    return width + (rel && rel.labelDirection ? 18 : 0);
+    return UMLShared.labelDirectionTextWidth(rel && rel.label, rel && rel.labelDirection, fontSize || CFG.fontSizeStereotype);
   }
 
   /**
@@ -5706,120 +5873,6 @@
         top: y - textH,
         bottom: y + 4
       };
-    }
-
-    function classUnionRects(a, b) {
-      if (!a) return b;
-      if (!b) return a;
-      return {
-        left: Math.min(a.left, b.left),
-        right: Math.max(a.right, b.right),
-        top: Math.min(a.top, b.top),
-        bottom: Math.max(a.bottom, b.bottom)
-      };
-    }
-
-    function classRouteDirectionAtPlacement(points, placement) {
-      var best = null;
-      var bestDist = Infinity;
-      if (!points || points.length < 2 || !placement) return { x: 1, y: 0 };
-
-      for (var di = 0; di < points.length - 1; di++) {
-        var p0d = points[di];
-        var p1d = points[di + 1];
-        var len = Math.abs(p1d.x - p0d.x) + Math.abs(p1d.y - p0d.y);
-        if (len < 1) continue;
-
-        var closestX;
-        var closestY;
-        var vx = 0;
-        var vy = 0;
-        if (Math.abs(p1d.y - p0d.y) < 1) {
-          closestX = Math.max(Math.min(p0d.x, p1d.x), Math.min(Math.max(p0d.x, p1d.x), placement.x));
-          closestY = p0d.y;
-          vx = p1d.x >= p0d.x ? 1 : -1;
-        } else if (Math.abs(p1d.x - p0d.x) < 1) {
-          closestX = p0d.x;
-          closestY = Math.max(Math.min(p0d.y, p1d.y), Math.min(Math.max(p0d.y, p1d.y), placement.y));
-          vy = p1d.y >= p0d.y ? 1 : -1;
-        } else {
-          continue;
-        }
-
-        var dist = Math.abs(placement.x - closestX) + Math.abs(placement.y - closestY) - len * 0.001;
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = { x: vx, y: vy };
-        }
-      }
-
-      return best || { x: 1, y: 0 };
-    }
-
-    function classAssociationLabelTriangle(rel, placement, points, fontSize) {
-      if (!rel || !rel.labelDirection || !placement) return null;
-      var fs = fontSize || CFG.fontSizeStereotype;
-      var text = rel.label || '';
-      var rect = classTextRect(text, placement.x, placement.y, placement.anchor, fs);
-      var dir = classRouteDirectionAtPlacement(points, placement);
-      var size = 5;
-      var gap = text ? 7 : 0;
-      var cx = (rect.left + rect.right) / 2;
-      var cy = (rect.top + rect.bottom) / 2;
-
-      if (Math.abs(dir.x) >= Math.abs(dir.y)) {
-        cx = dir.x >= 0 ? rect.right + gap + size : rect.left - gap - size;
-      } else if (text) {
-        cx = rect.right + gap + size;
-      }
-
-      var poly;
-      if (Math.abs(dir.x) >= Math.abs(dir.y)) {
-        if (dir.x >= 0) {
-          poly = [
-            { x: cx + size, y: cy },
-            { x: cx - size, y: cy - size },
-            { x: cx - size, y: cy + size }
-          ];
-        } else {
-          poly = [
-            { x: cx - size, y: cy },
-            { x: cx + size, y: cy - size },
-            { x: cx + size, y: cy + size }
-          ];
-        }
-      } else if (dir.y >= 0) {
-        poly = [
-          { x: cx, y: cy + size },
-          { x: cx - size, y: cy - size },
-          { x: cx + size, y: cy - size }
-        ];
-      } else {
-        poly = [
-          { x: cx, y: cy - size },
-          { x: cx - size, y: cy + size },
-          { x: cx + size, y: cy + size }
-        ];
-      }
-
-      return {
-        points: poly,
-        rect: {
-          left: Math.min(poly[0].x, poly[1].x, poly[2].x),
-          right: Math.max(poly[0].x, poly[1].x, poly[2].x),
-          top: Math.min(poly[0].y, poly[1].y, poly[2].y),
-          bottom: Math.max(poly[0].y, poly[1].y, poly[2].y)
-        }
-      };
-    }
-
-    function pushClassAssociationLabelTriangle(target, rel, placement, points, fontSize) {
-      var triangle = classAssociationLabelTriangle(rel, placement, points, fontSize);
-      if (!triangle) return null;
-      var pts = triangle.points.map(function(p) { return p.x + ',' + p.y; }).join(' ');
-      target.push('<polygon class="uml-association-label-direction" points="' + pts + '" fill="' + colors.text + '" ' +
-        'stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"/>');
-      return triangle.rect;
     }
 
     function classObstacleRect(obstacle) {
@@ -6991,14 +7044,16 @@
         if (labelRouteInfo.rel.label) {
           pushClassTextSvg(labelSvg, labelRouteInfo.rel.label, labelPlacement, CFG.fontSizeStereotype, 'italic');
         }
-        var directionRect = pushClassAssociationLabelTriangle(
+        var directionRect = UMLShared.pushLabelDirectionTriangle(
           labelSvg,
-          labelRouteInfo.rel,
+          labelRouteInfo.rel.label,
+          labelRouteInfo.rel.labelDirection,
           labelPlacement,
           labelRouteInfo.points,
-          CFG.fontSizeStereotype
+          colors,
+          { fontSize: CFG.fontSizeStereotype, className: 'uml-association-label-direction' }
         );
-        placedLabels.push(classUnionRects(labelRect, directionRect));
+        placedLabels.push(UMLShared.unionRects(labelRect, directionRect));
       }
     }
 
@@ -8249,9 +8304,9 @@
       var lostMatch = line.match(/^(\S+)\s+->o\s*(?::\s*(.*))?$/);
       if (lostMatch) {
         var lostFrom = lostMatch[1];
-        var lostLabel = (lostMatch[2] || '').trim();
+        var lostLabelInfo = UMLShared.parseLabelDirectionCue(lostMatch[2] || '');
         ensureParticipant(lostFrom, participants, participantMap, autoParticipants);
-        messages.push({ type: 'lost', from: lostFrom, label: lostLabel });
+        messages.push({ type: 'lost', from: lostFrom, label: lostLabelInfo.text, labelDirection: lostLabelInfo.hasDirection });
         continue;
       }
 
@@ -8259,9 +8314,9 @@
       var foundMatch = line.match(/^o->\s+(\S+)\s*(?::\s*(.*))?$/);
       if (foundMatch) {
         var foundTo = foundMatch[1];
-        var foundLabel = (foundMatch[2] || '').trim();
+        var foundLabelInfo = UMLShared.parseLabelDirectionCue(foundMatch[2] || '');
         ensureParticipant(foundTo, participants, participantMap, autoParticipants);
-        messages.push({ type: 'found', to: foundTo, label: foundLabel });
+        messages.push({ type: 'found', to: foundTo, label: foundLabelInfo.text, labelDirection: foundLabelInfo.hasDirection });
         continue;
       }
 
@@ -8271,7 +8326,7 @@
         var from = msgMatch[1];
         var arrow = msgMatch[2];
         var to = msgMatch[3];
-        var msgLabel = (msgMatch[4] || '').trim();
+        var msgLabelInfo = UMLShared.parseLabelDirectionCue(msgMatch[4] || '');
 
         // Ensure participants exist
         ensureParticipant(from, participants, participantMap, autoParticipants);
@@ -8291,7 +8346,8 @@
           type: 'message',
           from: from,
           to: to,
-          label: msgLabel,
+          label: msgLabelInfo.text,
+          labelDirection: msgLabelInfo.hasDirection,
           msgType: msgType,
           isDashed: isDashed,
         });
@@ -8449,12 +8505,12 @@
 
     for (var mli = 0; mli < messages.length; mli++) {
       var mm = messages[mli];
-      if (!mm || mm.type !== 'message' || !mm.label || mm.from === mm.to) continue;
+      if (!mm || mm.type !== 'message' || (!mm.label && !mm.labelDirection) || mm.from === mm.to) continue;
       var aIdx = findPIdxByIdName(mm.from);
       var bIdx = findPIdxByIdName(mm.to);
       if (aIdx < 0 || bIdx < 0) continue;
       var lo = Math.min(aIdx, bIdx), hi = Math.max(aIdx, bIdx);
-      var labelW = UMLShared.textWidth(mm.label, false, CFG.fontSize);
+      var labelW = UMLShared.labelDirectionTextWidth(mm.label, mm.labelDirection, CFG.fontSize);
       var requiredSpan = labelW + labelSideMargin * 2;
       var intermediateW = 0;
       for (var ki = lo + 1; ki < hi; ki++) intermediateW += partWidths[ki];
@@ -8656,9 +8712,9 @@
     var halfAct = CFG.activationW / 2;
     for (var smi = 0; smi < messages.length; smi++) {
       var sm = messages[smi];
-      if (sm.type === 'message' && sm.from === sm.to && sm.label) {
+      if (sm.type === 'message' && sm.from === sm.to && (sm.label || sm.labelDirection)) {
         var smIdx = findPIdxByName(sm.from);
-        var selfLabelW = UMLShared.textWidth(sm.label, false, CFG.fontSize);
+        var selfLabelW = UMLShared.labelDirectionTextWidth(sm.label, sm.labelDirection, CFG.fontSize);
         var selfRightEdge = partX[smIdx] + halfAct + CFG.activationOffset + selfW + 6 + selfLabelW + CFG.svgPad;
         if (selfRightEdge > totalW) {
           totalW = selfRightEdge;
@@ -8671,7 +8727,7 @@
     for (var lfmi = 0; lfmi < messages.length; lfmi++) {
       var lfm = messages[lfmi];
       if (lfm.type === 'lost' || lfm.type === 'found') {
-        var ltw = lfm.label ? UMLShared.textWidth(lfm.label, false, CFG.fontSize) : 0;
+        var ltw = (lfm.label || lfm.labelDirection) ? UMLShared.labelDirectionTextWidth(lfm.label, lfm.labelDirection, CFG.fontSize) : 0;
         var reqGap = Math.max(CFG.lostFoundGap, ltw + 20);
 
         if (lfm.type === 'lost') {
@@ -8937,13 +8993,29 @@
             '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
             '" stroke-linecap="butt" stroke-linejoin="miter"' + (m.isDashed ? ' stroke-dasharray="6,4"' : '') + '/>');
           drawMsgArrow(svg, selfReceiveX, my + selfMessageH, 1, m.msgType, colors);
-          if (m.label) {
+          if (m.label || m.labelDirection) {
             var selfLabelX = selfLoopX + 6;
             var selfLabelY = my + 4;
-            svg.push('<text x="' + selfLabelX + '" y="' + selfLabelY +
-              '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' + UMLShared.escapeXml(m.label) + '</text>');
-            pushSequenceLabelObstacle(m.label, selfLabelX, selfLabelY, 'start');
+            if (m.label) {
+              svg.push('<text x="' + selfLabelX + '" y="' + selfLabelY +
+                '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' + UMLShared.escapeXml(m.label) + '</text>');
+            }
+            UMLShared.pushLabelDirectionTriangle(
+              svg,
+              m.label,
+              m.labelDirection,
+              { x: selfLabelX, y: selfLabelY, anchor: 'start' },
+              [
+                { x: selfSendX, y: my },
+                { x: selfLoopX, y: my },
+                { x: selfLoopX, y: my + selfMessageH },
+                { x: selfReceiveX, y: my + selfMessageH }
+              ],
+              colors,
+              { fontSize: CFG.fontSize }
+            );
+            pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), selfLabelX, selfLabelY, 'start');
           }
         } else {
           // Line
@@ -8960,14 +9032,25 @@
           // create message enters the left or right edge of the target box,
           // so a label centered on the midpoint of the arrow stays in the
           // open space between the source lifeline and the target box edge.
-          if (m.label) {
+          if (m.label || m.labelDirection) {
             var labelX = (x1 + x2) / 2;
             var labelY = my - 6;
-            svg.push('<text x="' + labelX + '" y="' + labelY +
-              '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-              UMLShared.escapeXml(m.label) + '</text>');
-            pushSequenceLabelObstacle(m.label, labelX, labelY, 'middle');
+            if (m.label) {
+              svg.push('<text x="' + labelX + '" y="' + labelY +
+                '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
+                UMLShared.escapeXml(m.label) + '</text>');
+            }
+            UMLShared.pushLabelDirectionTriangle(
+              svg,
+              m.label,
+              m.labelDirection,
+              { x: labelX, y: labelY, anchor: 'middle' },
+              [{ x: x1, y: my }, { x: x2, y: my }],
+              colors,
+              { fontSize: CFG.fontSize }
+            );
+            pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), labelX, labelY, 'middle');
           }
         }
       } else if (m.type === 'create') {
@@ -9001,7 +9084,7 @@
       } else if (m.type === 'lost') {
         // Lost message: line from sender to a filled circle
         var lIdx = findPIdx(m.from);
-        var ltw2 = m.label ? UMLShared.textWidth(m.label, false, CFG.fontSize) : 0;
+        var ltw2 = (m.label || m.labelDirection) ? UMLShared.labelDirectionTextWidth(m.label, m.labelDirection, CFG.fontSize) : 0;
         var lgap = Math.max(CFG.lostFoundGap, ltw2 + 20);
         var lx1 = getEdgeX(lIdx, my, 'right');
         var lx2 = lx1 + lgap;
@@ -9011,19 +9094,30 @@
         drawMsgArrow(svg, lx2 - lr, my, -1, 'sync', colors);
         svg.push('<circle cx="' + lx2 + '" cy="' + my + '" r="' + lr +
           '" fill="' + colors.line + '" stroke="' + colors.line + '"/>');
-        if (m.label) {
+        if (m.label || m.labelDirection) {
           var llabelX = (lx1 + lx2) / 2;
           var lostLabelY = my - 6;
-          svg.push('<text x="' + llabelX + '" y="' + lostLabelY +
-            '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-            UMLShared.escapeXml(m.label) + '</text>');
-          pushSequenceLabelObstacle(m.label, llabelX, lostLabelY, 'middle');
+          if (m.label) {
+            svg.push('<text x="' + llabelX + '" y="' + lostLabelY +
+              '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
+              UMLShared.escapeXml(m.label) + '</text>');
+          }
+          UMLShared.pushLabelDirectionTriangle(
+            svg,
+            m.label,
+            m.labelDirection,
+            { x: llabelX, y: lostLabelY, anchor: 'middle' },
+            [{ x: lx1, y: my }, { x: lx2, y: my }],
+            colors,
+            { fontSize: CFG.fontSize }
+          );
+          pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), llabelX, lostLabelY, 'middle');
         }
       } else if (m.type === 'found') {
         // Found message: filled circle to receiver
         var fIdx = findPIdx(m.to);
-        var ftw = m.label ? UMLShared.textWidth(m.label, false, CFG.fontSize) : 0;
+        var ftw = (m.label || m.labelDirection) ? UMLShared.labelDirectionTextWidth(m.label, m.labelDirection, CFG.fontSize) : 0;
         var fgap = Math.max(CFG.lostFoundGap, ftw + 20);
         var fx2 = getEdgeX(fIdx, my, 'left');
         var fx1 = fx2 - fgap;
@@ -9033,14 +9127,25 @@
         svg.push('<line x1="' + (fx1 + fr) + '" y1="' + my + '" x2="' + fx2 + '" y2="' + my +
           '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
         drawMsgArrow(svg, fx2, my, -1, 'sync', colors);
-        if (m.label) {
+        if (m.label || m.labelDirection) {
           var flabelX = (fx1 + fx2) / 2;
           var foundLabelY = my - 6;
-          svg.push('<text x="' + flabelX + '" y="' + foundLabelY +
-            '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-            UMLShared.escapeXml(m.label) + '</text>');
-          pushSequenceLabelObstacle(m.label, flabelX, foundLabelY, 'middle');
+          if (m.label) {
+            svg.push('<text x="' + flabelX + '" y="' + foundLabelY +
+              '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
+              UMLShared.escapeXml(m.label) + '</text>');
+          }
+          UMLShared.pushLabelDirectionTriangle(
+            svg,
+            m.label,
+            m.labelDirection,
+            { x: flabelX, y: foundLabelY, anchor: 'middle' },
+            [{ x: fx1, y: my }, { x: fx2, y: my }],
+            colors,
+            { fontSize: CFG.fontSize }
+          );
+          pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), flabelX, foundLabelY, 'middle');
         }
       } else if (m.type === 'note') {
         var noteLines = m.lines || [m.text || ''];
@@ -9303,7 +9408,8 @@
           states[sf].parent = inState; states[st].parent = inState;
           states[inState].isComposite = true;
           var slp = []; if (se) slp.push(se); if (sg) slp.push(sg); if (sa) slp.push(sa);
-          transitions.push({ from: sf, to: st, label: slp.join(' '), parent: inState });
+          var subLabelInfo = UMLShared.parseLabelDirectionCue(slp.join(' '));
+          transitions.push({ from: sf, to: st, label: subLabelInfo.text, labelDirection: subLabelInfo.hasDirection, parent: inState });
           continue;
         }
         continue;
@@ -9368,10 +9474,10 @@
         if (eventLabel) labelParts.push(eventLabel);
         if (preGuard) labelParts.push(preGuard);
         if (preAction) labelParts.push(preAction);
-        var label = labelParts.join(' ');
+        var stateLabelInfo = UMLShared.parseLabelDirectionCue(labelParts.join(' '));
         ensureState(from);
         ensureState(to);
-        transitions.push({ from: from, to: to, label: label });
+        transitions.push({ from: from, to: to, label: stateLabelInfo.text, labelDirection: stateLabelInfo.hasDirection });
         continue;
       }
     }
@@ -10015,19 +10121,39 @@
           sPathEnd.x + ' ' + sPathEnd.y +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
         UMLShared.drawArrow(svg, sArrowTip.x, sArrowTip.y, sArrowTip.dx, sArrowTip.dy, colors.line);
-        if (tr.label) {
-          var labelW = UMLShared.textWidth(tr.label, false, CFG.fontSize);
-          labelSvg.push('<text x="' + loopLabelX + '" y="' + loopLabelY +
-            '" text-anchor="' + loopLabelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
+        if (tr.label || tr.labelDirection) {
+          var labelW = UMLShared.labelDirectionTextWidth(tr.label, tr.labelDirection, CFG.fontSize);
+          var loopTextW = UMLShared.textWidth(tr.label || '', false, CFG.fontSize);
+          if (tr.label) {
+            labelSvg.push('<text x="' + loopLabelX + '" y="' + loopLabelY +
+              '" text-anchor="' + loopLabelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
+          }
           var lblLeft = loopLabelAnchor === 'middle' ? loopLabelX - labelW / 2 :
                         (loopLabelAnchor === 'end' ? loopLabelX - labelW : loopLabelX);
-          placedLabels.push({
+          var loopTextLeft = loopLabelAnchor === 'middle' ? loopLabelX - loopTextW / 2 :
+                             (loopLabelAnchor === 'end' ? loopLabelX - loopTextW : loopLabelX);
+          var loopTextRect = {
+            left: loopTextLeft,
+            right: loopTextLeft + loopTextW,
+            top: loopLabelY - CFG.fontSize - 2,
+            bottom: loopLabelY + 4
+          };
+          var loopDirectionRect = UMLShared.pushLabelDirectionTriangle(
+            labelSvg,
+            tr.label,
+            tr.labelDirection,
+            { x: loopLabelX, y: loopLabelY, anchor: loopLabelAnchor },
+            null,
+            colors,
+            { fontSize: CFG.fontSize, textRect: loopTextRect, direction: isTB ? 'down' : 'right' }
+          );
+          placedLabels.push(UMLShared.unionRects({
             left: lblLeft,
             right: lblLeft + labelW,
             top: loopLabelY - CFG.fontSize - 2,
             bottom: loopLabelY + 4
-          });
+          }, loopDirectionRect));
         }
         continue;
       }
@@ -10263,7 +10389,7 @@
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
       for (var rsgi = 0; rsgi < routeSegments.length; rsgi++) routeSegments[rsgi].routeIndex = ti;
 
-      if (tr.label) {
+      if (tr.label || tr.labelDirection) {
         stateRouteInfos.push({
           tr: tr,
           points: points,
@@ -10338,8 +10464,8 @@
     function placeStateTransitionLabels() {
       var ordered = stateRouteInfos.slice();
       ordered.sort(function(a, b) {
-        var aw = UMLShared.textWidth(a.tr.label || '', false, CFG.fontSize);
-        var bw = UMLShared.textWidth(b.tr.label || '', false, CFG.fontSize);
+        var aw = UMLShared.labelDirectionTextWidth(a.tr.label, a.tr.labelDirection, CFG.fontSize);
+        var bw = UMLShared.labelDirectionTextWidth(b.tr.label, b.tr.labelDirection, CFG.fontSize);
         if (a.isBackEdge !== b.isBackEdge) return a.isBackEdge ? -1 : 1;
         if (Math.abs(bw - aw) > 1) return bw - aw;
         return a.routeIndex - b.routeIndex;
@@ -10386,7 +10512,8 @@
           ];
         }
 
-        var labelPlacement = UMLShared.placeOrthogonalLabel(tr.label, points, stateObstacles, placedLabels, {
+        var labelText = UMLShared.labelDirectionPlacementText(tr.label, tr.labelDirection);
+        var labelPlacement = UMLShared.placeOrthogonalLabel(labelText, points, stateObstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: stateOtherRouteSegments(routeInfo.routeIndex),
           endpointPad: routeInfo.isBackEdge ? 6 : 14,
@@ -10415,11 +10542,23 @@
           }
         });
         if (!labelPlacement) continue;
-        placedLabels.push(labelPlacement.rect);
-        labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
-          '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-          '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-          UMLShared.escapeXml(tr.label) + '</text>');
+        var stateLabelRect = labelPlacement.rect;
+        if (tr.label) {
+          labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
+            '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+            UMLShared.escapeXml(tr.label) + '</text>');
+        }
+        var stateDirectionRect = UMLShared.pushLabelDirectionTriangle(
+          labelSvg,
+          tr.label,
+          tr.labelDirection,
+          labelPlacement,
+          points,
+          colors,
+          { fontSize: CFG.fontSize }
+        );
+        placedLabels.push(UMLShared.unionRects(stateLabelRect, stateDirectionRect));
       }
     }
 
@@ -10984,7 +11123,8 @@
         var connVisualStyle = connMatch[6] ? 'dashed' : null;
         var rawLabel = (connMatch[7] || '').trim();
         // Strip surrounding quotes on connector labels (`"get /users"` → `get /users`).
-        var label = rawLabel.replace(/^"([^"]*)"$/, '$1');
+        var connLabelInfo = UMLShared.parseLabelDirectionCue(rawLabel.replace(/^"([^"]*)"$/, '$1'));
+        var label = connLabelInfo.text;
 
         // Resolve from: alias map → dot notation → bare component
         var from, fromPort = null;
@@ -11021,7 +11161,16 @@
         if (arrow === '..>') type = 'dependency';
         else if (arrow === '--') type = 'link';
 
-        connectors.push({ from: from, fromPort: fromPort, to: to, toPort: toPort, type: type, label: label, visualStyle: connVisualStyle });
+        connectors.push({
+          from: from,
+          fromPort: fromPort,
+          to: to,
+          toPort: toPort,
+          type: type,
+          label: label,
+          labelDirection: connLabelInfo.hasDirection,
+          visualStyle: connVisualStyle
+        });
         continue;
       }
     }
@@ -12497,9 +12646,13 @@
     // Expand bounds to account for connector labels that may extend beyond components
     var maxLabelH = 0, maxLabelWHalf = 0;
     for (var cli = 0; cli < connectors.length; cli++) {
-      if (connectors[cli].label) {
-        var clm = componentLabelMetrics(connectors[cli].label, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
-        maxLabelWHalf = Math.max(maxLabelWHalf, clm.width / 2 + 10);
+      if (connectors[cli].label || connectors[cli].labelDirection) {
+        var clm = componentLabelMetrics(
+          UMLShared.labelDirectionPlacementText(connectors[cli].label, connectors[cli].labelDirection),
+          CFG.fontSize,
+          COMPONENT_CONNECTOR_LABEL_MAX_WIDTH
+        );
+        maxLabelWHalf = Math.max(maxLabelWHalf, (clm.width + (connectors[cli].labelDirection ? 18 : 0)) / 2 + 10);
         maxLabelH = Math.max(maxLabelH, clm.height + 34);
       }
     }
@@ -13122,9 +13275,14 @@
     return segments;
   }
 
-  function placeComponentConnectorLabel(label, points, routeIndex, obstacles, placedLabels, routeSegments, cfg, options) {
+  function placeComponentConnectorLabel(label, hasDirection, points, routeIndex, obstacles, placedLabels, routeSegments, cfg, options) {
     var opts = options || {};
-    var metrics = componentLabelMetrics(label, cfg.fontSize, opts.maxLabelWidth || COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+    var metrics = componentLabelMetrics(
+      UMLShared.labelDirectionPlacementText(label, hasDirection),
+      cfg.fontSize,
+      opts.maxLabelWidth || COMPONENT_CONNECTOR_LABEL_MAX_WIDTH
+    );
+    if (hasDirection) metrics.width += 18;
     var labelW = metrics.width;
     var labelH = metrics.height;
     var segments = [];
@@ -13358,7 +13516,10 @@
       var silLabel = silFromLabel === silToLabel ? silFromLabel : (silc.label || '');
       if (!silLabel) continue;
 
-      sharedInterfaceConnectorLabels[silci] = silLabel;
+      sharedInterfaceConnectorLabels[silci] = {
+        label: silLabel,
+        labelDirection: silc.labelDirection && silLabel === silc.label
+      };
       suppressInterfacePortLabel[silc.fromPort] = true;
       suppressInterfacePortLabel[silc.toPort] = true;
     }
@@ -13399,10 +13560,12 @@
     var componentSideAnchors = buildComponentSideAnchors(connectors, entries);
     var backEdgeLanes = layout.backEdgeLanes || {};
 
-    function placeSharedInterfaceConnectionLabel(labelText, x, y, radius) {
-      if (!labelText) return;
+    function placeSharedInterfaceConnectionLabel(labelInfo, x, y, radius, direction) {
+      var labelText = typeof labelInfo === 'string' ? labelInfo : (labelInfo && labelInfo.label) || '';
+      var labelDirection = !!(labelInfo && labelInfo.labelDirection);
+      if (!labelText && !labelDirection) return;
       var fs = CFG.fontSize - 1;
-      var labelW = UMLShared.textWidth(labelText, false, fs);
+      var labelW = UMLShared.labelDirectionTextWidth(labelText, labelDirection, fs);
       var labelH = fs + 6;
       var offset = (radius || CFG.ifaceRadius) + fs + 7;
       var candidates = [
@@ -13428,6 +13591,17 @@
       }
       placedLabels.push(best.rect);
       drawInterfaceConnectionLabel(svg, labelText, x, best.y, colors, fs);
+      var actualTextRect = UMLShared.labelTextRect(labelText, x, best.y, 'middle', fs);
+      var directionRect = UMLShared.pushLabelDirectionTriangle(
+        svg,
+        labelText,
+        labelDirection,
+        { x: x, y: best.y, anchor: 'middle' },
+        null,
+        colors,
+        { fontSize: fs, textRect: actualTextRect, direction: direction }
+      );
+      if (directionRect) placedLabels[placedLabels.length - 1] = UMLShared.unionRects(best.rect, directionRect);
     }
 
     // Build an orthogonal 5-segment route that wraps over (top lane) or under
@@ -15406,7 +15580,13 @@
             ' 0 0,' + vSweep + ' ' + (socketCx + socketR) + ',' + socketCy +
             '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
         }
-        placeSharedInterfaceConnectionLabel(sharedInterfaceConnectorLabels[ci], bsMx, bsMy, Math.max(ballR, socketR));
+        placeSharedInterfaceConnectionLabel(
+          sharedInterfaceConnectorLabels[ci],
+          bsMx,
+          bsMy,
+          Math.max(ballR, socketR),
+          UMLShared.routeDirectionAtPlacement(points, { x: bsMx, y: bsMy })
+        );
       } else {
         // Draw full polyline for non-joined connectors
         var pStr = '';
@@ -15449,7 +15629,8 @@
             sharedInterfaceConnectorLabels[ci],
             (fromSym.x + toSym.x) / 2,
             (fromSym.y + toSym.y) / 2,
-            Math.max(fromSym.r, toSym.r)
+            Math.max(fromSym.r, toSym.r),
+            { x: toSym.x - fromSym.x, y: toSym.y - fromSym.y }
           );
         }
       }
@@ -15496,7 +15677,7 @@
 
     for (var cri = 0; cri < connectorRoutes.length; cri++) {
       var routeInfo = connectorRoutes[cri];
-      if (!routeInfo.conn.label) continue;
+      if (!routeInfo.conn.label && !routeInfo.conn.labelDirection) continue;
       // Skip connector label when source or target is a standalone lollipop port —
       // the lollipop already renders its own label at the symbol, so a connector
       // label would double up and overlap it.
@@ -15510,6 +15691,7 @@
       }
       var labelPlacement = placeComponentConnectorLabel(
         routeInfo.conn.label,
+        routeInfo.conn.labelDirection,
         routeInfo.points,
         routeInfo.routeIndex,
         labelObstacles,
@@ -15519,9 +15701,25 @@
         { preferredVerticalSide: preferredLabelVerticalSide(routeInfo) }
       );
       if (!labelPlacement) continue;
-      placedLabels.push(labelPlacement.rect);
       labelPlacement.label = routeInfo.conn.label;
-      pushComponentLabelText(svg, labelPlacement, colors, CFG);
+      var componentLabelRect = labelPlacement.rect;
+      if (routeInfo.conn.label) {
+        pushComponentLabelText(svg, labelPlacement, colors, CFG);
+      }
+      var componentTextMetrics = componentLabelMetrics(routeInfo.conn.label || '', CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+      var componentDirectionRect = UMLShared.pushLabelDirectionTriangle(
+        svg,
+        routeInfo.conn.label,
+        routeInfo.conn.labelDirection,
+        labelPlacement,
+        routeInfo.points,
+        colors,
+        {
+          fontSize: CFG.fontSize,
+          textRect: makeComponentLabelRect(labelPlacement.x, labelPlacement.y, componentTextMetrics, labelPlacement.anchor)
+        }
+      );
+      placedLabels.push(UMLShared.unionRects(componentLabelRect, componentDirectionRect));
     }
 
     // ── Draw component boxes ──
@@ -15999,12 +16197,12 @@
       var linkMatch = line.match(/^(\S+)\s+(-->|\.\.>|--)\s+(\S+)\s*(?::\s*(.*))?$/);
       if (linkMatch) {
         var from = linkMatch[1], arrow = linkMatch[2], to = linkMatch[3];
-        var label = (linkMatch[4] || '').trim();
+        var linkLabelInfo = UMLShared.parseLabelDirectionCue(linkMatch[4] || '');
         // Ensure nodes exist
         if (!nodeMap[from]) { nodeMap[from] = { name: from, isInstance: from.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[from]); }
         if (!nodeMap[to]) { nodeMap[to] = { name: to, isInstance: to.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[to]); }
         var type = arrow === '..>' ? 'dependency' : 'link';
-        links.push({ from: from, to: to, type: type, label: label });
+        links.push({ from: from, to: to, type: type, label: linkLabelInfo.text, labelDirection: linkLabelInfo.hasDirection });
         continue;
       }
     }
@@ -16049,7 +16247,9 @@
     // Compute link label widths for gap sizing
     var maxLabelW = 0;
     for (var li = 0; li < links.length; li++) {
-      if (links[li].label) maxLabelW = Math.max(maxLabelW, UMLShared.textWidth(links[li].label, false, CFG.fontSize));
+      if (links[li].label || links[li].labelDirection) {
+        maxLabelW = Math.max(maxLabelW, UMLShared.labelDirectionTextWidth(links[li].label, links[li].labelDirection, CFG.fontSize));
+      }
     }
     var effectiveGapX = Math.max(CFG.gapX, maxLabelW + 40);
     var deployGapY = CFG.gapY;
@@ -16079,11 +16279,11 @@
     for (var deri = 0; deri < links.length; deri++) {
       var dlk = links[deri];
       if (!dlk || dlk.from === dlk.to) continue;
-      var dlw = dlk.label ? UMLShared.textWidth(dlk.label, false, CFG.fontSize) : 0;
+      var dlw = (dlk.label || dlk.labelDirection) ? UMLShared.labelDirectionTextWidth(dlk.label, dlk.labelDirection, CFG.fontSize) : 0;
       depEdgeSizes.push({
         source: dlk.from, target: dlk.to,
         labelWidth: dlw,
-        labelHeight: dlk.label ? depLineHeight : 0,
+        labelHeight: (dlk.label || dlk.labelDirection) ? depLineHeight : 0,
         markerExtent: CFG.arrowSize + CFG.node3dDepth,
         padding: 6
       });
@@ -16117,8 +16317,8 @@
     // Expand bounds to account for link labels that may extend beyond nodes
     var maxLabelH = 0, maxLabelWHalf = 0;
     for (var dli = 0; dli < links.length; dli++) {
-      if (links[dli].label) {
-        var dlW = UMLShared.textWidth(links[dli].label, false, CFG.fontSize);
+      if (links[dli].label || links[dli].labelDirection) {
+        var dlW = UMLShared.labelDirectionTextWidth(links[dli].label, links[dli].labelDirection, CFG.fontSize);
         maxLabelWHalf = Math.max(maxLabelWHalf, dlW / 2 + 10);
         maxLabelH = Math.max(maxLabelH, CFG.fontSize + 16);
       }
@@ -16549,8 +16749,9 @@
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
       // Label — obstacle-aware placement over orthogonal routes
-      if (lk.label) {
-        var labelPlacement = UMLShared.placeOrthogonalLabel(lk.label, points, obstacles, placedLabels, {
+      if (lk.label || lk.labelDirection) {
+        var deploymentLabelText = UMLShared.labelDirectionPlacementText(lk.label, lk.labelDirection);
+        var labelPlacement = UMLShared.placeOrthogonalLabel(deploymentLabelText, points, obstacles, placedLabels, {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
           endpointPad: 22,
@@ -16559,11 +16760,23 @@
           }
         });
         if (labelPlacement) {
-          placedLabels.push(labelPlacement.rect);
-          labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
-            '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke" font-style="italic">' +
-            UMLShared.escapeXml(lk.label) + '</text>');
+          var deploymentLabelRect = labelPlacement.rect;
+          if (lk.label) {
+            labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
+              '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke" font-style="italic">' +
+              UMLShared.escapeXml(lk.label) + '</text>');
+          }
+          var deploymentDirectionRect = UMLShared.pushLabelDirectionTriangle(
+            labelSvg,
+            lk.label,
+            lk.labelDirection,
+            labelPlacement,
+            points,
+            colors,
+            { fontSize: CFG.fontSize }
+          );
+          placedLabels.push(UMLShared.unionRects(deploymentLabelRect, deploymentDirectionRect));
         }
       }
       placedRouteSegments = placedRouteSegments.concat(routeSegments);
@@ -16905,11 +17118,13 @@
       // Include/Extend: A ..> B : <<include>>  or  A ..> B : <<extend>>
       var dottedMatch = line.match(/^(\S+)\s+\.\.>\s+(\S+)\s*(?::\s*(.*))?$/);
       if (dottedMatch) {
+        var dottedLabelInfo = UMLShared.parseLabelDirectionCue(dottedMatch[3] || '');
         relationships.push({
           from: dottedMatch[1],
           to: dottedMatch[2],
           type: 'dependency',
-          label: dottedMatch[3] ? dottedMatch[3].trim() : '',
+          label: dottedLabelInfo.text,
+          labelDirection: dottedLabelInfo.hasDirection,
         });
         continue;
       }
@@ -16917,11 +17132,13 @@
       // Directed association: A --> B
       var directedMatch = line.match(/^(\S+)\s+-->\s+(\S+)\s*(?::\s*(.*))?$/);
       if (directedMatch) {
+        var directedLabelInfo = UMLShared.parseLabelDirectionCue(directedMatch[3] || '');
         relationships.push({
           from: directedMatch[1],
           to: directedMatch[2],
           type: 'directed',
-          label: directedMatch[3] ? directedMatch[3].trim() : '',
+          label: directedLabelInfo.text,
+          labelDirection: directedLabelInfo.hasDirection,
         });
         continue;
       }
@@ -16929,11 +17146,13 @@
       // Association: A -- B
       var assocMatch = line.match(/^(\S+)\s+--\s+(\S+)\s*(?::\s*(.*))?$/);
       if (assocMatch) {
+        var assocLabelInfo = UMLShared.parseLabelDirectionCue(assocMatch[3] || '');
         relationships.push({
           from: assocMatch[1],
           to: assocMatch[2],
           type: 'association',
-          label: assocMatch[3] ? assocMatch[3].trim() : '',
+          label: assocLabelInfo.text,
+          labelDirection: assocLabelInfo.hasDirection,
         });
         continue;
       }
@@ -17435,11 +17654,12 @@
       var ufromId = parsed.aliasToId[urel.from] || urel.from;
       var utoId = parsed.aliasToId[urel.to] || urel.to;
       if (ufromId === utoId) continue;
-      var ulw = urel.label ? UMLShared.textWidth(urel.label, false, CFG.fontSize) : 0;
+      var hasUsecaseLabel = !!(urel.label || urel.labelDirection);
+      var ulw = hasUsecaseLabel ? UMLShared.labelDirectionTextWidth(urel.label, urel.labelDirection, CFG.fontSize) : 0;
       ucEdgeSizes.push({
         source: ufromId, target: utoId,
         labelWidth: ulw,
-        labelHeight: urel.label ? ucLineHeight : 0,
+        labelHeight: hasUsecaseLabel ? ucLineHeight : 0,
         markerExtent: CFG.arrowSize,
         padding: 6
       });
@@ -17686,7 +17906,7 @@
       // 'association' has no arrowhead
 
       // Label
-      if (rel.label) {
+      if (rel.label || rel.labelDirection) {
         var lineDx = p2.x - p1.x;
         var lineDy = p2.y - p1.y;
         var isMostlyVertical = Math.abs(lineDx) < Math.abs(lineDy);
@@ -17697,10 +17917,21 @@
           lx += 16;
           labelAnchor = 'start';
         }
-        labelSvg.push('<text x="' + lx + '" y="' + ly +
-          '" text-anchor="' + labelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-          '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-          UMLShared.escapeXml(rel.label) + '</text>');
+        if (rel.label) {
+          labelSvg.push('<text x="' + lx + '" y="' + ly +
+            '" text-anchor="' + labelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+            UMLShared.escapeXml(rel.label) + '</text>');
+        }
+        UMLShared.pushLabelDirectionTriangle(
+          labelSvg,
+          rel.label,
+          rel.labelDirection,
+          { x: lx, y: ly, anchor: labelAnchor },
+          [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }],
+          colors,
+          { fontSize: CFG.fontSize }
+        );
       }
     }
 
@@ -18125,7 +18356,8 @@
     }
 
     function addEdge(fromId, toId, guard) {
-      edges.push({ from: fromId, to: toId, guard: guard || '' });
+      var guardInfo = UMLShared.parseLabelDirectionCue(guard || '');
+      edges.push({ from: fromId, to: toId, guard: guardInfo.text, guardDirection: guardInfo.hasDirection });
     }
 
     // After endif, pending branch endpoints need to connect to the next
@@ -18959,9 +19191,14 @@
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
       // Guard label
-      if (tr.guard) {
-        var guardText = '[' + tr.guard + ']';
-        var guardPlacement = UMLShared.placeOrthogonalLabel(guardText, points, activityObstacles, placedLabels, {
+      if (tr.guard || tr.guardDirection) {
+        var guardText = tr.guard ? '[' + tr.guard + ']' : '';
+        var guardPlacement = UMLShared.placeOrthogonalLabel(
+          UMLShared.labelDirectionPlacementText(guardText, tr.guardDirection),
+          points,
+          activityObstacles,
+          placedLabels,
+          {
           fontSize: CFG.fontSize,
           otherSegments: placedRouteSegments,
           endpointPad: 18,
@@ -18975,11 +19212,23 @@
           }
         });
         if (guardPlacement) {
-          placedLabels.push(guardPlacement.rect);
-          labelSvg.push('<text x="' + guardPlacement.x + '" y="' + guardPlacement.y +
-            '" text-anchor="' + guardPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-            UMLShared.escapeXml(guardText) + '</text>');
+          var guardLabelRect = guardPlacement.rect;
+          if (guardText) {
+            labelSvg.push('<text x="' + guardPlacement.x + '" y="' + guardPlacement.y +
+              '" text-anchor="' + guardPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+              UMLShared.escapeXml(guardText) + '</text>');
+          }
+          var guardDirectionRect = UMLShared.pushLabelDirectionTriangle(
+            labelSvg,
+            guardText,
+            tr.guardDirection,
+            guardPlacement,
+            points,
+            colors,
+            { fontSize: CFG.fontSize }
+          );
+          placedLabels.push(UMLShared.unionRects(guardLabelRect, guardDirectionRect));
         }
       }
       placedRouteSegments = placedRouteSegments.concat(routeSegments);
@@ -19291,6 +19540,7 @@
         var to = edgeMatch[3];
         var label = edgeMatch[4] || '';
         if (label) label = label.replace(/^"(.*)"$/, '$1').trim();
+        var edgeLabelInfo = UMLShared.parseLabelDirectionCue(label);
 
         var style = 'solid';
         if (op.indexOf('..') !== -1) style = 'dashed';
@@ -19304,7 +19554,7 @@
         else if (hasLeft) dir = 'backward';
         else dir = 'none';
 
-        edges.push({ from: from, to: to, style: style, direction: dir, label: label });
+        edges.push({ from: from, to: to, style: style, direction: dir, label: edgeLabelInfo.text, labelDirection: edgeLabelInfo.hasDirection });
         continue;
       }
     }
@@ -19554,17 +19804,25 @@
         style: tr.style,
         direction: tr.direction,
         label: tr.label || '',
+        labelDirection: tr.labelDirection,
         labelPlacement: null
       };
 
-      if (tr.label) {
-        var placement = UMLShared.placeOrthogonalLabel(tr.label, points, obstacles, placedLabelRects, {
+      if (tr.label || tr.labelDirection) {
+        var placement = UMLShared.placeOrthogonalLabel(UMLShared.labelDirectionPlacementText(tr.label, tr.labelDirection), points, obstacles, placedLabelRects, {
           fontSize: CFG.fontSize,
           endpointPad: 14,
           preferredPointWeight: 0.45
         });
         if (placement) {
-          placedLabelRects.push(placement.rect);
+          var freeformDirectionRect = UMLShared.buildLabelDirectionTriangle(
+            tr.label,
+            tr.labelDirection,
+            placement,
+            points,
+            { fontSize: CFG.fontSize }
+          );
+          placedLabelRects.push(UMLShared.unionRects(placement.rect, freeformDirectionRect && freeformDirectionRect.rect));
           descriptor.labelPlacement = placement;
         }
       }
@@ -19636,10 +19894,21 @@
       var d2 = edgeDescriptors[di2];
       if (!d2 || !d2.labelPlacement) continue;
       var p = d2.labelPlacement;
-      svg.push('<text x="' + p.x + '" y="' + p.y +
-        '" text-anchor="' + p.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-        '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
-        UMLShared.escapeXml(d2.label) + '</text>');
+      if (d2.label) {
+        svg.push('<text x="' + p.x + '" y="' + p.y +
+          '" text-anchor="' + p.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+          '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+          UMLShared.escapeXml(d2.label) + '</text>');
+      }
+      UMLShared.pushLabelDirectionTriangle(
+        svg,
+        d2.label,
+        d2.labelDirection,
+        p,
+        d2.points,
+        colors,
+        { fontSize: CFG.fontSize }
+      );
     }
 
     // Notes
