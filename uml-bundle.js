@@ -4843,6 +4843,32 @@
     { token: '--',  type: 'association', navigability: 'unspecified' },
   ];
 
+  function parseRelationshipLabelDirection(label) {
+    var text = (label || '').trim();
+    var hasDirection = false;
+
+    if (/^[<>]$/.test(text)) {
+      return { text: '', hasDirection: true };
+    }
+
+    var leading = text.match(/^([<>])\s+(.+)$/);
+    if (leading) {
+      hasDirection = true;
+      text = leading[2].trim();
+    }
+
+    var trailing = text.match(/^(.+?)\s+([<>])$/);
+    if (trailing) {
+      hasDirection = true;
+      text = trailing[1].trim();
+    }
+
+    return {
+      text: text,
+      hasDirection: hasDirection
+    };
+  }
+
   /**
    * Parse a relationship line.
    * Format: From [mult] token [mult] To [: label]
@@ -4858,9 +4884,13 @@
 
       // Extract label after ':'
       var label = '';
+      var labelDirection = false;
       var colonIdx = rightPart.lastIndexOf(' : ');
       if (colonIdx !== -1) {
         label = rightPart.substring(colonIdx + 3).trim();
+        var labelInfo = parseRelationshipLabelDirection(label);
+        label = labelInfo.text;
+        labelDirection = labelInfo.hasDirection;
         rightPart = rightPart.substring(0, colonIdx).trim();
       }
 
@@ -4915,6 +4945,7 @@
         type: pat.type,
         navigability: pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified'),
         label: label,
+        labelDirection: labelDirection,
         fromMult: fromMult,
         toMult: toMult,
       };
@@ -5103,6 +5134,15 @@
     };
   }
 
+  function classRelationLabelPlacementText(rel) {
+    return rel && rel.label ? rel.label : (rel && rel.labelDirection ? ' ' : '');
+  }
+
+  function classRelationLabelWidth(rel, fontSize) {
+    var text = classRelationLabelPlacementText(rel);
+    var width = UMLShared.textWidth(text, false, fontSize || CFG.fontSizeStereotype);
+    return width + (rel && rel.labelDirection ? 18 : 0);
+  }
 
   /**
    * Compute layout positions for all class boxes using AdvancedAlgorithmic framework.
@@ -5173,8 +5213,8 @@
     for (var rg = 0; rg < relationships.length; rg++) {
       var rgRel = relationships[rg];
       var neededW = 0;
-      if (rgRel.label) {
-        neededW = Math.max(neededW, UMLShared.textWidth(rgRel.label, false, CFG.fontSizeStereotype) + 40);
+      if (rgRel.label || rgRel.labelDirection) {
+        neededW = Math.max(neededW, classRelationLabelWidth(rgRel, CFG.fontSizeStereotype) + 40);
       }
       var multW = 0;
       if (rgRel.fromMult) multW += UMLShared.textWidth(rgRel.fromMult, false, CFG.fontSizeStereotype) + 12;
@@ -5244,10 +5284,10 @@
       var rrel = relationships[resi];
       if (!rrel || rrel.from === rrel.to) continue;
       var maxLbl = 0;
-      if (rrel.label) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.label, false, CFG.fontSizeStereotype));
+      if (rrel.label || rrel.labelDirection) maxLbl = Math.max(maxLbl, classRelationLabelWidth(rrel, CFG.fontSizeStereotype));
       if (rrel.fromMult) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.fromMult, false, CFG.fontSizeStereotype));
       if (rrel.toMult) maxLbl = Math.max(maxLbl, UMLShared.textWidth(rrel.toMult, false, CFG.fontSizeStereotype));
-      var multCount = (rrel.label ? 1 : 0) + (rrel.fromMult ? 1 : 0) + (rrel.toMult ? 1 : 0);
+      var multCount = ((rrel.label || rrel.labelDirection) ? 1 : 0) + (rrel.fromMult ? 1 : 0) + (rrel.toMult ? 1 : 0);
       classEdgeSizes.push({
         source: rrel.from,
         target: rrel.to,
@@ -5668,6 +5708,120 @@
       };
     }
 
+    function classUnionRects(a, b) {
+      if (!a) return b;
+      if (!b) return a;
+      return {
+        left: Math.min(a.left, b.left),
+        right: Math.max(a.right, b.right),
+        top: Math.min(a.top, b.top),
+        bottom: Math.max(a.bottom, b.bottom)
+      };
+    }
+
+    function classRouteDirectionAtPlacement(points, placement) {
+      var best = null;
+      var bestDist = Infinity;
+      if (!points || points.length < 2 || !placement) return { x: 1, y: 0 };
+
+      for (var di = 0; di < points.length - 1; di++) {
+        var p0d = points[di];
+        var p1d = points[di + 1];
+        var len = Math.abs(p1d.x - p0d.x) + Math.abs(p1d.y - p0d.y);
+        if (len < 1) continue;
+
+        var closestX;
+        var closestY;
+        var vx = 0;
+        var vy = 0;
+        if (Math.abs(p1d.y - p0d.y) < 1) {
+          closestX = Math.max(Math.min(p0d.x, p1d.x), Math.min(Math.max(p0d.x, p1d.x), placement.x));
+          closestY = p0d.y;
+          vx = p1d.x >= p0d.x ? 1 : -1;
+        } else if (Math.abs(p1d.x - p0d.x) < 1) {
+          closestX = p0d.x;
+          closestY = Math.max(Math.min(p0d.y, p1d.y), Math.min(Math.max(p0d.y, p1d.y), placement.y));
+          vy = p1d.y >= p0d.y ? 1 : -1;
+        } else {
+          continue;
+        }
+
+        var dist = Math.abs(placement.x - closestX) + Math.abs(placement.y - closestY) - len * 0.001;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { x: vx, y: vy };
+        }
+      }
+
+      return best || { x: 1, y: 0 };
+    }
+
+    function classAssociationLabelTriangle(rel, placement, points, fontSize) {
+      if (!rel || !rel.labelDirection || !placement) return null;
+      var fs = fontSize || CFG.fontSizeStereotype;
+      var text = rel.label || '';
+      var rect = classTextRect(text, placement.x, placement.y, placement.anchor, fs);
+      var dir = classRouteDirectionAtPlacement(points, placement);
+      var size = 5;
+      var gap = text ? 7 : 0;
+      var cx = (rect.left + rect.right) / 2;
+      var cy = (rect.top + rect.bottom) / 2;
+
+      if (Math.abs(dir.x) >= Math.abs(dir.y)) {
+        cx = dir.x >= 0 ? rect.right + gap + size : rect.left - gap - size;
+      } else if (text) {
+        cx = rect.right + gap + size;
+      }
+
+      var poly;
+      if (Math.abs(dir.x) >= Math.abs(dir.y)) {
+        if (dir.x >= 0) {
+          poly = [
+            { x: cx + size, y: cy },
+            { x: cx - size, y: cy - size },
+            { x: cx - size, y: cy + size }
+          ];
+        } else {
+          poly = [
+            { x: cx - size, y: cy },
+            { x: cx + size, y: cy - size },
+            { x: cx + size, y: cy + size }
+          ];
+        }
+      } else if (dir.y >= 0) {
+        poly = [
+          { x: cx, y: cy + size },
+          { x: cx - size, y: cy - size },
+          { x: cx + size, y: cy - size }
+        ];
+      } else {
+        poly = [
+          { x: cx, y: cy - size },
+          { x: cx - size, y: cy + size },
+          { x: cx + size, y: cy + size }
+        ];
+      }
+
+      return {
+        points: poly,
+        rect: {
+          left: Math.min(poly[0].x, poly[1].x, poly[2].x),
+          right: Math.max(poly[0].x, poly[1].x, poly[2].x),
+          top: Math.min(poly[0].y, poly[1].y, poly[2].y),
+          bottom: Math.max(poly[0].y, poly[1].y, poly[2].y)
+        }
+      };
+    }
+
+    function pushClassAssociationLabelTriangle(target, rel, placement, points, fontSize) {
+      var triangle = classAssociationLabelTriangle(rel, placement, points, fontSize);
+      if (!triangle) return null;
+      var pts = triangle.points.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      target.push('<polygon class="uml-association-label-direction" points="' + pts + '" fill="' + colors.text + '" ' +
+        'stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"/>');
+      return triangle.rect;
+    }
+
     function classObstacleRect(obstacle) {
       if (!obstacle) return null;
       if (typeof obstacle.left === 'number' && typeof obstacle.right === 'number' &&
@@ -6042,8 +6196,8 @@
     }
 
     function placeClassRelationLabel(routeInfo) {
-      if (!routeInfo.rel.label) return null;
-      return UMLShared.placeOrthogonalLabel(routeInfo.rel.label, routeInfo.points, classObstacles.concat(noteMarkerObstacles), placedLabels, {
+      if (!routeInfo.rel.label && !routeInfo.rel.labelDirection) return null;
+      return UMLShared.placeOrthogonalLabel(classRelationLabelPlacementText(routeInfo.rel), routeInfo.points, classObstacles.concat(noteMarkerObstacles), placedLabels, {
         fontSize: CFG.fontSizeStereotype,
         otherSegments: classOtherRouteSegments(noteRouteSegments, routeInfo.routeIndex),
         endpointPad: 20,
@@ -6833,8 +6987,18 @@
       var labelRouteInfo = classRelationTextQueue[cli];
       var labelPlacement = placeClassRelationLabel(labelRouteInfo);
       if (labelPlacement) {
-        placedLabels.push(labelPlacement.rect);
-        pushClassTextSvg(labelSvg, labelRouteInfo.rel.label, labelPlacement, CFG.fontSizeStereotype, 'italic');
+        var labelRect = labelPlacement.rect;
+        if (labelRouteInfo.rel.label) {
+          pushClassTextSvg(labelSvg, labelRouteInfo.rel.label, labelPlacement, CFG.fontSizeStereotype, 'italic');
+        }
+        var directionRect = pushClassAssociationLabelTriangle(
+          labelSvg,
+          labelRouteInfo.rel,
+          labelPlacement,
+          labelRouteInfo.points,
+          CFG.fontSizeStereotype
+        );
+        placedLabels.push(classUnionRects(labelRect, directionRect));
       }
     }
 
@@ -10492,6 +10656,7 @@
  *     portin "name" as alias     Incoming port placed on the left edge
  *     portout "name" as alias    Outgoing port placed on the right edge
  *   }
+ *   port "name" as alias         Standalone labelled port
  *     provide "name" as alias    Provided interface (lollipop ○)
  *     require "name" as alias    Required interface (socket arc)
  *   }
@@ -10530,14 +10695,31 @@
     ifaceStick: 20,   // length of line from component edge to interface symbol center
   };
   var COMPONENT_CONNECTOR_LABEL_MAX_WIDTH = 180;
+  var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
 
   // ─── Parser ───────────────────────────────────────────────────────
+
+  function stripComponentDashedStyle(line) {
+    var m = line.match(/\s+dashed(\s*\{?\s*)$/i);
+    if (!m) return { stripped: line, visualStyle: null };
+
+    var head = line.substring(0, line.length - m[0].length);
+    // `component dashed` and `port dashed` are names, not styled declarations.
+    if (/^(?:component|portin|portout|port|provide|require)$/i.test(head.trim())) {
+      return { stripped: line, visualStyle: null };
+    }
+
+    var stripped = m[1].indexOf('{') !== -1 ? head + ' {' : head;
+    return { stripped: stripped.trim(), visualStyle: 'dashed' };
+  }
 
   // Parse a single port line: (portin|portout|port) ["name"] [as alias]
   // Returns { name, alias, direction } or null.
   function parsePortLine(line) {
-    var m = line.match(/^(portin|portout|port|provide|require)\s+"([^"]+)"(?:\s+as\s+(\S+))?/) ||
-            line.match(/^(portin|portout|port|provide|require)\s+(\S+?)(?:\s+as\s+(\S+))?$/);
+    var styleInfo = stripComponentDashedStyle(line);
+    var cleanLine = styleInfo.stripped;
+    var m = cleanLine.match(/^(portin|portout|port|provide|require)\s+"([^"]+)"(?:\s+as\s+(\S+))?$/) ||
+            cleanLine.match(/^(portin|portout|port|provide|require)\s+(\S+?)(?:\s+as\s+(\S+))?$/);
     if (!m) return null;
     var kw = m[1], displayName = m[2], alias = m[3] || displayName;
     var direction, kind = null;
@@ -10546,7 +10728,7 @@
     else if (kw === 'provide') { direction = 'out'; kind = 'provide'; }
     else if (kw === 'require') { direction = 'in'; kind = 'require'; }
     else direction = null;
-    return { name: displayName, alias: alias, direction: direction, kind: kind };
+    return { name: displayName, alias: alias, direction: direction, kind: kind, visualStyle: styleInfo.visualStyle };
   }
 
   // Merge a new set of ports into an existing component, preserving order and
@@ -10558,7 +10740,15 @@
     for (var k = 0; k < existingComp.ports.length; k++) seen[existingComp.ports[k].alias] = true;
     for (var pi = 0; pi < newPorts.length; pi++) {
       var p = newPorts[pi];
-      if (seen[p.alias]) continue;
+      if (seen[p.alias]) {
+        for (var epi = 0; epi < existingComp.ports.length; epi++) {
+          if (existingComp.ports[epi].alias === p.alias && p.visualStyle) {
+            existingComp.ports[epi].visualStyle = p.visualStyle;
+            break;
+          }
+        }
+        continue;
+      }
       existingComp.ports.push(p);
       seen[p.alias] = true;
       portAliasMap[p.alias] = { comp: existingComp.name, name: p.name, kind: p.kind || null };
@@ -10635,14 +10825,19 @@
       // Strip optional `#color` highlight suffix before other declarations.
       // Guard: don't swallow bare component/bracket names when they happen
       // to collide with a texture keyword.
-      var compHl = UMLShared.parseHighlightColor(line);
+      var compStyleInfo = stripComponentDashedStyle(line);
+      var compHl = UMLShared.parseHighlightColor(compStyleInfo.stripped);
       var compLine = line;
       var compHighlight = null;
       var compTexture = null;
-      if (/^(?:component\s+\S|\[[^\]]+\])/i.test(compHl.stripped) || compHl.highlight) {
+      var compVisualStyle = compStyleInfo.visualStyle;
+      var looksLikeComponentDecl = /^(?:component\s+\S|\[[^\]]+\])/i.test(compHl.stripped);
+      if (looksLikeComponentDecl) {
         compLine = compHl.stripped;
         compHighlight = compHl.highlight;
         compTexture = compHl.texture;
+      } else {
+        compVisualStyle = null;
       }
 
       // Component declaration with optional port block. Accepts any of:
@@ -10684,7 +10879,7 @@
             // Inline: component Foo { portout "p1" as a1 portin "p2" as a2 }
             var inlineBody = line.match(/\{([^}]*)\}/);
             if (inlineBody) {
-              var portRe = /(portin|portout|port|provide|require)\s+(?:"([^"]+)"|(\w+))(?:\s+as\s+(\w+))?/g;
+              var portRe = /(portin|portout|port|provide|require)\s+(?:"([^"]+)"|(\w+))(?:\s+as\s+(\w+))?(?:\s+(dashed))?/g;
               var pm;
               while ((pm = portRe.exec(inlineBody[1])) !== null) {
                 var kw = pm[1], displayName = pm[2] || pm[3], alias = pm[4] || displayName;
@@ -10694,7 +10889,7 @@
                 else if (kw === 'provide') { direction = 'out'; kind2 = 'provide'; }
                 else if (kw === 'require') { direction = 'in'; kind2 = 'require'; }
                 else direction = null;
-                var portEntry = { name: displayName, alias: alias, direction: direction, kind: kind2 };
+                var portEntry = { name: displayName, alias: alias, direction: direction, kind: kind2, visualStyle: pm[5] ? 'dashed' : null };
                 ports.push(portEntry);
                 portAliasMap[alias] = { comp: cName, name: displayName, kind: kind2 };
               }
@@ -10715,11 +10910,12 @@
 
         if (!componentMap.hasOwnProperty(cName)) {
           componentMap[cName] = components.length;
-          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture });
+          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
         } else {
           var existing = components[componentMap[cName]];
           if (compHighlight) existing.highlight = compHighlight;
           if (compTexture) existing.texture = compTexture;
+          if (compVisualStyle) existing.visualStyle = compVisualStyle;
           mergePortsInto(existing, ports, portAliasMap);
         }
         continue;
@@ -10734,10 +10930,40 @@
         if (bLabel !== bName) displayNameMap[bName] = bLabel;
         if (!componentMap.hasOwnProperty(bName)) {
           componentMap[bName] = components.length;
-          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture });
+          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
         } else {
           if (compHighlight) components[componentMap[bName]].highlight = compHighlight;
           if (compTexture) components[componentMap[bName]].texture = compTexture;
+          if (compVisualStyle) components[componentMap[bName]].visualStyle = compVisualStyle;
+        }
+        continue;
+      }
+
+      // Standalone labelled port declaration. These are not owned by a
+      // component box, but connectors can target their alias.
+      var standalonePort = parsePortLine(line);
+      if (standalonePort) {
+        var spName = standalonePort.alias;
+        portAliasMap[standalonePort.alias] = {
+          comp: spName,
+          name: standalonePort.name,
+          kind: standalonePort.kind || null
+        };
+        if (!componentMap.hasOwnProperty(spName)) {
+          componentMap[spName] = components.length;
+          components.push({
+            name: spName,
+            label: standalonePort.name,
+            ports: [standalonePort],
+            standalonePort: true,
+            visualStyle: standalonePort.visualStyle
+          });
+        } else {
+          var spExisting = components[componentMap[spName]];
+          spExisting.label = standalonePort.name;
+          spExisting.standalonePort = true;
+          if (standalonePort.visualStyle) spExisting.visualStyle = standalonePort.visualStyle;
+          mergePortsInto(spExisting, [standalonePort], portAliasMap);
         }
         continue;
       }
@@ -10749,13 +10975,14 @@
       // Connector: alias --> alias  or  Comp.port --> Comp.port  or  Comp --> Comp
       // Also accept bracket endpoints like [Foo] --> [Bar], and quoted labels.
       var connMatch = compLine.match(
-        /^(?:\[([^\]]+)\]|(\S+))\s+(-->|\.\.>|--)\s+(?:\[([^\]]+)\]|(\S+))\s*(?::\s*(.*))?$/
+        /^(?:\[([^\]]+)\]|(\S+))\s+(-->|\.\.>|--)\s+(?:\[([^\]]+)\]|(\S+))(?:\s+(dashed))?\s*(?::\s*(.*))?$/
       );
       if (connMatch) {
         var fromToken = connMatch[1] || connMatch[2];
         var arrow = connMatch[3];
         var toToken = connMatch[4] || connMatch[5];
-        var rawLabel = (connMatch[6] || '').trim();
+        var connVisualStyle = connMatch[6] ? 'dashed' : null;
+        var rawLabel = (connMatch[7] || '').trim();
         // Strip surrounding quotes on connector labels (`"get /users"` → `get /users`).
         var label = rawLabel.replace(/^"([^"]*)"$/, '$1');
 
@@ -10794,7 +11021,7 @@
         if (arrow === '..>') type = 'dependency';
         else if (arrow === '--') type = 'link';
 
-        connectors.push({ from: from, fromPort: fromPort, to: to, toPort: toPort, type: type, label: label });
+        connectors.push({ from: from, fromPort: fromPort, to: to, toPort: toPort, type: type, label: label, visualStyle: connVisualStyle });
         continue;
       }
     }
@@ -10872,7 +11099,16 @@
       }
 
       var w, h;
-      if (hasPorts) {
+      if (c.standalonePort) {
+        var standalonePort = c.ports[0] || {};
+        var standaloneLabel = c.label || standalonePort.name || c.name;
+        var standaloneLabelW = UMLShared.textWidth(standaloneLabel, false, portLblFs);
+        var standaloneSymbolW = standalonePort.kind ? CFG.ifaceSocketRadius * 2 : CFG.portSize;
+        var standaloneSymbolH = standalonePort.kind ? CFG.ifaceSocketRadius * 2 : CFG.portSize;
+        w = Math.ceil(standaloneSymbolW + 10 + standaloneLabelW + 6);
+        h = Math.max(standaloneSymbolH + 8, portLblFs + 12);
+        hasPorts = false;
+      } else if (hasPorts) {
         // Width: must fit name+icon row OR left-labels + gap + right-labels row
         var nameRowW = nameW + CFG.padX + CFG.iconW + 16;
         var portRowW = maxLeftLblW + maxRightLblW + CFG.portSize * 2 + 50;
@@ -10895,6 +11131,7 @@
         portOrderIndex: portOrderIndex,
         portPositions: {},
         hasPorts: hasPorts,
+        standalonePort: !!c.standalonePort,
       };
       layoutNodes.push({ id: c.name, width: Math.ceil(w), height: h, data: c });
     }
@@ -11744,13 +11981,39 @@
 
         var portLabelByAlias = {};
         var portKindByAlias = {};
+        var portVisualStyleByAlias = {};
         for (var pni = 0; pni < e.comp.ports.length; pni++) {
           var p = e.comp.ports[pni];
           portLabelByAlias[p.alias] = p.name;
           if (p.kind) portKindByAlias[p.alias] = p.kind;
+          if (p.visualStyle) portVisualStyleByAlias[p.alias] = p.visualStyle;
         }
 
         e.portPositions = {};
+
+        if (e.standalonePort) {
+          var spDef = e.comp.ports[0];
+          if (spDef) {
+            var spAlias = spDef.alias;
+            var spSide = e.leftPorts.indexOf(spAlias) >= 0 ? 'left' : 'right';
+            var spKind = spDef.kind || null;
+            var spRadius = spKind ? (spKind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius) : portHalf;
+            var spCy = by + bh / 2;
+            var spCx = spSide === 'left' ? bx + spRadius : bx + bw - spRadius;
+            e.portPositions[spAlias] = {
+              x: spCx - spRadius, y: spCy - spRadius,
+              cx: spCx, cy: spCy,
+              connX: spSide === 'left' ? bx : bx + bw,
+              connY: spCy,
+              side: spSide,
+              kind: spKind,
+              label: spDef.name !== undefined ? spDef.name : spAlias,
+              visualStyle: spDef.visualStyle || e.comp.visualStyle || null,
+              standalone: true
+            };
+          }
+          continue;
+        }
 
         var portTop = e.hasPorts ? by + nameAreaH : by;
         var portAreaH = bh - (e.hasPorts ? nameAreaH : 0);
@@ -11768,6 +12031,7 @@
             side: 'left',
             kind: lpK,
             label: portLabelByAlias[lpn] !== undefined ? portLabelByAlias[lpn] : lpn,
+            visualStyle: portVisualStyleByAlias[lpn] || null
           };
         }
 
@@ -11782,6 +12046,7 @@
             side: 'right',
             kind: rpK,
             label: portLabelByAlias[rpn] !== undefined ? portLabelByAlias[rpn] : rpn,
+            visualStyle: portVisualStyleByAlias[rpn] || null
           };
         }
       }
@@ -13052,6 +13317,9 @@
     function interfaceSymbolCenter(pos) {
       if (!pos || (pos.kind !== 'provide' && pos.kind !== 'require')) return null;
       var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
+      if (pos.standalone) {
+        return { x: pos.cx, y: pos.cy, r: radius };
+      }
       return {
         x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
         y: pos.cy,
@@ -13319,6 +13587,7 @@
 
     function componentEndpointX(pos, isJoinedAssembly) {
       if (!pos) return null;
+      if (pos.standalone) return pos.connX;
       if (isJoinedAssembly) return pos.cx;
       if (pos.kind === 'provide') {
         return pos.side === 'right' ? pos.cx + CFG.ifaceStick + CFG.ifaceRadius : pos.cx - CFG.ifaceStick - CFG.ifaceRadius;
@@ -14309,14 +14578,18 @@
       var toE = entries[conn.to];
       if (!fromE || !toE) continue;
 
-      var isDash = conn.type === 'dependency';
-      var dAttr = isDash ? ' stroke-dasharray="8,4"' : '';
+      var isDash = conn.type === 'dependency' || conn.visualStyle === 'dashed';
+      var dAttr = isDash ? COMPONENT_DASH_ATTR : '';
 
       // Detect joined assembly (provide ↔ require via assembly connector)
       var fpPos = conn.fromPort && fromE.portPositions[conn.fromPort] ? fromE.portPositions[conn.fromPort] : null;
       var tpPos = conn.toPort && toE.portPositions[conn.toPort] ? toE.portPositions[conn.toPort] : null;
       var fromKind = fpPos ? fpPos.kind : null;
       var toKind = tpPos ? tpPos.kind : null;
+      var portSymbolDAttr =
+        (conn.visualStyle === 'dashed' ||
+         (fpPos && fpPos.visualStyle === 'dashed') ||
+         (tpPos && tpPos.visualStyle === 'dashed')) ? COMPONENT_DASH_ATTR : '';
       var isJoinedAssembly = conn.type === 'assembly' &&
         ((fromKind === 'provide' && toKind === 'require') || (fromKind === 'require' && toKind === 'provide'));
 
@@ -14325,7 +14598,9 @@
       if (fpPos) {
         y1 = fpPos.connY;
         dir1 = fpPos.side;
-        if (isJoinedAssembly) {
+        if (fpPos.standalone) {
+          x1 = fpPos.connX;
+        } else if (isJoinedAssembly) {
           // Joined: start at component edge
           x1 = fpPos.cx;
         } else if (fpPos.kind === 'provide') {
@@ -14368,7 +14643,9 @@
       if (tpPos) {
         y2 = tpPos.connY;
         dir2 = tpPos.side;
-        if (isJoinedAssembly) {
+        if (tpPos.standalone) {
+          x2 = tpPos.connX;
+        } else if (isJoinedAssembly) {
           x2 = tpPos.cx;
         } else if (tpPos.kind === 'provide') {
           x2 = tpPos.side === 'right' ? tpPos.cx + CFG.ifaceStick + CFG.ifaceRadius :
@@ -15110,24 +15387,24 @@
           pts2 += ' ' + points[pi2].x + ',' + points[pi2].y;
         }
         svg.push('<polyline points="' + pts1 +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
         svg.push('<polyline points="' + pts2 +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
 
         // Draw ball (filled circle)
         svg.push('<circle cx="' + ballCx + '" cy="' + ballCy + '" r="' + ballR +
-          '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
         // Draw socket arc
         if (bsIsH) {
           var socketSweep = ballOnLeft ? '1' : '0';
           svg.push('<path d="M' + socketCx + ',' + (socketCy - socketR) + ' A' + socketR + ',' + socketR +
             ' 0 0,' + socketSweep + ' ' + socketCx + ',' + (socketCy + socketR) +
-            '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+            '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
         } else {
           var vSweep = ballOnTop ? '1' : '0';
           svg.push('<path d="M' + (socketCx - socketR) + ',' + socketCy + ' A' + socketR + ',' + socketR +
             ' 0 0,' + vSweep + ' ' + (socketCx + socketR) + ',' + socketCy +
-            '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+            '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
         }
         placeSharedInterfaceConnectionLabel(sharedInterfaceConnectorLabels[ci], bsMx, bsMy, Math.max(ballR, socketR));
       } else {
@@ -15253,10 +15530,63 @@
       var e = entries[en];
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
       var compFills = UMLShared.highlightFills(colors, e.comp.highlight, e.comp.texture);
+      var compDashAttr = e.comp.visualStyle === 'dashed' ? COMPONENT_DASH_ATTR : '';
+      var portHalf2 = CFG.portSize / 2;
+      var portLblFs2 = CFG.fontSize - 1;
+
+      if (e.standalonePort) {
+        for (var spName in e.portPositions) {
+          var sp = e.portPositions[spName];
+          var spText = sp.label !== undefined ? sp.label : spName;
+          var spDashAttr = sp.visualStyle === 'dashed' ? COMPONENT_DASH_ATTR : '';
+          var spLabelX, spAnchor;
+
+          if (sp.kind === 'provide' || sp.kind === 'require') {
+            var spR = sp.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
+            if (sp.kind === 'provide') {
+              svg.push('<circle cx="' + sp.cx + '" cy="' + sp.cy + '" r="' + spR +
+                '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+            } else if (sp.side === 'right') {
+              svg.push('<path d="M' + sp.cx + ',' + (sp.cy - spR) + ' A' + spR + ',' + spR +
+                ' 0 0,0 ' + sp.cx + ',' + (sp.cy + spR) +
+                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+            } else {
+              svg.push('<path d="M' + sp.cx + ',' + (sp.cy - spR) + ' A' + spR + ',' + spR +
+                ' 0 0,1 ' + sp.cx + ',' + (sp.cy + spR) +
+                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+            }
+            if (sp.side === 'left') {
+              spLabelX = sp.cx + spR + 8;
+              spAnchor = 'start';
+            } else {
+              spLabelX = sp.cx - spR - 8;
+              spAnchor = 'end';
+            }
+          } else {
+            svg.push('<rect x="' + sp.x + '" y="' + sp.y +
+              '" width="' + CFG.portSize + '" height="' + CFG.portSize +
+              '" fill="' + colors.fill + '" stroke="' + colors.stroke +
+              '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+            if (sp.side === 'left') {
+              spLabelX = sp.x + CFG.portSize + 8;
+              spAnchor = 'start';
+            } else {
+              spLabelX = sp.x - 8;
+              spAnchor = 'end';
+            }
+          }
+
+          svg.push('<text x="' + spLabelX + '" y="' + (sp.cy + portLblFs2 * 0.35) +
+            '" text-anchor="' + spAnchor + '" font-size="' + portLblFs2 + '"' +
+            ' font-style="italic" fill="' + colors.text + '">' +
+            UMLShared.escapeXml(spText) + '</text>');
+        }
+        continue;
+      }
 
       // Main rectangle
       svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' + compDashAttr + '/>');
       if (compFills.textureUrl) {
         svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
           '" fill="' + compFills.textureUrl + '" stroke="none"/>');
@@ -15266,11 +15596,11 @@
       var ix = bx + bw - CFG.iconW - 8;
       var iy = by + 6;
       svg.push('<rect x="' + ix + '" y="' + iy + '" width="' + CFG.iconW + '" height="' + CFG.iconH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + CFG.iconH - CFG.iconTabH - 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
 
       if (e.hasPorts) {
         // Name at top-left when component has ports
@@ -15286,11 +15616,10 @@
       }
 
       // ── Draw ports (squares, lollipops, sockets) and labels ──
-      var portHalf2 = CFG.portSize / 2;
-      var portLblFs2 = CFG.fontSize - 1;
       for (var pname in e.portPositions) {
         var pp = e.portPositions[pname];
         var plText = pp.label !== undefined ? pp.label : pname;
+        var portDashAttr = pp.visualStyle === 'dashed' ? COMPONENT_DASH_ATTR : '';
 
         if (pp.kind === 'provide' || pp.kind === 'require') {
           // ── Interface port: lollipop (provide) or socket (require) ──
@@ -15305,16 +15634,16 @@
               ifCx = pp.cx + ifS + ifR;
               // Stick line from component edge
               svg.push('<line x1="' + pp.cx + '" y1="' + ifCy + '" x2="' + (ifCx - ifR) + '" y2="' + ifCy +
-                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               if (pp.kind === 'provide') {
                 // Lollipop: circle at end of stick
                 svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
-                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               } else {
                 // Socket: `(` arc opening right (toward provider)
                 svg.push('<path d="M' + ifCx + ',' + (ifCy - ifR) + ' A' + ifR + ',' + ifR +
                   ' 0 0,0 ' + ifCx + ',' + (ifCy + ifR) +
-                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               }
               // Label centered below the symbol (avoids collision with the opposing port's label)
               labelX = ifCx;
@@ -15323,15 +15652,15 @@
             } else {
               ifCx = pp.cx - ifS - ifR;
               svg.push('<line x1="' + pp.cx + '" y1="' + ifCy + '" x2="' + (ifCx + ifR) + '" y2="' + ifCy +
-                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               if (pp.kind === 'provide') {
                 svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
-                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               } else {
                 // Socket: `)` arc opening left
                 svg.push('<path d="M' + ifCx + ',' + (ifCy - ifR) + ' A' + ifR + ',' + ifR +
                   ' 0 0,1 ' + ifCx + ',' + (ifCy + ifR) +
-                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
               }
               // Label centered below the symbol (avoids collision with the opposing port's label)
               labelX = ifCx;
@@ -15367,7 +15696,7 @@
           svg.push('<rect x="' + pp.x + '" y="' + pp.y +
             '" width="' + CFG.portSize + '" height="' + CFG.portSize +
             '" fill="' + colors.fill + '" stroke="' + colors.stroke +
-            '" stroke-width="' + CFG.strokeWidth + '"/>');
+            '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
 
           // Port label inside the box, next to the port
           var plLabelX, plAnchor;
