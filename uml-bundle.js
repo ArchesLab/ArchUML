@@ -829,6 +829,24 @@
       '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
   }
 
+  function drawNoteConnectorRoute(svg, points, colors) {
+    if (!points || points.length < 2) return;
+    if (points.length === 2) {
+      drawNoteConnector(svg, points[0].x, points[0].y, points[1].x, points[1].y, colors);
+      return;
+    }
+    var pointStr = '';
+    for (var i = 0; i < points.length; i++) {
+      if (i > 0) pointStr += ' ';
+      pointStr += points[i].x + ',' + points[i].y;
+    }
+    var last = points[points.length - 1];
+    svg.push('<polyline class="uml-note-connector" points="' + pointStr +
+      '" fill="none" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="' + NOTE_CFG.connectorDash + '"/>');
+    svg.push('<circle class="uml-note-anchor" cx="' + last.x + '" cy="' + last.y + '" r="' + NOTE_CFG.circleR +
+      '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
+  }
+
   /**
    * Measure a multi-line note. Handles fenced code blocks (```lang ... ```).
    * Returns { width, height, segments } where segments describe code vs text regions.
@@ -1101,7 +1119,11 @@
     }
 
     if (connector) {
-      drawNoteConnector(svg, connector.fromX, connector.fromY, connector.toX, connector.toY, colors);
+      if (connector.points && connector.points.length >= 2) {
+        drawNoteConnectorRoute(svg, connector.points, colors);
+      } else {
+        drawNoteConnector(svg, connector.fromX, connector.fromY, connector.toX, connector.toY, colors);
+      }
     }
     return size;
   }
@@ -2611,6 +2633,7 @@
     drawNote: drawNote,
     measureNote: measureNote,
     drawNoteConnector: drawNoteConnector,
+    drawNoteConnectorRoute: drawNoteConnectorRoute,
     parseNoteLine: parseNoteLine,
     drawActorStickFigure: drawActorStickFigure,
     ACTOR_H: ACTOR_H,
@@ -3678,20 +3701,16 @@
     }
 
     if (layoutPreference === 'compact') {
-      // Compact: try tight gaps in both directions, pick smallest area
-      // Symmetric reductions
+      // Compact keeps the normal layout topology and only trims whitespace.
+      // Avoid heavily biased candidates; those can reshape the diagram enough
+      // to create long connector detours through unrelated model elements.
       addCandidate(direction, gapX, gapY);
-      addCandidate(direction, gapX * 0.85, gapY * 0.85);
-      addCandidate(direction, gapX * 0.7, gapY * 0.7);
-      // Landscape-biased: wider horizontal, tighter vertical
-      addCandidate(direction, gapX * 1.1, gapY * 0.6);
-      addCandidate(direction, gapX * 0.9, gapY * 0.6);
+      addCandidate(direction, gapX * 0.9, gapY * 0.9);
+      addCandidate(direction, gapX * 0.78, gapY * 0.78);
       if (!directionLocked) {
         addCandidate(otherDirection, gapX, gapY);
-        addCandidate(otherDirection, gapX * 0.85, gapY * 0.85);
-        addCandidate(otherDirection, gapX * 0.7, gapY * 0.7);
-        addCandidate(otherDirection, gapX * 1.1, gapY * 0.6);
-        addCandidate(otherDirection, gapX * 0.9, gapY * 0.6);
+        addCandidate(otherDirection, gapX * 0.9, gapY * 0.9);
+        addCandidate(otherDirection, gapX * 0.78, gapY * 0.78);
       }
       return candidates;
     }
@@ -4076,6 +4095,29 @@
     // 1. Build Adjacency & Find Components
     var adj = {}, inDegree = {}, outDegree = {};
     var nodeMap = {};
+    var edgeWeights = {};
+    function edgeKey(src, tgt) { return src + '->' + tgt; }
+    function layoutEdgeWeight(edge) {
+      if (layoutPreference === 'compact' && edge &&
+          (edge.type === 'dependency' || edge.type === 'navigable')) {
+        return 4;
+      }
+      return 1;
+    }
+    function addAdjEdge(src, tgt, weight) {
+      if (!adj[src]) adj[src] = [];
+      adj[src].push(tgt);
+      edgeWeights[edgeKey(src, tgt)] = Math.max(edgeWeights[edgeKey(src, tgt)] || 0, weight || 1);
+    }
+    function removeAdjEdge(src, tgt) {
+      if (!adj[src]) return;
+      var idx = adj[src].indexOf(tgt);
+      if (idx !== -1) adj[src].splice(idx, 1);
+      delete edgeWeights[edgeKey(src, tgt)];
+    }
+    function getEdgeWeight(src, tgt) {
+      return edgeWeights[edgeKey(src, tgt)] || 1;
+    }
     nodes.forEach(function(n) {
       adj[n.id] = [];
       inDegree[n.id] = 0;
@@ -4102,7 +4144,7 @@
       if (src === tgt) return;
       
       // Directed edge
-      adj[src].push(tgt);
+      addAdjEdge(src, tgt, layoutEdgeWeight(e));
       inDegree[tgt]++;
       outDegree[src]++;
       
@@ -4122,7 +4164,9 @@
           newAdj.push(v);
         } else if (recStack[v]) {
           // cycle detected! Reverse the edge virtually
-          adj[v].push(u);
+          var reversedWeight = getEdgeWeight(u, v);
+          addAdjEdge(v, u, reversedWeight);
+          delete edgeWeights[edgeKey(u, v)];
           inDegree[u]++;
           inDegree[v]--;
         } else {
@@ -4170,6 +4214,7 @@
       var s = de.src, t = de.tgt;
       var sl = layers[s], tl = layers[t];
       origEdgesMap[s + '->' + t] = de.orig;
+      var deWeight = layoutEdgeWeight(de.orig);
       
       if (tl - sl > 1) {
         var prev = s;
@@ -4181,17 +4226,16 @@
           
           Object.defineProperty(dummyNodes, dummyId, { value: dummyNodes[dummyId], enumerable: true }); // make sure it's accessible
           
-          adj[prev].push(dummyId);
+          addAdjEdge(prev, dummyId, deWeight);
           adj[dummyId] = [];
           
           // Remove old edge to t? Wait, adj only has end targets originally
           prev = dummyId;
         }
-        adj[prev].push(t);
+        addAdjEdge(prev, t, deWeight);
         
         // Remove s->t from adj[s]
-        var idx = adj[s].indexOf(t);
-        if (idx !== -1) adj[s].splice(idx, 1);
+        removeAdjEdge(s, t);
       }
     });
 
@@ -4212,7 +4256,9 @@
           var t2 = adj[l1[j]] ? adj[l1[j]].filter(function(v) { return l2.indexOf(v) !== -1; }) : [];
           for (var ti = 0; ti < t1.length; ti++)
             for (var tj = 0; tj < t2.length; tj++)
-              if (pos[t1[ti]] > pos[t2[tj]]) c++;
+              if (pos[t1[ti]] > pos[t2[tj]]) {
+                c += getEdgeWeight(l1[i], t1[ti]) * getEdgeWeight(l1[j], t2[tj]);
+              }
         }
       }
       return c;
@@ -4224,12 +4270,21 @@
       return t;
     }
 
-    // Median of neighbor positions
-    function medianOf(neighbors) {
+    // Median of neighbor positions, weighted by edge importance in compact mode.
+    function weightedMedianOf(neighbors, weightFn) {
       if (neighbors.length === 0) return -1;
-      var ps = neighbors.map(function(v) { return pos[v]; }).sort(function(a,b) { return a - b; });
-      if (ps.length % 2 === 1) return ps[Math.floor(ps.length / 2)];
-      return (ps[Math.floor(ps.length / 2) - 1] + ps[Math.floor(ps.length / 2)]) / 2;
+      var items = neighbors.map(function(v) {
+        return { pos: pos[v], weight: Math.max(1, weightFn(v) || 1) };
+      }).sort(function(a, b) { return a.pos - b.pos; });
+      var total = 0;
+      for (var wi = 0; wi < items.length; wi++) total += items[wi].weight;
+      var half = total / 2;
+      var acc = 0;
+      for (var wj = 0; wj < items.length; wj++) {
+        acc += items[wj].weight;
+        if (acc >= half) return items[wj].pos;
+      }
+      return items[items.length - 1].pos;
     }
 
     // Save best ordering found
@@ -4252,12 +4307,16 @@
               if (adj[v] && adj[v].indexOf(u) !== -1) preds.push(v);
             });
             if (useMedian) {
-              var m = medianOf(preds);
+              var m = weightedMedianOf(preds, function(v) { return getEdgeWeight(v, u); });
               score[u] = m >= 0 ? m : pos[u];
             } else {
-              var sum = 0;
-              for (var pi = 0; pi < preds.length; pi++) sum += pos[preds[pi]];
-              score[u] = preds.length > 0 ? sum / preds.length : pos[u];
+              var sum = 0, wsum = 0;
+              for (var pi = 0; pi < preds.length; pi++) {
+                var pw = getEdgeWeight(preds[pi], u);
+                sum += pos[preds[pi]] * pw;
+                wsum += pw;
+              }
+              score[u] = wsum > 0 ? sum / wsum : pos[u];
             }
           });
           g.sort(function(a,b) { return score[a] - score[b]; });
@@ -4271,12 +4330,16 @@
           g.forEach(function(u) {
             var succs = adj[u] ? adj[u].filter(function(v) { return pos[v] !== undefined; }) : [];
             if (useMedian) {
-              var m = medianOf(succs);
+              var m = weightedMedianOf(succs, function(v) { return getEdgeWeight(u, v); });
               score[u] = m >= 0 ? m : pos[u];
             } else {
-              var sum = 0;
-              for (var si = 0; si < succs.length; si++) sum += pos[succs[si]];
-              score[u] = succs.length > 0 ? sum / succs.length : pos[u];
+              var sum = 0, wsum = 0;
+              for (var si = 0; si < succs.length; si++) {
+                var sw = getEdgeWeight(u, succs[si]);
+                sum += pos[succs[si]] * sw;
+                wsum += sw;
+              }
+              score[u] = wsum > 0 ? sum / wsum : pos[u];
             }
           });
           g.sort(function(a,b) { return score[a] - score[b]; });
@@ -5148,13 +5211,13 @@
 
     var attrMaxW = 0;
     for (var a = 0; a < cls.attributes.length; a++) {
-      attrMaxW = Math.max(attrMaxW, UMLShared.textWidth(cls.attributes[a].text, false));
+      attrMaxW = Math.max(attrMaxW, UMLShared.textWidth(cls.attributes[a].text, false, CFG.fontSize));
     }
     var attrH = cls.attributes.length > 0 ? CFG.padY * 2 + cls.attributes.length * CFG.lineHeight : 0;
 
     var methMaxW = 0;
     for (var m = 0; m < cls.methods.length; m++) {
-      methMaxW = Math.max(methMaxW, UMLShared.textWidth(cls.methods[m].text, false));
+      methMaxW = Math.max(methMaxW, UMLShared.textWidth(cls.methods[m].text, false, CFG.fontSize));
     }
     var methH = cls.methods.length > 0 ? CFG.padY * 2 + cls.methods.length * CFG.lineHeight : 0;
 
@@ -5172,6 +5235,96 @@
       methH: methH,
       stereotypeText: stereotypeText,
     };
+  }
+
+  function classDiagramComplexity(parsed) {
+    if (!parsed) return 0;
+    var classes = parsed.classes || [];
+    var relationships = parsed.relationships || [];
+    var notes = parsed.notes || [];
+    var memberRows = 0;
+    for (var i = 0; i < classes.length; i++) {
+      memberRows += (classes[i].attributes ? classes[i].attributes.length : 0) +
+        (classes[i].methods ? classes[i].methods.length : 0);
+    }
+    return classes.length + relationships.length + notes.length * 2 + Math.ceil(memberRows / 2);
+  }
+
+  function adaptiveClassFontBump(parsed) {
+    var classes = parsed && parsed.classes ? parsed.classes.length : 0;
+    var complexity = classDiagramComplexity(parsed);
+    var compactBase = parsed && parsed.layoutPreference === 'compact' ? 2 : 0;
+    if (parsed && parsed.layoutPreference === 'compact' && (classes >= 8 || complexity >= 18)) return 3;
+    if (classes >= 8 || complexity >= 18) return Math.max(compactBase, 2);
+    if (classes >= 6 || complexity >= 13) return Math.max(compactBase, 1);
+    if (compactBase) return compactBase;
+    return 0;
+  }
+
+  function withAdaptiveClassTypography(parsed, fn) {
+    var bump = adaptiveClassFontBump(parsed);
+    if (!bump) return fn();
+    var compactTypography = parsed && parsed.layoutPreference === 'compact';
+
+    var saved = {
+      fontSize: CFG.fontSize,
+      fontSizeBold: CFG.fontSizeBold,
+      fontSizeStereotype: CFG.fontSizeStereotype,
+      lineHeight: CFG.lineHeight,
+      padX: CFG.padX,
+      padY: CFG.padY,
+      labelOffset: CFG.labelOffset,
+      multOffset: CFG.multOffset,
+      svgPad: CFG.svgPad,
+      noteFontSize: UMLShared.NOTE_CFG.fontSize,
+      noteCodeFontSize: UMLShared.NOTE_CFG.codeFontSize,
+      noteLineHeight: UMLShared.NOTE_CFG.lineHeight,
+      notePadX: UMLShared.NOTE_CFG.padX,
+      notePadY: UMLShared.NOTE_CFG.padY
+    };
+
+    try {
+      CFG.fontSize += bump;
+      CFG.fontSizeBold += bump;
+      CFG.fontSizeStereotype += bump;
+      CFG.lineHeight = Math.max(CFG.lineHeight + bump, CFG.fontSize + 8);
+      if (compactTypography) {
+        CFG.padX = Math.max(9, CFG.padX - 4);
+        CFG.padY = Math.max(3, CFG.padY - 2);
+        CFG.svgPad = Math.max(16, CFG.svgPad - 14);
+      } else {
+        CFG.padX += bump;
+        CFG.padY += Math.ceil(bump / 2);
+      }
+      CFG.labelOffset += Math.ceil(bump / 2);
+      CFG.multOffset += bump;
+      UMLShared.NOTE_CFG.fontSize += bump;
+      UMLShared.NOTE_CFG.codeFontSize += bump;
+      UMLShared.NOTE_CFG.lineHeight = Math.max(UMLShared.NOTE_CFG.lineHeight + bump, UMLShared.NOTE_CFG.fontSize + 6);
+      if (compactTypography) {
+        UMLShared.NOTE_CFG.padX = Math.max(9, UMLShared.NOTE_CFG.padX - 3);
+        UMLShared.NOTE_CFG.padY = Math.max(7, UMLShared.NOTE_CFG.padY - 2);
+      } else {
+        UMLShared.NOTE_CFG.padX += bump;
+        UMLShared.NOTE_CFG.padY += Math.ceil(bump / 2);
+      }
+      return fn();
+    } finally {
+      CFG.fontSize = saved.fontSize;
+      CFG.fontSizeBold = saved.fontSizeBold;
+      CFG.fontSizeStereotype = saved.fontSizeStereotype;
+      CFG.lineHeight = saved.lineHeight;
+      CFG.padX = saved.padX;
+      CFG.padY = saved.padY;
+      CFG.labelOffset = saved.labelOffset;
+      CFG.multOffset = saved.multOffset;
+      CFG.svgPad = saved.svgPad;
+      UMLShared.NOTE_CFG.fontSize = saved.noteFontSize;
+      UMLShared.NOTE_CFG.codeFontSize = saved.noteCodeFontSize;
+      UMLShared.NOTE_CFG.lineHeight = saved.noteLineHeight;
+      UMLShared.NOTE_CFG.padX = saved.notePadX;
+      UMLShared.NOTE_CFG.padY = saved.notePadY;
+    }
   }
 
   function countIncomingRelationshipPressure(classes, relationships) {
@@ -5322,6 +5475,7 @@
     var hasHierarchyEdges = relationships.some(function(rel) {
       return rel.type === 'generalization' || rel.type === 'realization';
     });
+    var layoutPreference = parsed.layoutPreference || null;
 
     // Build set of nodes that participate in at least one hierarchy edge.
     // Nodes NOT in any hierarchy are "free" — edges touching them should
@@ -5363,6 +5517,10 @@
       // - there are no hierarchy edges at all, OR
       // - it IS a hierarchy edge, OR
       // - at least one endpoint is a "free" node (not in any hierarchy)
+      // Compact mode keeps the same semantic layering as the normal layout:
+      // it should reduce whitespace, not promote dependency arrows into
+      // hierarchy constraints that can push product classes into a different
+      // row and force realization lines through unrelated boxes.
       var participates = !hasHierarchyEdges ||
         rel.type === 'generalization' || rel.type === 'realization' ||
         !hierNodes[rel.from] || !hierNodes[rel.to];
@@ -5390,7 +5548,6 @@
       effectiveGapX = Math.max(effectiveGapX, neededW);
     }
 
-    var layoutPreference = parsed.layoutPreference || null;
     var effectiveDirection = parsed.direction || 'TB';
     if (hasHierarchyEdges) {
       // UML inheritance hierarchies should read top-to-bottom regardless of
@@ -5418,17 +5575,14 @@
     }
 
     if (layoutPreference === 'compact') {
-      // Measured compact: target a MUCH smaller footprint than normal mode,
-      // falling back to a soft floor only when labels would completely
-      // disappear. We shrink to ~50% (hierarchy) or 55% (free) of normal
-      // gaps, and use *half* the measured floor as the hard lower bound —
-      // labels have white-stroke backgrounds so modest overlap with edges
-      // is visually fine, and the downstream label placer will find
-      // alternate positions for the rest.
-      var compactScaleX = hasHierarchyEdges ? 0.55 : 0.5;
-      var compactScaleY = hasHierarchyEdges ? 0.4 : 0.45;
-      var softFloorX = Math.max(20, Math.round(measuredFloor.minX * 0.45));
-      var softFloorY = Math.max(20, Math.round(measuredFloor.minY * 0.5));
+      // Compact mode should be the normal layout with less whitespace and
+      // larger typography, not a different semantic layout. Keep enough gap
+      // for obstacle-aware routing lanes so relationship lines can avoid
+      // model boxes even in dense diagrams.
+      var compactScaleX = hasHierarchyEdges ? 0.62 : 0.6;
+      var compactScaleY = hasHierarchyEdges ? 0.58 : 0.56;
+      var softFloorX = Math.max(20, Math.round(measuredFloor.minX * 0.62));
+      var softFloorY = Math.max(22, Math.round(measuredFloor.minY * 0.64));
       effectiveGapX = Math.max(softFloorX, Math.round(effectiveGapX * compactScaleX));
       effectiveGapY = Math.max(softFloorY, Math.round(CFG.gapY * compactScaleY));
     } else if (hasHierarchyEdges && layoutPreference === 'landscape') {
@@ -5846,6 +6000,47 @@
       skipNames[fromName] = true;
       skipNames[toName] = true;
       return UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null);
+    }
+
+    function adjustCompactDependencyLane(points, rel, fromName, toName, sourceOffset, targetOffset) {
+      if (!points || points.length < 4) return points;
+      if (parsed.layoutPreference !== 'compact') return points;
+      if (!rel || (rel.type !== 'dependency' && rel.type !== 'navigable')) return points;
+
+      var laneOffset = Math.abs(sourceOffset || 0) >= 3 ? sourceOffset : targetOffset;
+      if (!isFinite(laneOffset) || Math.abs(laneOffset) < 3) return points;
+      laneOffset = Math.max(-18, Math.min(18, laneOffset));
+
+      var bestIndex = -1;
+      var bestLen = 0;
+      for (var api = 0; api < points.length - 1; api++) {
+        var a0 = points[api], a1 = points[api + 1];
+        var len = Math.abs(a1.x - a0.x) + Math.abs(a1.y - a0.y);
+        if (len < 40) continue;
+        var isHorizontal = Math.abs(a0.y - a1.y) < 1;
+        // Prefer the primary horizontal lane; this is where paired factory
+        // dependencies visually merge in compact diagrams.
+        if (isHorizontal && len > bestLen) {
+          bestLen = len;
+          bestIndex = api;
+        }
+      }
+      if (bestIndex < 0) return points;
+
+      var shifted = cloneClassRoutePoints(points);
+      shifted[bestIndex].y += laneOffset;
+      shifted[bestIndex + 1].y += laneOffset;
+      var xMin = Math.min(shifted[bestIndex].x, shifted[bestIndex + 1].x);
+      var xMax = Math.max(shifted[bestIndex].x, shifted[bestIndex + 1].x);
+      var skipNames = {};
+      skipNames[fromName] = true;
+      skipNames[toName] = true;
+      var clearY = UMLShared.findClearY(xMin, xMax, shifted[bestIndex].y, classObstacles, skipNames, classOccupiedSegments);
+      shifted[bestIndex].y = clearY;
+      shifted[bestIndex + 1].y = clearY;
+      shifted = UMLShared.simplifyOrthogonalPath(shifted);
+      if (classRouteHitsNonEndpointClass(shifted, fromName, toName)) return points;
+      return shifted;
     }
 
     // ── Draw relationships ──
@@ -6634,6 +6829,177 @@
       }
     }
 
+    function classObstacleRouteList(pad) {
+      var expanded = [];
+      var inset = typeof pad === 'number' ? pad : 0;
+      for (var coi = 0; coi < classObstacles.length; coi++) {
+        var co = classObstacles[coi];
+        expanded.push({
+          x1: co.x1 - inset,
+          y1: co.y1 - inset,
+          x2: co.x2 + inset,
+          y2: co.y2 + inset,
+          name: co.name
+        });
+      }
+      return expanded;
+    }
+
+    function hierarchySkipNames(group, childName) {
+      var skipNames = {};
+      skipNames[group.target] = true;
+      if (childName) {
+        skipNames[childName] = true;
+      } else {
+        for (var hsc = 0; hsc < group.children.length; hsc++) skipNames[group.children[hsc]] = true;
+      }
+      return skipNames;
+    }
+
+    function hierarchySegmentsHitModel(segments, skipNames) {
+      for (var hsi = 0; hsi < segments.length; hsi++) {
+        var hs = segments[hsi];
+        if (UMLShared.routeHitsObstacle([
+          { x: hs.x1, y: hs.y1 },
+          { x: hs.x2, y: hs.y2 }
+        ], classObstacles, skipNames, null)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function hierarchySharedSegments(group, gk, parentCx, triBot, junctionY, childCxArr) {
+      var segments = [];
+      if (group.children.length === 1) {
+        var child = entries[group.children[0]];
+        if (!child) return segments;
+        var childCx = childCxArr ? childCxArr[0] : childConnX(child, group.children[0], gk);
+        if (Math.abs(parentCx - childCx) < 1) {
+          segments.push({ x1: parentCx, y1: triBot, x2: childCx, y2: child.y });
+        } else {
+          segments.push({ x1: parentCx, y1: triBot, x2: parentCx, y2: junctionY });
+          segments.push({ x1: parentCx, y1: junctionY, x2: childCx, y2: junctionY });
+          segments.push({ x1: childCx, y1: junctionY, x2: childCx, y2: child.y });
+        }
+        return segments;
+      }
+
+      var leftCx = Math.min.apply(null, childCxArr.concat([parentCx]));
+      var rightCx = Math.max.apply(null, childCxArr.concat([parentCx]));
+      segments.push({ x1: parentCx, y1: triBot, x2: parentCx, y2: junctionY });
+      segments.push({ x1: leftCx, y1: junctionY, x2: rightCx, y2: junctionY });
+      for (var hci = 0; hci < group.children.length; hci++) {
+        var ch = entries[group.children[hci]];
+        if (!ch) continue;
+        segments.push({ x1: childCxArr[hci], y1: junctionY, x2: childCxArr[hci], y2: ch.y });
+      }
+      return segments;
+    }
+
+    function drawHierarchySegment(segment, dashAttr) {
+      svg.push('<line x1="' + segment.x1 + '" y1="' + segment.y1 + '" x2="' + segment.x2 + '" y2="' + segment.y2 +
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+      pushOrthogonalSegment(noteRouteSegments, segment.x1, segment.y1, segment.x2, segment.y2);
+      reserveClassHierarchySegment(segment.x1, segment.y1, segment.x2, segment.y2);
+    }
+
+    function drawHierarchyPolyline(points, dashAttr) {
+      if (!points || points.length < 2) return;
+      points = UMLShared.simplifyOrthogonalPath(points);
+      var pointsStr = '';
+      for (var hpi = 0; hpi < points.length; hpi++) {
+        if (hpi > 0) pointsStr += ' ';
+        pointsStr += points[hpi].x + ',' + points[hpi].y;
+      }
+      svg.push('<polyline class="uml-class-hierarchy-route" points="' + pointsStr +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linejoin="round"' + dashAttr + '/>');
+      var routeSegments = UMLShared.buildOrthogonalSegments(points);
+      for (var hrs = 0; hrs < routeSegments.length; hrs++) {
+        noteRouteSegments.push(routeSegments[hrs]);
+      }
+      UMLShared.reserveOrthogonalRoute(points, classOccupiedSegments);
+    }
+
+    function hierarchyOutsideFallback(startPoint, endPoint, skipNames) {
+      var minX = Math.min(startPoint.x, endPoint.x);
+      var maxX = Math.max(startPoint.x, endPoint.x);
+      var hasObstacle = false;
+      for (var hoi = 0; hoi < classObstacles.length; hoi++) {
+        var ob = classObstacles[hoi];
+        if (skipNames && ob.name && skipNames[ob.name]) continue;
+        minX = Math.min(minX, ob.x1);
+        maxX = Math.max(maxX, ob.x2);
+        hasObstacle = true;
+      }
+      var stub = Math.max(18, CFG.junctionGap + 8);
+      var lanes = hasObstacle
+        ? [minX - stub * 1.5, maxX + stub * 1.5]
+        : [Math.min(startPoint.x, endPoint.x) - stub * 1.5, Math.max(startPoint.x, endPoint.x) + stub * 1.5];
+      var sourceStub = { x: startPoint.x, y: startPoint.y + stub };
+      var targetStub = { x: endPoint.x, y: endPoint.y - stub };
+      var best = null;
+      for (var hli = 0; hli < lanes.length; hli++) {
+        var laneX = lanes[hli];
+        var candidate = UMLShared.simplifyOrthogonalPath([
+          { x: startPoint.x, y: startPoint.y },
+          sourceStub,
+          { x: laneX, y: sourceStub.y },
+          { x: laneX, y: targetStub.y },
+          targetStub,
+          { x: endPoint.x, y: endPoint.y }
+        ]);
+        if (UMLShared.routeHitsObstacle(candidate, classObstacles, skipNames, null)) continue;
+        var len = UMLShared.measureOrthogonalRoute(candidate);
+        if (!best || len < best.len) best = { points: candidate, len: len };
+      }
+      return best ? best.points : [startPoint, endPoint];
+    }
+
+    function drawObstacleAwareHierarchyEdge(gk, group, childName, parentCx, triBot, dashAttr) {
+      var child = entries[childName];
+      if (!child) return;
+      var childCx = childConnX(child, childName, gk);
+      var skipNames = hierarchySkipNames(group, childName);
+      var stub = Math.max(18, CFG.junctionGap + 8);
+      var routeObstacles = classObstacleRouteList(12);
+      var sourceAnchor = {
+        x: parentCx,
+        y: triBot,
+        side: 'bottom',
+        stub: stub
+      };
+      var targetAnchor = {
+        x: childCx,
+        y: child.y,
+        side: 'top',
+        stub: stub
+      };
+      var routed = UMLShared.routeOrthogonalConnector(sourceAnchor, targetAnchor, routeObstacles, {
+        skipNames: skipNames,
+        occupied: classOccupiedSegments,
+        clearance: 16,
+        bendPenalty: 54,
+        extraXs: [parentCx, childCx],
+        extraYs: [triBot, child.y]
+      });
+      var points = routed && routed.points ? UMLShared.simplifyOrthogonalPath(routed.points) : null;
+      if (!points || UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null)) {
+        routed = UMLShared.routeOrthogonalConnector(sourceAnchor, targetAnchor, routeObstacles, {
+          skipNames: skipNames,
+          occupied: null,
+          clearance: 20,
+          bendPenalty: 54,
+          extraXs: [parentCx, childCx]
+        });
+        points = routed && routed.points ? UMLShared.simplifyOrthogonalPath(routed.points) : null;
+      }
+      if (!points || UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null)) {
+        points = hierarchyOutsideFallback({ x: parentCx, y: triBot }, { x: childCx, y: child.y }, skipNames);
+      }
+      drawHierarchyPolyline(points, dashAttr);
+    }
+
     // Draw inheritance/realization with shared-target style
     for (var gk in inheritGroups) {
       var group = inheritGroups[gk];
@@ -6660,36 +7026,16 @@
         (parentCx + CFG.triangleW / 2) + ',' + triBot +
         '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
+      var sharedSegments = [];
+      var sharedSkipNames = hierarchySkipNames(group, null);
       if (group.children.length === 1) {
-        // Single child: orthogonal (90-degree) routing
         var child = entries[group.children[0]];
         var childCx = childConnX(child, group.children[0], gk);
         var childTop = child.y;
-        if (Math.abs(parentCx - childCx) < 1) {
-          // Aligned: single vertical line
-          svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + childCx + '" y2="' + childTop +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-          pushOrthogonalSegment(noteRouteSegments, parentCx, triBot, childCx, childTop);
-          reserveClassHierarchySegment(parentCx, triBot, childCx, childTop);
-        } else {
-          // Not aligned: vertical from triangle, horizontal jog, vertical to child
-          var hierJKey = gk + ':' + group.children[0];
-          var junctionY = hierJunctionY[hierJKey] !== undefined ? hierJunctionY[hierJKey] : (triBot + childTop) / 2;
-          svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + parentCx + '" y2="' + junctionY +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-          svg.push('<line x1="' + parentCx + '" y1="' + junctionY + '" x2="' + childCx + '" y2="' + junctionY +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-          svg.push('<line x1="' + childCx + '" y1="' + junctionY + '" x2="' + childCx + '" y2="' + childTop +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-          pushOrthogonalSegment(noteRouteSegments, parentCx, triBot, parentCx, junctionY);
-          pushOrthogonalSegment(noteRouteSegments, parentCx, junctionY, childCx, junctionY);
-          pushOrthogonalSegment(noteRouteSegments, childCx, junctionY, childCx, childTop);
-          reserveClassHierarchySegment(parentCx, triBot, parentCx, junctionY);
-          reserveClassHierarchySegment(parentCx, junctionY, childCx, junctionY);
-          reserveClassHierarchySegment(childCx, junctionY, childCx, childTop);
-        }
+        var hierJKey = gk + ':' + group.children[0];
+        var junctionYSingle = hierJunctionY[hierJKey] !== undefined ? hierJunctionY[hierJKey] : (triBot + childTop) / 2;
+        sharedSegments = hierarchySharedSegments(group, gk, parentCx, triBot, junctionYSingle, [childCx]);
       } else {
-        // Multiple children: shared-target
         var childTops = [];
         var childCxArr = [];
         for (var ci = 0; ci < group.children.length; ci++) {
@@ -6701,29 +7047,16 @@
         // Use pre-computed junction Y if available (may have been adjusted by
         // the pairwise crossing detection pass above)
         var junctionY = hierGroupJunctionY[gk] || (triBot + minChildTop) / 2;
+        sharedSegments = hierarchySharedSegments(group, gk, parentCx, triBot, junctionY, childCxArr);
+      }
 
-        // Trunk: triangle bottom to junction
-        svg.push('<line x1="' + parentCx + '" y1="' + triBot + '" x2="' + parentCx + '" y2="' + junctionY +
-          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-        pushOrthogonalSegment(noteRouteSegments, parentCx, triBot, parentCx, junctionY);
-        reserveClassHierarchySegment(parentCx, triBot, parentCx, junctionY);
-
-        // Horizontal bar at junction
-        var leftCx = Math.min.apply(null, childCxArr.concat([parentCx]));
-        var rightCx = Math.max.apply(null, childCxArr.concat([parentCx]));
-        svg.push('<line x1="' + leftCx + '" y1="' + junctionY + '" x2="' + rightCx + '" y2="' + junctionY +
-          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-        pushOrthogonalSegment(noteRouteSegments, leftCx, junctionY, rightCx, junctionY);
-        reserveClassHierarchySegment(leftCx, junctionY, rightCx, junctionY);
-
-        // Vertical stems from junction to each child
-        for (var ci2 = 0; ci2 < group.children.length; ci2++) {
-          var ch2 = entries[group.children[ci2]];
-          var cx = childCxArr[ci2];
-          svg.push('<line x1="' + cx + '" y1="' + junctionY + '" x2="' + cx + '" y2="' + ch2.y +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
-          pushOrthogonalSegment(noteRouteSegments, cx, junctionY, cx, ch2.y);
-          reserveClassHierarchySegment(cx, junctionY, cx, ch2.y);
+      if (hierarchySegmentsHitModel(sharedSegments, sharedSkipNames)) {
+        for (var hdc = 0; hdc < group.children.length; hdc++) {
+          drawObstacleAwareHierarchyEdge(gk, group, group.children[hdc], parentCx, triBot, dashAttr);
+        }
+      } else {
+        for (var hds = 0; hds < sharedSegments.length; hds++) {
+          drawHierarchySegment(sharedSegments[hds], dashAttr);
         }
       }
     }
@@ -6752,6 +7085,12 @@
       var epToCx = epTo.x + epTo.box.width / 2;
       var epToCy = epTo.y + epTo.box.height / 2;
       var epSide = routeSourceSideForRelation(epFrom, epTo, epRel.type, hasInheritAtBottom[epRel.from]);
+      if (parsed.layoutPreference === 'compact' &&
+          (epRel.type === 'dependency' || epRel.type === 'navigable') &&
+          hasInheritAtTop[epRel.from] &&
+          !hasInheritAtBottom[epRel.from]) {
+        epSide = 'bottom';
+      }
       var epKey = epRel.from + ':' + epSide;
       if (!exitGroups[epKey]) exitGroups[epKey] = [];
       exitGroups[epKey].push({ idx: epi, targetCx: epToCx, targetCy: epToCy, sourceCx: epFromCx, sourceCy: epFromCy });
@@ -6803,6 +7142,12 @@
 
       // Compute orthogonal route, with port offset for multiple edges from same side
       var sourceSide = routeSourceSideForRelation(fromE, toE, orel.type, hasInheritAtBottom[orel.from]);
+      var forceCompactDependencyBelowSource =
+        parsed.layoutPreference === 'compact' &&
+        (orel.type === 'dependency' || orel.type === 'navigable') &&
+        hasInheritAtTop[orel.from] &&
+        !hasInheritAtBottom[orel.from];
+      if (forceCompactDependencyBelowSource) sourceSide = 'bottom';
       var srcKey = orel.from + ':' + sourceSide;
       var srcCount = exitPortCounts[srcKey] || 1;
       var srcPortSpacing = srcCount > 1 ? 22 : 16;
@@ -6815,7 +7160,7 @@
       var tgtCentered = ((entryPortIdx[oi] || 0) - (tgtCount - 1) / 2) * tgtPortSpacing;
       // Don't hard-restrict composition/aggregation to a single side — let the
       // router explore all sides so it can avoid crossings and obstacles.
-      var restrictSourceSide = false;
+      var restrictSourceSide = forceCompactDependencyBelowSource;
 
       var route = computeOrthogonalRoute(
         fromE,
@@ -6889,6 +7234,7 @@
       }
 
       pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
+      pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
       if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
           safePathPoints.length >= 2 &&
           !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
@@ -7181,28 +7527,80 @@
       overlapPad: 10
     });
 
-    var extraLeft = 0, extraRight = 0, extraTop = 0, extraBottom = 0;
-    for (var nbi = 0; nbi < notePositions.length; nbi++) {
-      var np = notePositions[nbi];
-      var minNX = np.x - CFG.svgPad;
-      var maxNX = np.x + np.w + CFG.svgPad;
-      var minNY = np.y - CFG.svgPad;
-      var maxNY = np.y + np.h + CFG.svgPad;
-      if (minNX < -layout.offsetX) extraLeft = Math.max(extraLeft, -layout.offsetX - minNX);
-      if (maxNX > layout.width - layout.offsetX) extraRight = Math.max(extraRight, maxNX - (layout.width - layout.offsetX));
-      if (minNY < -layout.offsetY) extraTop = Math.max(extraTop, -layout.offsetY - minNY);
-      if (maxNY > layout.height - layout.offsetY) extraBottom = Math.max(extraBottom, maxNY - (layout.height - layout.offsetY));
+    var noteBoxObstacles = [];
+    for (var nboi = 0; nboi < notePositions.length; nboi++) {
+      noteBoxObstacles.push({
+        x: notePositions[nboi].x,
+        y: notePositions[nboi].y,
+        w: notePositions[nboi].w,
+        h: notePositions[nboi].h,
+        name: '__note_' + nboi
+      });
     }
 
-    var ox = layout.offsetX + CFG.svgPad + extraLeft;
-    var oy = layout.offsetY + CFG.svgPad + extraTop;
-    var svgW = layout.width + CFG.svgPad * 2 + extraLeft + extraRight;
-    var svgH = layout.height + CFG.svgPad * 2 + extraTop + extraBottom;
-    svg.unshift(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
+    function noteTargetBaseName(targetName) {
+      if (!targetName) return '';
+      var cleanTarget = String(targetName).replace(/^"|"$/g, '').trim();
+      var dotIdx = cleanTarget.indexOf('.');
+      return dotIdx === -1 ? cleanTarget : cleanTarget.substring(0, dotIdx).trim();
+    }
 
-    // ── Draw notes (using pre-computed positions) ──
-    for (var ni = 0; ni < notePositions.length; ni++) {
-      var np2 = notePositions[ni];
+    function noteConnectorSides(position) {
+      if (position === 'right') return { start: 'left', end: 'right' };
+      if (position === 'left') return { start: 'right', end: 'left' };
+      if (position === 'top') return { start: 'bottom', end: 'top' };
+      return { start: 'top', end: 'bottom' };
+    }
+
+    function noteConnectorObstacleList(includeRouteSegments) {
+      var obstacles = classObstacles.concat(noteBoxObstacles);
+      for (var noi2 = 0; noi2 < placedLabels.length; noi2++) obstacles.push(placedLabels[noi2]);
+      for (var nmi2 = 0; nmi2 < noteMarkerObstacles.length; nmi2++) obstacles.push(noteMarkerObstacles[nmi2]);
+      if (includeRouteSegments) {
+        for (var nri2 = 0; nri2 < noteRouteSegments.length; nri2++) {
+          var routeObstacle2 = segmentObstacleRect(noteRouteSegments[nri2], 8);
+          if (routeObstacle2) obstacles.push(routeObstacle2);
+        }
+      }
+      return obstacles;
+    }
+
+    function routeNoteConnectorPoints(notePlacement, noteIndex, connFrom, connTo) {
+      var sides = noteConnectorSides(notePlacement.note.position);
+      var skipNames = {};
+      skipNames['__note_' + noteIndex] = true;
+      var baseTarget = noteTargetBaseName(notePlacement.note.target);
+      if (baseTarget) skipNames[baseTarget] = true;
+
+      var stub = 14;
+      var sourceAnchor = { x: connFrom.x, y: connFrom.y, side: sides.start, stub: stub };
+      var targetAnchor = { x: connTo.x, y: connTo.y, side: sides.end, stub: stub };
+      var route = UMLShared.routeOrthogonalConnector(sourceAnchor, targetAnchor, noteConnectorObstacleList(true), {
+        skipNames: skipNames,
+        clearance: 10,
+        bendPenalty: 36,
+        extraXs: [connFrom.x, connTo.x],
+        extraYs: [connFrom.y, connTo.y]
+      });
+      var points = route && route.points ? UMLShared.simplifyOrthogonalPath(route.points) : null;
+      var modelObstacles = classObstacles.concat(noteBoxObstacles);
+      if (!points || UMLShared.routeHitsObstacle(points, modelObstacles, skipNames, null)) {
+        route = UMLShared.routeOrthogonalConnector(sourceAnchor, targetAnchor, modelObstacles, {
+          skipNames: skipNames,
+          clearance: 16,
+          bendPenalty: 40,
+          extraXs: [connFrom.x, connTo.x],
+          extraYs: [connFrom.y, connTo.y]
+        });
+        points = route && route.points ? UMLShared.simplifyOrthogonalPath(route.points) : null;
+      }
+      return points || [
+        { x: connFrom.x, y: connFrom.y },
+        { x: connTo.x, y: connTo.y }
+      ];
+    }
+
+    function classNoteConnectorEndpoints(np2) {
       var connFrom, connTo;
       if (np2.note.position === 'right') {
         connFrom = { x: np2.x, y: np2.y + np2.h / 2 };
@@ -7217,8 +7615,57 @@
         connFrom = { x: np2.x + np2.w / 2, y: np2.y };
         connTo = { x: np2.tx + np2.tw / 2, y: np2.ty + np2.th };
       }
+      return { from: connFrom, to: connTo };
+    }
+
+    var noteConnectorRoutes = [];
+    for (var ncri = 0; ncri < notePositions.length; ncri++) {
+      var npRoute = notePositions[ncri];
+      var noteEndpoints = classNoteConnectorEndpoints(npRoute);
+      noteConnectorRoutes[ncri] = routeNoteConnectorPoints(npRoute, ncri, noteEndpoints.from, noteEndpoints.to);
+    }
+
+    var extraLeft = 0, extraRight = 0, extraTop = 0, extraBottom = 0;
+    for (var nbi = 0; nbi < notePositions.length; nbi++) {
+      var np = notePositions[nbi];
+      var minNX = np.x - CFG.svgPad;
+      var maxNX = np.x + np.w + CFG.svgPad;
+      var minNY = np.y - CFG.svgPad;
+      var maxNY = np.y + np.h + CFG.svgPad;
+      if (minNX < -layout.offsetX) extraLeft = Math.max(extraLeft, -layout.offsetX - minNX);
+      if (maxNX > layout.width - layout.offsetX) extraRight = Math.max(extraRight, maxNX - (layout.width - layout.offsetX));
+      if (minNY < -layout.offsetY) extraTop = Math.max(extraTop, -layout.offsetY - minNY);
+      if (maxNY > layout.height - layout.offsetY) extraBottom = Math.max(extraBottom, maxNY - (layout.height - layout.offsetY));
+    }
+    for (var nrbi = 0; nrbi < noteConnectorRoutes.length; nrbi++) {
+      var nrPoints = noteConnectorRoutes[nrbi] || [];
+      for (var nrpi = 0; nrpi < nrPoints.length; nrpi++) {
+        var nrp = nrPoints[nrpi];
+        if (nrp.x - CFG.svgPad < -layout.offsetX) extraLeft = Math.max(extraLeft, -layout.offsetX - (nrp.x - CFG.svgPad));
+        if (nrp.x + CFG.svgPad > layout.width - layout.offsetX) extraRight = Math.max(extraRight, (nrp.x + CFG.svgPad) - (layout.width - layout.offsetX));
+        if (nrp.y - CFG.svgPad < -layout.offsetY) extraTop = Math.max(extraTop, -layout.offsetY - (nrp.y - CFG.svgPad));
+        if (nrp.y + CFG.svgPad > layout.height - layout.offsetY) extraBottom = Math.max(extraBottom, (nrp.y + CFG.svgPad) - (layout.height - layout.offsetY));
+      }
+    }
+
+    var ox = layout.offsetX + CFG.svgPad + extraLeft;
+    var oy = layout.offsetY + CFG.svgPad + extraTop;
+    var svgW = layout.width + CFG.svgPad * 2 + extraLeft + extraRight;
+    var svgH = layout.height + CFG.svgPad * 2 + extraTop + extraBottom;
+    svg.unshift(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
+
+    // ── Draw notes (using pre-computed positions) ──
+    for (var ni = 0; ni < notePositions.length; ni++) {
+      var np2 = notePositions[ni];
+      var noteConnectorEndpoints = classNoteConnectorEndpoints(np2);
       UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors,
-        { fromX: connFrom.x, fromY: connFrom.y, toX: connTo.x, toY: connTo.y });
+        {
+          fromX: noteConnectorEndpoints.from.x,
+          fromY: noteConnectorEndpoints.from.y,
+          toX: noteConnectorEndpoints.to.x,
+          toY: noteConnectorEndpoints.to.y,
+          points: noteConnectorRoutes[ni]
+        });
     }
 
     svg.push(UMLShared.svgClose());
@@ -7661,7 +8108,7 @@
       } else {
         while (turnIndex < pointsIn.length && Math.abs(pointsIn[turnIndex].x - pointsIn[0].x) <= tol) turnIndex++;
         if (turnIndex < pointsIn.length) {
-          rebuilt.push({ x: stub.x, y: pointsIn[turnIndex].y });
+          rebuilt.push({ x: pointsIn[turnIndex].x, y: stub.y });
         }
       }
 
@@ -7682,7 +8129,7 @@
         while (turnIndex >= 0 && Math.abs(pointsIn[turnIndex].y - end.y) <= tol) turnIndex--;
         rebuilt = pointsIn.slice(0, turnIndex + 1);
         if (turnIndex >= 0) {
-          rebuilt.push({ x: pointsIn[turnIndex].x, y: stub.y });
+          rebuilt.push({ x: stub.x, y: pointsIn[turnIndex].y });
         }
       } else {
         while (turnIndex >= 0 && Math.abs(pointsIn[turnIndex].x - end.x) <= tol) turnIndex--;
@@ -8027,8 +8474,11 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
 
-    var layout = computeLayout(parsed);
-    var svgStr = generateSVG(layout, parsed, colors);
+    var rendered = withAdaptiveClassTypography(parsed, function() {
+      var layout = computeLayout(parsed);
+      return generateSVG(layout, parsed, colors);
+    });
+    var svgStr = rendered;
     container.innerHTML = svgStr;
     UMLShared.autoFitSVG(container);
   }
