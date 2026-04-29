@@ -121,12 +121,12 @@ B --> C
 
 ## Element Highlighting
 
-Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill, optionally with a texture keyword to overlay a pattern. The suffix is recognised across all diagram types and pairs with any stereotype or block body.
+Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill, optionally with a texture keyword to overlay a pattern. The suffix is recognized across all diagram types and pairs with any stereotype or block body.
 
 ```
 class Alice #lightblue
 class Bob <<service>> #FFEB3B
-class Draft #pink hatched               ← colour + texture overlay
+class Draft #pink hatched               ← color + texture overlay
 class Legacy dotted                     ← texture only
 abstract class Shape #pink { ... }
 state Active #lightgreen crosshatch
@@ -152,7 +152,7 @@ Color formats accepted:
 
 ### Texture Overlays
 
-A texture keyword may follow the `#color` suffix (or stand alone) to draw a pattern on top of the fill. The pattern is a semi-transparent SVG overlay, so the underlying colour still shows through:
+A texture keyword may follow the `#color` suffix (or stand alone) to draw a pattern on top of the fill. The pattern is a semi-transparent SVG overlay, so the underlying color still shows through:
 
 | Keyword | Pattern |
 |---|---|
@@ -164,14 +164,14 @@ A texture keyword may follow the `#color` suffix (or stand alone) to draw a patt
 
 ```
 class Draft dotted                  ← texture only (default fill)
-class WIP #FFEB3B hatched           ← colour + diagonal lines
+class WIP #FFEB3B hatched           ← color + diagonal lines
 state Broken #FF9999 crosshatch
 component Legacy #lightcoral grid
 ```
 
 ### Compartment Shading
 
-For class diagrams, when a class has both a header and body compartments the header is rendered with a slightly darker shade of the highlight for visual separation. Classes without members use the exact colour supplied. Stroke, text, and default theme colours are not altered, so highlighted elements remain legible under any theme.
+For class diagrams, when a class has both a header and body compartments the header is rendered with a slightly darker shade of the highlight for visual separation. Classes without members use the exact color supplied. Stroke, text, and default theme colors are not altered, so highlighted elements remain legible under any theme.
 
 **Example — class diagram with mixed highlights:**
 
@@ -1880,7 +1880,7 @@ wd --> st : git stash       ← bare label also works
 
 ### Layered / Stacked Boxes
 
-To reproduce a vertical "stack" of labelled sections (e.g. a memory layout), declare the boxes top-to-bottom and use `layout vertical` (default). Connect them with plain `--` lines so they stay aligned:
+To reproduce a vertical "stack" of labeled sections (e.g. a memory layout), declare the boxes top-to-bottom and use `layout vertical` (default). Connect them with plain `--` lines so they stay aligned:
 
 <pre><code class="diagram-freeform">
 @startuml
@@ -2007,13 +2007,13 @@ head main
 
 ## Venn Diagrams
 
-Venn diagrams show how collections of items relate by shared membership. The `diagram-venn` type renders **schematic** (not area-proportional) Venn diagrams for 2–5 sets, using circles for 2–3 sets and carefully tilted ellipses for 4–5 sets so that every possible intersection region is drawn and labelled.
+Venn diagrams show how collections of items relate by shared membership. The `diagram-venn` type renders **schematic** (not area-proportional) Venn diagrams for 2–5 sets, using circles for 2–3 sets and carefully tilted ellipses for 4–5 sets so that every possible intersection region is drawn and labeled.
 
 Items are placed into regions by naming the sets whose intersection they belong to. The renderer automatically:
 
-- Picks a distinct colour per set from a built-in palette (or uses colours you specify).
+- Picks a distinct color per set from a built-in palette (or uses colors you specify).
 - Blends overlapping fills via `mix-blend-mode: multiply`, just like a physical transparency overlay.
-- **Chooses readable text colour per region** by computing the WCAG relative luminance of the blended fill and picking white or near-black for each label — so items sitting on a dark three-way overlap stay legible without you tuning anything.
+- **Chooses readable text color per region** by computing the WCAG relative luminance of the blended fill and picking white or near-black for each label — so items sitting on a dark three-way overlap stay legible without you tuning anything.
 
 ### Syntax
 
@@ -2033,7 +2033,7 @@ outside      : items in none of the sets
 @enduml
 ```
 
-- `set <name>` declares a set. Order of declaration controls colour assignment and position.
+- `set <name>` declares a set. Order of declaration controls color assignment and position.
 - A region line is `<set-names> : <comma-separated items>`. Set names can be joined by `&`, `∩`, `+`, or `,` — all mean set intersection.
 - `outside`, `none`, or `*` puts items in the universe outside every set.
 - Items separate on commas. Escape a literal comma with `\,`.
@@ -2139,7 +2139,7 @@ Breakfast & Lunch & Dinner & Vegetarian & Quick : Smoothie
 
 ### Custom Colours
 
-Append a colour after the set name. Hex codes (`#RRGGBB`, `#RGB`, `#RRGGBBAA`) and CSS named colours both work.
+Append a color after the set name. Hex codes (`#RRGGBB`, `#RGB`, `#RRGGBBAA`) and CSS named colors both work.
 
 ```
 set A #e74c3c
@@ -2165,7 +2165,7 @@ Ocean & Forest & Desert : biosphere
 @enduml
 </code></pre>
 
-If you declare fewer custom colours than sets, the remaining sets fall back to the default palette. Colours you declare are also respected by the contrast-detection pipeline — overlap regions re-compute their blended luminance and flip text to white or near-black automatically.
+If you declare fewer custom colors than sets, the remaining sets fall back to the default palette. Colours you declare are also respected by the contrast-detection pipeline — overlap regions re-compute their blended luminance and flip text to white or near-black automatically.
 
 ### Outside Bin
 
@@ -2181,14 +2181,14 @@ This is useful to signal "these were considered but don't fit anywhere", e.g. it
 
 ### Notes on Contrast Detection
 
-The automatic text-colour picker:
+The automatic text-color picker:
 
 1. Resolves every set fill to a 6-digit hex.
-2. For each region, approximates the rendered colour as the multiply-blend of the contributing set colours over white.
-3. Computes WCAG relative luminance and compares the contrast ratio of white vs. near-black text against that blended colour.
+2. For each region, approximates the rendered color as the multiply-blend of the contributing set colors over white.
+3. Computes WCAG relative luminance and compares the contrast ratio of white vs. near-black text against that blended color.
 4. Picks whichever of the two clears the higher ratio (both typically clear AA 4.5:1 against reasonable palettes).
 
-You don't need to think about this — it just works. But if you pick pathological custom colours (e.g. pure yellow `#ffff00` over white, which stays very light even after multiply), the renderer will still choose near-black over white. There is no manual override for region text colour.
+You don't need to think about this — it just works. But if you pick pathological custom colors (e.g. pure yellow `#ffff00` over white, which stays very light even after multiply), the renderer will still choose near-black over white. There is no manual override for region text color.
 
 ### Titles and Layout
 
