@@ -4991,6 +4991,7 @@
     triangleW: 14,
     diamondH: 14,
     diamondW: 10,
+    diamondClassGap: 3,
     arrowSize: 10,
     strokeWidth: 1.5,
     minBoxWidth: 100,
@@ -6463,7 +6464,7 @@
       var firstAligned = sideVector.x
         ? Math.abs(firstDy) < 1
         : Math.abs(firstDx) < 1;
-      var minStub = Math.max(24, CFG.diamondH + CFG.arrowSize + 2);
+      var minStub = Math.max(26, CFG.diamondClassGap + CFG.diamondH * 1.12 + CFG.arrowSize + 2);
       if (firstAligned && firstOutward >= minStub - 1) return points;
 
       var stub = {
@@ -6530,7 +6531,7 @@
       if (!aligned) return points;
 
       var outward = (p1.x - p0.x) * sideVector.x + (p1.y - p0.y) * sideVector.y;
-      var trim = CFG.diamondH * 1.12 - CFG.strokeWidth * 0.2;
+      var trim = CFG.diamondClassGap + CFG.diamondH * 1.12;
       if (outward <= trim + 2) return points;
 
       var trimmed = cloneClassRoutePoints(points);
@@ -6539,6 +6540,13 @@
         y: p0.y + sideVector.y * trim
       };
       return UMLShared.simplifyOrthogonalPath(trimmed);
+    }
+
+    function wholePartDiamondTip(point, vector) {
+      return {
+        x: point.x + vector.x * CFG.diamondClassGap,
+        y: point.y + vector.y * CFG.diamondClassGap
+      };
     }
 
     // ── Draw relationships ──
@@ -7773,24 +7781,6 @@
       }
 
       var markerPathPoints = pathPoints;
-      var visiblePathPoints = trimWholePartSourceShaft(pathPoints, orel, fromE);
-      var routeSegments = UMLShared.buildOrthogonalSegments(visiblePathPoints);
-      for (var rsi = 0; rsi < routeSegments.length; rsi++) routeSegments[rsi].routeIndex = oi;
-      var routeCrossingBridges = collectClassRouteCrossings(routeSegments, placedRouteSegments);
-
-      // Build polyline points string
-      var pointsStr = '';
-      for (var pi3 = 0; pi3 < visiblePathPoints.length; pi3++) {
-        if (pi3 > 0) pointsStr += ' ';
-        pointsStr += visiblePathPoints[pi3].x + ',' + visiblePathPoints[pi3].y;
-      }
-
-      // Draw main polyline
-      svg.push('<polyline points="' + pointsStr +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
-      pushClassRouteCrossingBridges(svg, routeCrossingBridges, dAttr);
-
-      // Determine direction at each end for decorations
       var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
       var pLast = markerPathPoints[markerPathPoints.length - 1], pPrev = markerPathPoints[markerPathPoints.length - 2];
       var actualSourceSide = classEdgeForPoint(p0, fromE, sourceSide);
@@ -7804,20 +7794,51 @@
       var startDy = sourceVector.y;
       var endDx = targetVector.x;
       var endDy = targetVector.y;
+      var sourceDiamondVector = (sourceSideVector.x || sourceSideVector.y) ? sourceSideVector : sourceVector;
+      var sourceDiamondTip = null;
+      if ((orel.type === 'composition' || orel.type === 'aggregation') &&
+          (sourceDiamondVector.x || sourceDiamondVector.y)) {
+        sourceDiamondTip = wholePartDiamondTip(p0, sourceDiamondVector);
+      }
 
+      var visiblePathPoints = trimWholePartSourceShaft(pathPoints, orel, fromE);
+      var routeSegments = UMLShared.buildOrthogonalSegments(visiblePathPoints);
+      for (var rsi = 0; rsi < routeSegments.length; rsi++) routeSegments[rsi].routeIndex = oi;
+      var routeCrossingBridges = collectClassRouteCrossings(routeSegments, placedRouteSegments);
+
+      // Build polyline points string
+      var pointsStr = '';
+      for (var pi3 = 0; pi3 < visiblePathPoints.length; pi3++) {
+        if (pi3 > 0) pointsStr += ' ';
+        pointsStr += visiblePathPoints[pi3].x + ',' + visiblePathPoints[pi3].y;
+      }
+
+      // Draw the small source-to-diamond connector separately so the marker
+      // stays outside the class box while the relationship remains connected.
+      if (sourceDiamondTip) {
+        svg.push('<line x1="' + p0.x + '" y1="' + p0.y + '" x2="' + sourceDiamondTip.x + '" y2="' + sourceDiamondTip.y +
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt"' + dAttr + '/>');
+      }
+
+      // Draw main polyline
+      svg.push('<polyline points="' + pointsStr +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+      pushClassRouteCrossingBridges(svg, routeCrossingBridges, dAttr);
+
+      // Determine direction at each end for decorations
       // Source decorations (deferred to draw on top of class boxes)
       var sourceMarkerObstacles = [];
       var targetMarkerObstacles = [];
-      var sourceDiamondVector = (sourceSideVector.x || sourceSideVector.y) ? sourceSideVector : sourceVector;
+      var sourceDiamondAnchor = sourceDiamondTip || p0;
 
       if (orel.type === 'composition') {
-        var sourceDiamond = offsetClassMarkerPoint(p0.x, p0.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
+        var sourceDiamond = offsetClassMarkerPoint(sourceDiamondAnchor.x, sourceDiamondAnchor.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
         UMLShared.drawDiamond(decorSvg, sourceDiamond.x, sourceDiamond.y, sourceDiamondVector.x, sourceDiamondVector.y, colors.line, true, colors.fill);
         var sourceDiamondObstacle = diamondMarkerObstacleRect(sourceDiamond.x, sourceDiamond.y, sourceDiamondVector.x, sourceDiamondVector.y, 7);
         noteMarkerObstacles.push(sourceDiamondObstacle);
         sourceMarkerObstacles.push(sourceDiamondObstacle);
       } else if (orel.type === 'aggregation') {
-        var sourceAggregation = offsetClassMarkerPoint(p0.x, p0.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
+        var sourceAggregation = offsetClassMarkerPoint(sourceDiamondAnchor.x, sourceDiamondAnchor.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
         UMLShared.drawDiamond(decorSvg, sourceAggregation.x, sourceAggregation.y, sourceDiamondVector.x, sourceDiamondVector.y, colors.line, false, colors.fill);
         var sourceAggregationObstacle = diamondMarkerObstacleRect(sourceAggregation.x, sourceAggregation.y, sourceDiamondVector.x, sourceDiamondVector.y, 7);
         noteMarkerObstacles.push(sourceAggregationObstacle);
@@ -9319,6 +9340,7 @@
     participantMinW: 100,
     participantGap: 60,
     messageGapY: 40,
+    firstMessageGapY: 26,
     activationW: 12,
     activationOffset: 4,  // horizontal shift per stacking depth level
     lifelineDash: '6,4',
@@ -9667,6 +9689,9 @@
     var messageGapY = parsed.layoutPreference === 'compact'
       ? Math.max(18, Math.round(CFG.messageGapY * 0.5))
       : CFG.messageGapY;
+    var firstMessageGapY = parsed.layoutPreference === 'compact'
+      ? Math.max(20, Math.round(CFG.firstMessageGapY * 0.8))
+      : CFG.firstMessageGapY;
 
     // ── Measure participant boxes ──
     var partWidths = [];
@@ -9747,7 +9772,7 @@
     var totalW = curX + CFG.svgPad;
 
     // ── Process messages to compute Y positions ──
-    var curY = CFG.svgPad + partH + 20; // Start below participant boxes
+    var curY = CFG.svgPad + partH + firstMessageGapY; // Start below participant boxes
     var msgYs = [];
     var fragmentStack = [];    // Stack of { startY, type, condition, elseYs }
     var fragments = [];        // Completed fragments for rendering
