@@ -1361,6 +1361,8 @@
     var distanceStep = typeof opts.distanceStep === 'number' ? opts.distanceStep : 18;
     var distanceLevels = typeof opts.distanceLevels === 'number' ? opts.distanceLevels : 4;
     var overlapPad = typeof opts.overlapPad === 'number' ? opts.overlapPad : 6;
+    var sideDistanceCost = typeof opts.sideDistanceCost === 'number' ? opts.sideDistanceCost : 6;
+    var sideSlideCost = typeof opts.sideSlideCost === 'number' ? opts.sideSlideCost : 1;
     var allObstacles = obstacles || [];
     var allPlaced = placedRects || [];
 
@@ -1414,7 +1416,7 @@
           : target.x - noteW - gap - dist;
         for (var baseIdx = 0; baseIdx < sideBases.length; baseIdx++) {
           for (var slideIdx = 0; slideIdx < slides.length; slideIdx++) {
-            consider(noteX, sideBases[baseIdx] + slides[slideIdx], dist * 6 + Math.abs(slides[slideIdx]) + baseIdx * 10);
+            consider(noteX, sideBases[baseIdx] + slides[slideIdx], dist * sideDistanceCost + Math.abs(slides[slideIdx]) * sideSlideCost + baseIdx * 10);
           }
         }
       }
@@ -1431,7 +1433,7 @@
           : target.y + target.h + gap + dist2;
         for (var baseIdx2 = 0; baseIdx2 < topBases.length; baseIdx2++) {
           for (var slideIdx2 = 0; slideIdx2 < slides.length; slideIdx2++) {
-            consider(topBases[baseIdx2] + slides[slideIdx2], noteY, dist2 * 6 + Math.abs(slides[slideIdx2]) + baseIdx2 * 10);
+            consider(topBases[baseIdx2] + slides[slideIdx2], noteY, dist2 * sideDistanceCost + Math.abs(slides[slideIdx2]) * sideSlideCost + baseIdx2 * 10);
           }
         }
       }
@@ -5933,6 +5935,76 @@
 
     nudgeFreeClassEntriesWithinBands(result.direction || effectiveDirection);
 
+    function packCompactHierarchyFamilies(direction) {
+      if (layoutPreference !== 'compact' || !hasHierarchyEdges) return;
+      if ((direction || 'TB') !== 'TB') return;
+
+      var hAdj = {};
+      var hNames = {};
+      for (var hr = 0; hr < relationships.length; hr++) {
+        var hrRel = relationships[hr];
+        if (hrRel.type !== 'generalization' && hrRel.type !== 'realization') continue;
+        if (!entries[hrRel.from] || !entries[hrRel.to]) continue;
+        hNames[hrRel.from] = true;
+        hNames[hrRel.to] = true;
+        if (!hAdj[hrRel.from]) hAdj[hrRel.from] = [];
+        if (!hAdj[hrRel.to]) hAdj[hrRel.to] = [];
+        hAdj[hrRel.from].push(hrRel.to);
+        hAdj[hrRel.to].push(hrRel.from);
+      }
+
+      var visitedFamilies = {};
+      var families = [];
+      for (var hName in hNames) {
+        if (!Object.prototype.hasOwnProperty.call(hNames, hName) || visitedFamilies[hName]) continue;
+        var stack = [hName];
+        var names = [];
+        visitedFamilies[hName] = true;
+        while (stack.length) {
+          var curName = stack.pop();
+          if (!entries[curName]) continue;
+          names.push(curName);
+          var nextNames = hAdj[curName] || [];
+          for (var hni = 0; hni < nextNames.length; hni++) {
+            var nextName = nextNames[hni];
+            if (visitedFamilies[nextName]) continue;
+            visitedFamilies[nextName] = true;
+            stack.push(nextName);
+          }
+        }
+        if (!names.length) continue;
+
+        var famMinX = Infinity;
+        var famMaxX = -Infinity;
+        for (var fni = 0; fni < names.length; fni++) {
+          var famEntry = entries[names[fni]];
+          famMinX = Math.min(famMinX, famEntry.x);
+          famMaxX = Math.max(famMaxX, famEntry.x + famEntry.box.width);
+        }
+        families.push({ names: names, minX: famMinX, maxX: famMaxX });
+      }
+      if (families.length < 2) return;
+
+      families.sort(function(a, b) { return a.minX - b.minX; });
+      var familyGap = Math.max(18, Math.round(effectiveGapX * 0.52));
+      var cursorRight = families[0].maxX;
+      for (var fi = 1; fi < families.length; fi++) {
+        var family = families[fi];
+        var desiredMin = cursorRight + familyGap;
+        var shift = Math.min(0, desiredMin - family.minX);
+        if (shift < -0.5) {
+          for (var fmni = 0; fmni < family.names.length; fmni++) {
+            entries[family.names[fmni]].x += shift;
+          }
+          family.minX += shift;
+          family.maxX += shift;
+        }
+        cursorRight = family.maxX;
+      }
+    }
+
+    packCompactHierarchyFamilies(result.direction || effectiveDirection);
+
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var n2 in entries) {
       if (!Object.prototype.hasOwnProperty.call(entries, n2)) continue;
@@ -5984,6 +6056,43 @@
         y2: obstacleEntry.y + obstacleEntry.box.height,
         name: obstacleName
       });
+    }
+
+    function classNotePressureBaseName(targetName) {
+      if (!targetName) return '';
+      var cleanTarget = String(targetName).replace(/^"|"$/g, '').trim();
+      var dotIdx = cleanTarget.indexOf('.');
+      return dotIdx === -1 ? cleanTarget : cleanTarget.substring(0, dotIdx).trim();
+    }
+
+    var classNoteSidePressure = {};
+    for (var cnpi = 0; cnpi < (parsed.notes || []).length; cnpi++) {
+      var pressureNote = parsed.notes[cnpi];
+      var pressureName = classNotePressureBaseName(pressureNote.target);
+      if (!pressureName) continue;
+      if (!classNoteSidePressure[pressureName]) classNoteSidePressure[pressureName] = {};
+      classNoteSidePressure[pressureName][pressureNote.position || 'right'] = true;
+    }
+
+    function avoidNoteCrowdedEntrySide(fromE, toE, toName, proposedSide, avoidToTop) {
+      var pressure = classNoteSidePressure[toName];
+      if (!pressure || !pressure[proposedSide]) return proposedSide;
+      var fromCx = fromE.x + fromE.box.width / 2;
+      var fromCy = fromE.y + fromE.box.height / 2;
+      var toCx = toE.x + toE.box.width / 2;
+      var toCy = toE.y + toE.box.height / 2;
+      var verticalSide = fromCy > toCy ? 'bottom' : 'top';
+      var horizontalSide = fromCx > toCx ? 'right' : 'left';
+      var alternatives = proposedSide === 'left' || proposedSide === 'right'
+        ? [verticalSide, horizontalSide, proposedSide === 'left' ? 'right' : 'left']
+        : [horizontalSide, verticalSide, proposedSide === 'top' ? 'bottom' : 'top'];
+      for (var ansi = 0; ansi < alternatives.length; ansi++) {
+        var side = alternatives[ansi];
+        if (!side || pressure[side]) continue;
+        if (side === 'top' && avoidToTop) continue;
+        return side;
+      }
+      return proposedSide;
     }
 
     function cloneClassRoutePoints(points) {
@@ -6078,6 +6187,101 @@
       adjusted = UMLShared.simplifyOrthogonalPath(adjusted);
       if (classRouteHitsNonEndpointClass(adjusted, rel.from, rel.to)) return points;
       return adjusted;
+    }
+
+    function ensureWholePartMarkerStub(points, rel, fromEntry) {
+      if (!points || points.length < 2) return points;
+      if (!rel || (rel.type !== 'composition' && rel.type !== 'aggregation')) return points;
+      if (!fromEntry || !fromEntry.box) return points;
+
+      var p0 = points[0];
+      var p1 = points[1];
+      var sourceSide = classEdgeForPoint(p0, fromEntry, null);
+      var sideVector = classSideVector(sourceSide);
+      if (!sideVector.x && !sideVector.y) return points;
+
+      var firstDx = p1.x - p0.x;
+      var firstDy = p1.y - p0.y;
+      var firstOutward = firstDx * sideVector.x + firstDy * sideVector.y;
+      var firstAligned = sideVector.x
+        ? Math.abs(firstDy) < 1
+        : Math.abs(firstDx) < 1;
+      var minStub = Math.max(24, CFG.diamondH + CFG.arrowSize + 2);
+      if (firstAligned && firstOutward >= minStub - 1) return points;
+
+      var stub = {
+        x: p0.x + sideVector.x * minStub,
+        y: p0.y + sideVector.y * minStub
+      };
+      var adjusted = [{ x: p0.x, y: p0.y }, stub];
+      var resumeIndex = 1;
+
+      if (sideVector.x) {
+        var p1AlreadyBeyond = Math.abs(p1.y - p0.y) < 1 &&
+          sideVector.x * (p1.x - stub.x) >= -1;
+        if (!p1AlreadyBeyond) {
+          if (Math.abs(p1.x - p0.x) < 1 &&
+              points[2] &&
+              Math.abs(points[2].y - p1.y) < 1) {
+            adjusted.push({ x: stub.x, y: p1.y });
+            resumeIndex = 2;
+          } else if (Math.abs(p1.y - p0.y) >= 1) {
+            adjusted.push({ x: stub.x, y: p1.y });
+          } else if (points[2]) {
+            adjusted.push({ x: stub.x, y: points[2].y });
+            resumeIndex = 2;
+          }
+        }
+      } else {
+        var p1AlreadyBeyondY = Math.abs(p1.x - p0.x) < 1 &&
+          sideVector.y * (p1.y - stub.y) >= -1;
+        if (!p1AlreadyBeyondY) {
+          if (Math.abs(p1.y - p0.y) < 1 &&
+              points[2] &&
+              Math.abs(points[2].x - p1.x) < 1) {
+            adjusted.push({ x: p1.x, y: stub.y });
+            resumeIndex = 2;
+          } else if (Math.abs(p1.x - p0.x) >= 1) {
+            adjusted.push({ x: p1.x, y: stub.y });
+          } else if (points[2]) {
+            adjusted.push({ x: points[2].x, y: stub.y });
+            resumeIndex = 2;
+          }
+        }
+      }
+
+      adjusted = adjusted.concat(points.slice(resumeIndex));
+      adjusted = UMLShared.simplifyOrthogonalPath(adjusted);
+      if (classRouteHitsNonEndpointClass(adjusted, rel.from, rel.to)) return points;
+      return adjusted;
+    }
+
+    function trimWholePartSourceShaft(points, rel, fromEntry) {
+      if (!points || points.length < 2) return points;
+      if (!rel || (rel.type !== 'composition' && rel.type !== 'aggregation')) return points;
+      if (!fromEntry || !fromEntry.box) return points;
+
+      var p0 = points[0];
+      var p1 = points[1];
+      var sourceSide = classEdgeForPoint(p0, fromEntry, null);
+      var sideVector = classSideVector(sourceSide);
+      if (!sideVector.x && !sideVector.y) return points;
+
+      var aligned = sideVector.x
+        ? Math.abs(p1.y - p0.y) < 1
+        : Math.abs(p1.x - p0.x) < 1;
+      if (!aligned) return points;
+
+      var outward = (p1.x - p0.x) * sideVector.x + (p1.y - p0.y) * sideVector.y;
+      var trim = CFG.diamondH * 1.12 + CFG.strokeWidth;
+      if (outward <= trim + 2) return points;
+
+      var trimmed = cloneClassRoutePoints(points);
+      trimmed[0] = {
+        x: p0.x + sideVector.x * trim,
+        y: p0.y + sideVector.y * trim
+      };
+      return UMLShared.simplifyOrthogonalPath(trimmed);
     }
 
     // ── Draw relationships ──
@@ -7137,6 +7341,7 @@
          Math.abs(epToCy - epFromCy) * 1.0) ?
         ((epFromCx > epToCx) ? 'right' : 'left') :
         ((epFromCy > epToCy) ? 'bottom' : 'top');
+      entrySide = avoidNoteCrowdedEntrySide(epFrom, epTo, epRel.to, entrySide, hasInheritAtTop[epRel.to]);
       var entryKey = epRel.to + ':' + entrySide;
       if (!entryGroups[entryKey]) entryGroups[entryKey] = [];
       entryGroups[entryKey].push({ idx: epi, sourceCx: epFromCx, sourceCy: epFromCy, targetCx: epToCx, targetCy: epToCy });
@@ -7191,6 +7396,7 @@
       var srcCentered = ((exitPortIdx[oi] || 0) - (srcCount - 1) / 2) * srcPortSpacing;
 
       var tgtSide = routeEntrySide(fromE, toE, hasInheritAtTop[orel.to]);
+      tgtSide = avoidNoteCrowdedEntrySide(fromE, toE, orel.to, tgtSide, hasInheritAtTop[orel.to]);
       var tgtKey = orel.to + ':' + tgtSide;
       var tgtCount = entryPortCounts[tgtKey] || 1;
       var tgtPortSpacing = tgtCount > 1 ? 24 : 14;
@@ -7215,7 +7421,8 @@
         hasInheritAtBottom[orel.to],
         classOccupiedSegments,
         hierarchyRouteObstacles,
-        restrictSourceSide
+        restrictSourceSide,
+        classNoteSidePressure[orel.to]
       );
       var pathPoints = route.points; // array of {x,y}
       var safePathPoints = cloneClassRoutePoints(pathPoints);
@@ -7273,13 +7480,15 @@
       pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
       pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
       pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
+      pathPoints = ensureWholePartMarkerStub(pathPoints, orel, fromE);
       if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
           safePathPoints.length >= 2 &&
           !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
         pathPoints = safePathPoints;
       }
 
-      var visiblePathPoints = pathPoints;
+      var markerPathPoints = pathPoints;
+      var visiblePathPoints = trimWholePartSourceShaft(pathPoints, orel, fromE);
       var routeSegments = UMLShared.buildOrthogonalSegments(visiblePathPoints);
       for (var rsi = 0; rsi < routeSegments.length; rsi++) routeSegments[rsi].routeIndex = oi;
       var routeCrossingBridges = collectClassRouteCrossings(routeSegments, placedRouteSegments);
@@ -7297,10 +7506,11 @@
       pushClassRouteCrossingBridges(svg, routeCrossingBridges, dAttr);
 
       // Determine direction at each end for decorations
-      var p0 = pathPoints[0], p1 = pathPoints[1];
-      var pLast = pathPoints[pathPoints.length - 1], pPrev = pathPoints[pathPoints.length - 2];
+      var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
+      var pLast = markerPathPoints[markerPathPoints.length - 1], pPrev = markerPathPoints[markerPathPoints.length - 2];
       var actualSourceSide = classEdgeForPoint(p0, fromE, sourceSide);
       var actualTargetSide = classEdgeForPoint(pLast, toE, tgtSide);
+      var sourceSideVector = classSideVector(actualSourceSide);
       var sourceVector = classEndpointMarkerVector(p0, p1, classSideVector(actualSourceSide));
       var targetVector = classEndpointMarkerVector(pLast, pPrev, classSideVector(actualTargetSide));
 
@@ -7313,17 +7523,18 @@
       // Source decorations (deferred to draw on top of class boxes)
       var sourceMarkerObstacles = [];
       var targetMarkerObstacles = [];
+      var sourceDiamondVector = (sourceSideVector.x || sourceSideVector.y) ? sourceSideVector : sourceVector;
 
       if (orel.type === 'composition') {
-        var sourceDiamond = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
-        UMLShared.drawDiamond(decorSvg, sourceDiamond.x, sourceDiamond.y, startDx, startDy, colors.line, true, colors.fill);
-        var sourceDiamondObstacle = pointObstacleRect(sourceDiamond.x + startDx * CFG.diamondH / 2, sourceDiamond.y + startDy * CFG.diamondH / 2, CFG.diamondH);
+        var sourceDiamond = offsetClassMarkerPoint(p0.x, p0.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
+        UMLShared.drawDiamond(decorSvg, sourceDiamond.x, sourceDiamond.y, sourceDiamondVector.x, sourceDiamondVector.y, colors.line, true, colors.fill);
+        var sourceDiamondObstacle = pointObstacleRect(sourceDiamond.x + sourceDiamondVector.x * CFG.diamondH / 2, sourceDiamond.y + sourceDiamondVector.y * CFG.diamondH / 2, CFG.diamondH);
         noteMarkerObstacles.push(sourceDiamondObstacle);
         sourceMarkerObstacles.push(sourceDiamondObstacle);
       } else if (orel.type === 'aggregation') {
-        var sourceAggregation = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'diamond');
-        UMLShared.drawDiamond(decorSvg, sourceAggregation.x, sourceAggregation.y, startDx, startDy, colors.line, false, colors.fill);
-        var sourceAggregationObstacle = pointObstacleRect(sourceAggregation.x + startDx * CFG.diamondH / 2, sourceAggregation.y + startDy * CFG.diamondH / 2, CFG.diamondH);
+        var sourceAggregation = offsetClassMarkerPoint(p0.x, p0.y, sourceDiamondVector.x, sourceDiamondVector.y, 'diamond');
+        UMLShared.drawDiamond(decorSvg, sourceAggregation.x, sourceAggregation.y, sourceDiamondVector.x, sourceDiamondVector.y, colors.line, false, colors.fill);
+        var sourceAggregationObstacle = pointObstacleRect(sourceAggregation.x + sourceDiamondVector.x * CFG.diamondH / 2, sourceAggregation.y + sourceDiamondVector.y * CFG.diamondH / 2, CFG.diamondH);
         noteMarkerObstacles.push(sourceAggregationObstacle);
         sourceMarkerObstacles.push(sourceAggregationObstacle);
       }
@@ -7562,6 +7773,8 @@
       gap: 22,
       slideStep: 20,
       distanceLevels: 5,
+      sideDistanceCost: 3,
+      sideSlideCost: 4,
       overlapPad: 10
     });
 
@@ -7609,6 +7822,128 @@
       skipNames['__note_' + noteIndex] = true;
       var baseTarget = noteTargetBaseName(notePlacement.note.target);
       if (baseTarget) skipNames[baseTarget] = true;
+      var noteOnlySkipNames = {};
+      noteOnlySkipNames['__note_' + noteIndex] = true;
+      var hardModelObstacles = classObstacles.concat(noteBoxObstacles);
+
+      function noteRouteOccupiedSegments() {
+        var occupied = { h: [], v: [] };
+        for (var nri3 = 0; nri3 < noteRouteSegments.length; nri3++) {
+          var seg = noteRouteSegments[nri3];
+          if (!seg) continue;
+          if (seg.isH) occupied.h.push(seg);
+          else occupied.v.push(seg);
+        }
+        return occupied;
+      }
+
+      function sameAxisOverlap(a1, a2, b1, b2) {
+        return Math.min(Math.max(a1, a2), Math.max(b1, b2)) -
+          Math.max(Math.min(a1, a2), Math.min(b1, b2));
+      }
+
+      function noteConnectorConflictCount(points) {
+        var occupied = noteRouteOccupiedSegments();
+        var conflicts = UMLShared.countRouteCrossings(points, occupied);
+        var candidateSegments = UMLShared.buildOrthogonalSegments(points);
+        for (var csi = 0; csi < candidateSegments.length; csi++) {
+          var cs = candidateSegments[csi];
+          for (var esi = 0; esi < noteRouteSegments.length; esi++) {
+            var es = noteRouteSegments[esi];
+            if (!cs || !es || cs.isH !== es.isH) continue;
+            if (cs.isH) {
+              if (Math.abs(cs.y - es.y) >= 1) continue;
+              if (sameAxisOverlap(cs.x1, cs.x2, es.x1, es.x2) > 8) conflicts++;
+            } else {
+              if (Math.abs(cs.x - es.x) >= 1) continue;
+              if (sameAxisOverlap(cs.y1, cs.y2, es.y1, es.y2) > 8) conflicts++;
+            }
+          }
+        }
+        return conflicts;
+      }
+
+      function scoreNoteConnectorCandidate(candidate) {
+        var points = UMLShared.simplifyOrthogonalPath(candidate);
+        if (!points || points.length < 2) return null;
+        if (UMLShared.routeHitsObstacle(points, hardModelObstacles, noteOnlySkipNames, null)) return null;
+        var labelHit = UMLShared.routeHitsObstacle(points, placedLabels.concat(noteMarkerObstacles), null, null) ? 1 : 0;
+        var broadRouteHit = UMLShared.routeHitsObstacle(points, noteConnectorObstacleList(true), skipNames, null) ? 1 : 0;
+        var conflicts = noteConnectorConflictCount(points);
+        return {
+          points: points,
+          conflicts: conflicts,
+          score: conflicts * 100000 +
+            labelHit * 50000 +
+            broadRouteHit * 2000 +
+            UMLShared.measureOrthogonalRoute(points) +
+            UMLShared.countOrthogonalBends(points) * 28
+        };
+      }
+
+      function bestSimpleNoteConnectorCandidate() {
+        var candidates = [];
+        function addCandidate(points) {
+          if (!points || points.length < 2) return;
+          candidates.push(points);
+        }
+        addCandidate([
+          { x: connFrom.x, y: connFrom.y },
+          { x: connTo.x, y: connTo.y }
+        ]);
+        addCandidate([
+          { x: connFrom.x, y: connFrom.y },
+          { x: connTo.x, y: connFrom.y },
+          { x: connTo.x, y: connTo.y }
+        ]);
+        addCandidate([
+          { x: connFrom.x, y: connFrom.y },
+          { x: connFrom.x, y: connTo.y },
+          { x: connTo.x, y: connTo.y }
+        ]);
+        var midX = (connFrom.x + connTo.x) / 2;
+        var midY = (connFrom.y + connTo.y) / 2;
+        var xDir = connFrom.x <= connTo.x ? -1 : 1;
+        var yDir = connFrom.y <= connTo.y ? -1 : 1;
+        var xLanes = [connTo.x, connFrom.x, midX, connTo.x + xDir * 18, connFrom.x - xDir * 18];
+        var yLanes = [connTo.y, connFrom.y, midY, connTo.y + yDir * 18, connFrom.y - yDir * 18];
+        for (var xli = 0; xli < xLanes.length; xli++) {
+          var laneX = xLanes[xli];
+          addCandidate([
+            { x: connFrom.x, y: connFrom.y },
+            { x: laneX, y: connFrom.y },
+            { x: laneX, y: connTo.y },
+            { x: connTo.x, y: connTo.y }
+          ]);
+        }
+        for (var yli = 0; yli < yLanes.length; yli++) {
+          var laneY = yLanes[yli];
+          addCandidate([
+            { x: connFrom.x, y: connFrom.y },
+            { x: connFrom.x, y: laneY },
+            { x: connTo.x, y: laneY },
+            { x: connTo.x, y: connTo.y }
+          ]);
+        }
+        var best = null;
+        for (var sci = 0; sci < candidates.length; sci++) {
+          var scored = scoreNoteConnectorCandidate(candidates[sci]);
+          if (!scored) continue;
+          if (!best || scored.score < best.score) best = scored;
+        }
+        return best;
+      }
+
+      var directPoints = [
+        { x: connFrom.x, y: connFrom.y },
+        { x: connTo.x, y: connTo.y }
+      ];
+      var directOrthogonal = Math.abs(connFrom.x - connTo.x) < 1 || Math.abs(connFrom.y - connTo.y) < 1;
+      if (directOrthogonal &&
+          !UMLShared.routeHitsObstacle(directPoints, noteConnectorObstacleList(true), skipNames, null)) {
+        return directPoints;
+      }
+      var simpleCandidate = bestSimpleNoteConnectorCandidate();
 
       var stub = 14;
       var sourceAnchor = { x: connFrom.x, y: connFrom.y, side: sides.start, stub: stub };
@@ -7632,6 +7967,10 @@
         });
         points = route && route.points ? UMLShared.simplifyOrthogonalPath(route.points) : null;
       }
+      var routedScore = scoreNoteConnectorCandidate(points);
+      if (simpleCandidate && (!routedScore || simpleCandidate.score + 1 < routedScore.score)) {
+        points = simpleCandidate.points;
+      }
       return points || [
         { x: connFrom.x, y: connFrom.y },
         { x: connTo.x, y: connTo.y }
@@ -7640,18 +7979,26 @@
 
     function classNoteConnectorEndpoints(np2) {
       var connFrom, connTo;
+      function clampNote(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+      var memberTargetInset = np2.note && np2.note.target && String(np2.note.target).indexOf('.') !== -1 ? 4 : 0;
       if (np2.note.position === 'right') {
-        connFrom = { x: np2.x, y: np2.y + np2.h / 2 };
-        connTo = { x: np2.tx + np2.tw, y: np2.ty + np2.th / 2 };
+        var rightTargetY = np2.ty + np2.th / 2;
+        connFrom = { x: np2.x, y: clampNote(rightTargetY, np2.y + 8, np2.y + np2.h - 8) };
+        connTo = { x: np2.tx + np2.tw + memberTargetInset, y: rightTargetY };
       } else if (np2.note.position === 'left') {
-        connFrom = { x: np2.x + np2.w, y: np2.y + np2.h / 2 };
-        connTo = { x: np2.tx, y: np2.ty + np2.th / 2 };
+        var leftTargetY = np2.ty + np2.th / 2;
+        connFrom = { x: np2.x + np2.w, y: clampNote(leftTargetY, np2.y + 8, np2.y + np2.h - 8) };
+        connTo = { x: np2.tx - memberTargetInset, y: leftTargetY };
       } else if (np2.note.position === 'top') {
-        connFrom = { x: np2.x + np2.w / 2, y: np2.y + np2.h };
-        connTo = { x: np2.tx + np2.tw / 2, y: np2.ty };
+        var topTargetX = np2.tx + np2.tw / 2;
+        connFrom = { x: clampNote(topTargetX, np2.x + 8, np2.x + np2.w - 8), y: np2.y + np2.h };
+        connTo = { x: topTargetX, y: np2.ty - memberTargetInset };
       } else {
-        connFrom = { x: np2.x + np2.w / 2, y: np2.y };
-        connTo = { x: np2.tx + np2.tw / 2, y: np2.ty + np2.th };
+        var bottomTargetX = np2.tx + np2.tw / 2;
+        connFrom = { x: clampNote(bottomTargetX, np2.x + 8, np2.x + np2.w - 8), y: np2.y };
+        connTo = { x: bottomTargetX, y: np2.ty + np2.th + memberTargetInset };
       }
       return { from: connFrom, to: connTo };
     }
@@ -7684,6 +8031,21 @@
         if (nrp.y - CFG.svgPad < -layout.offsetY) extraTop = Math.max(extraTop, -layout.offsetY - (nrp.y - CFG.svgPad));
         if (nrp.y + CFG.svgPad > layout.height - layout.offsetY) extraBottom = Math.max(extraBottom, (nrp.y + CFG.svgPad) - (layout.height - layout.offsetY));
       }
+    }
+    function expandClassExtraForRect(rect, pad) {
+      var rr = classObstacleRect(rect);
+      if (!rr) return;
+      var inset = typeof pad === 'number' ? pad : CFG.svgPad;
+      if (rr.left - inset < -layout.offsetX) extraLeft = Math.max(extraLeft, -layout.offsetX - (rr.left - inset));
+      if (rr.right + inset > layout.width - layout.offsetX) extraRight = Math.max(extraRight, (rr.right + inset) - (layout.width - layout.offsetX));
+      if (rr.top - inset < -layout.offsetY) extraTop = Math.max(extraTop, -layout.offsetY - (rr.top - inset));
+      if (rr.bottom + inset > layout.height - layout.offsetY) extraBottom = Math.max(extraBottom, (rr.bottom + inset) - (layout.height - layout.offsetY));
+    }
+    for (var elbi = 0; elbi < placedLabels.length; elbi++) {
+      expandClassExtraForRect(placedLabels[elbi], CFG.svgPad);
+    }
+    for (var embi = 0; embi < noteMarkerObstacles.length; embi++) {
+      expandClassExtraForRect(noteMarkerObstacles[embi], CFG.svgPad);
     }
 
     var ox = layout.offsetX + CFG.svgPad + extraLeft;
@@ -7884,7 +8246,7 @@
    * Compute orthogonal (Manhattan) route between two class boxes using the
    * shared obstacle-aware router and multi-anchor candidate scoring.
    */
-  function computeOrthogonalRoute(fromE, toE, avoidFromBottom, avoidToTop, portOffset, allEntries, fromId, toId, targetEntryOffset, targetEntrySide, sourceSide, avoidFromTop, avoidToBottom, occupiedSegments, extraObstacleRects, restrictSourceSide) {
+  function computeOrthogonalRoute(fromE, toE, avoidFromBottom, avoidToTop, portOffset, allEntries, fromId, toId, targetEntryOffset, targetEntrySide, sourceSide, avoidFromTop, avoidToBottom, occupiedSegments, extraObstacleRects, restrictSourceSide, blockedTargetSides) {
     portOffset = portOffset || 0;
     targetEntryOffset = targetEntryOffset || 0;
     avoidFromTop = !!avoidFromTop;
@@ -7937,6 +8299,13 @@
           targetEntrySide,
           avoidToTop && targetEntrySide === 'top'
         );
+    if (blockedTargetSides) {
+      var filteredTargetOrder = [];
+      for (var ftoi = 0; ftoi < targetOrder.length; ftoi++) {
+        if (!blockedTargetSides[targetOrder[ftoi]]) filteredTargetOrder.push(targetOrder[ftoi]);
+      }
+      if (filteredTargetOrder.length) targetOrder = filteredTargetOrder;
+    }
 
     var sourceCandidates = buildClassAnchorCandidates(fromE, toE, sourceOrder, portOffset, {
       avoidTop: avoidFromTop,
@@ -13973,6 +14342,43 @@
       };
     }
 
+    function componentPortObstacleRects(conn) {
+      var rects = [];
+      function isEndpoint(compName, alias) {
+        return (conn.from === compName && conn.fromPort === alias) ||
+          (conn.to === compName && conn.toPort === alias);
+      }
+      for (var porCompName in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, porCompName)) continue;
+        var porEntry = entries[porCompName];
+        if (!porEntry || !porEntry.portPositions) continue;
+        for (var porAlias in porEntry.portPositions) {
+          if (!Object.prototype.hasOwnProperty.call(porEntry.portPositions, porAlias)) continue;
+          if (isEndpoint(porCompName, porAlias)) continue;
+          var porPos = porEntry.portPositions[porAlias];
+          if (!porPos) continue;
+          var cx = porPos.cx !== undefined ? porPos.cx : porPos.connX;
+          var cy = porPos.cy !== undefined ? porPos.cy : porPos.connY;
+          var pad = CFG.portSize / 2 + 5;
+          var ifaceCenter = interfaceSymbolCenter(porPos);
+          if (ifaceCenter) {
+            cx = ifaceCenter.x;
+            cy = ifaceCenter.y;
+            pad = ifaceCenter.r + 7;
+          }
+          if (!isFinite(cx) || !isFinite(cy)) continue;
+          rects.push({
+            x1: cx - pad,
+            y1: cy - pad,
+            x2: cx + pad,
+            y2: cy + pad,
+            name: '__port_' + porCompName + '_' + porAlias
+          });
+        }
+      }
+      return rects;
+    }
+
     function drawInterfaceConnectionLabel(svgParts, labelText, x, y, colorsRef, fontSize) {
       if (!labelText) return null;
       svgParts.push('<text x="' + x + '" y="' + y +
@@ -15363,6 +15769,10 @@
       if (tgtInterior.x2 > tgtInterior.x1 + 4 && tgtInterior.y2 > tgtInterior.y1 + 4) {
         obstacles.push(tgtInterior);
       }
+      var portObstaclesForConnector = componentPortObstacleRects(conn);
+      for (var pofci = 0; pofci < portObstaclesForConnector.length; pofci++) {
+        obstacles.push(portObstaclesForConnector[pofci]);
+      }
       var sourceSlotY = connectorPortSlotYs[ci + ':source'];
       var targetSlotY = connectorPortSlotYs[ci + ':target'];
       var sourceCandidates = buildComponentEndpointCandidates(fromE, conn.fromPort, fpPos, exitAnchor, toE, tpPos, isJoinedAssembly, 'source', sourceSlotY);
@@ -15977,7 +16387,8 @@
 
       // Remove the temporary interior obstacles added for this connection
       for (var rmI = obstacles.length - 1; rmI >= 0; rmI--) {
-        if (obstacles[rmI] === srcInterior || obstacles[rmI] === tgtInterior) {
+        if (obstacles[rmI] === srcInterior || obstacles[rmI] === tgtInterior ||
+            portObstaclesForConnector.indexOf(obstacles[rmI]) !== -1) {
           obstacles.splice(rmI, 1);
         }
       }
