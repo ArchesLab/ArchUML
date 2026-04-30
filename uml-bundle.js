@@ -4531,6 +4531,128 @@
       }
     }
 
+    // 6c. Hierarchy median alignment.
+    // For an odd fan-out, the visual middle subclass should sit directly
+    // under the superclass so that one inheritance stem stays straight.
+    function alignMedianHierarchyFanouts() {
+      var groups = {};
+      for (var dei = 0; dei < directedEdges.length; dei++) {
+        var de = directedEdges[dei];
+        if (!de || !de.orig ||
+            (de.orig.type !== 'generalization' && de.orig.type !== 'realization')) {
+          continue;
+        }
+        if (!coords[de.src] || !coords[de.tgt]) continue;
+        if (layers[de.src] == null || layers[de.tgt] == null) continue;
+        var key = de.src + ':' + de.orig.type + ':' + layers[de.tgt];
+        if (!groups[key]) groups[key] = { parent: de.src, childLayer: layers[de.tgt], children: [] };
+        if (groups[key].children.indexOf(de.tgt) === -1) groups[key].children.push(de.tgt);
+      }
+
+      function centerX(id) {
+        return coords[id].x + coords[id].w / 2;
+      }
+
+      function moveNodeIfClear(id, delta) {
+        if (Math.abs(delta) < 0.5) return true;
+        var layer = layers[id];
+        var range = nudgeRange(id, layer);
+        if (!range || !coords[id]) return false;
+        var nextX = coords[id].x + delta;
+        if (nextX < range[0] - 0.5 || nextX > range[1] + 0.5) return false;
+        coords[id].x = nextX;
+        return true;
+      }
+
+      function isDummyLayoutNode(id) {
+        return typeof id === 'string' && id.indexOf('--dummy--') === 0;
+      }
+
+      function blockMoveRange(ids, layer) {
+        var moving = {};
+        for (var mi = 0; mi < ids.length; mi++) moving[ids[mi]] = true;
+        var g = layerGroups[layer];
+        if (!g) return null;
+
+        var lower = Number.NEGATIVE_INFINITY;
+        var upper = Number.POSITIVE_INFINITY;
+        for (var gi = 0; gi < g.length; gi++) {
+          var id = g[gi];
+          if (!moving[id] || !coords[id]) continue;
+
+          var prevIdx = gi - 1;
+          while (prevIdx >= 0 && (moving[g[prevIdx]] || isDummyLayoutNode(g[prevIdx]))) prevIdx--;
+          var prev = prevIdx >= 0 ? g[prevIdx] : null;
+          if (prev && coords[prev]) {
+            lower = Math.max(lower, coords[prev].x + coords[prev].w + gapX - coords[id].x);
+          }
+
+          var nextIdx = gi + 1;
+          while (nextIdx < g.length && (moving[g[nextIdx]] || isDummyLayoutNode(g[nextIdx]))) nextIdx++;
+          var next = nextIdx < g.length ? g[nextIdx] : null;
+          if (next && coords[next]) {
+            upper = Math.min(upper, coords[next].x - coords[id].w - gapX - coords[id].x);
+          }
+        }
+        return { lower: lower, upper: upper };
+      }
+
+      function moveBlockIfClear(ids, layer, delta) {
+        if (Math.abs(delta) < 0.5) return true;
+        var range = blockMoveRange(ids, layer);
+        if (!range) return false;
+        if (delta < range.lower - 0.5 || delta > range.upper + 0.5) return false;
+        for (var mi = 0; mi < ids.length; mi++) {
+          if (coords[ids[mi]]) coords[ids[mi]].x += delta;
+        }
+        return true;
+      }
+
+      function hasNonHierarchyIncident(id) {
+        for (var ei = 0; ei < edges.length; ei++) {
+          var edge = edges[ei];
+          if (!edge || (edge.source !== id && edge.target !== id)) continue;
+          if (edge.type === 'generalization' || edge.type === 'realization') continue;
+          return true;
+        }
+        return false;
+      }
+
+      var fanouts = [];
+      for (var gk in groups) {
+        if (!Object.prototype.hasOwnProperty.call(groups, gk)) continue;
+        var group = groups[gk];
+        if (group.children.length < 3 || group.children.length % 2 === 0) continue;
+        fanouts.push(group);
+      }
+      fanouts.sort(function(a, b) {
+        return (layers[b.parent] || 0) - (layers[a.parent] || 0);
+      });
+
+      for (var fi = 0; fi < fanouts.length; fi++) {
+        var fanout = fanouts[fi];
+        // Mixed-role parents often encode the primary context alignment.
+        // Preserve that anchor instead of moving it for a secondary fan-out.
+        if (hasNonHierarchyIncident(fanout.parent)) continue;
+        var children = fanout.children.slice().filter(function(id) { return !!coords[id]; });
+        if (children.length < 3 || children.length % 2 === 0) continue;
+        children.sort(function(a, b) {
+          var dx = centerX(a) - centerX(b);
+          if (Math.abs(dx) > 0.5) return dx;
+          return (layers[a] || 0) - (layers[b] || 0);
+        });
+        var median = children[Math.floor(children.length / 2)];
+        var deltaToMedian = centerX(median) - centerX(fanout.parent);
+        if (Math.abs(deltaToMedian) < 0.5) continue;
+
+        if (!moveBlockIfClear(children, fanout.childLayer, -deltaToMedian)) {
+          moveNodeIfClear(fanout.parent, deltaToMedian);
+        }
+      }
+    }
+
+    alignMedianHierarchyFanouts();
+
     // 7. Route Edges
     var resultNodes = {};
     var resultEdges = [];
