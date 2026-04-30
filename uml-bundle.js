@@ -5394,8 +5394,8 @@
   function adaptiveClassFontBump(parsed) {
     var classes = parsed && parsed.classes ? parsed.classes.length : 0;
     var complexity = classDiagramComplexity(parsed);
-    var compactBase = parsed && parsed.layoutPreference === 'compact' ? 2 : 0;
-    if (parsed && parsed.layoutPreference === 'compact' && (classes >= 8 || complexity >= 18)) return 3;
+    var compactBase = parsed && parsed.layoutPreference === 'compact' ? 3 : 0;
+    if (parsed && parsed.layoutPreference === 'compact' && (classes >= 8 || complexity >= 18)) return 4;
     if (classes >= 8 || complexity >= 18) return Math.max(compactBase, 2);
     if (classes >= 6 || complexity >= 13) return Math.max(compactBase, 1);
     if (compactBase) return compactBase;
@@ -5428,11 +5428,13 @@
       CFG.fontSize += bump;
       CFG.fontSizeBold += bump;
       CFG.fontSizeStereotype += bump;
-      CFG.lineHeight = Math.max(CFG.lineHeight + bump, CFG.fontSize + 8);
+      CFG.lineHeight = compactTypography
+        ? Math.max(CFG.lineHeight + bump - 1, CFG.fontSize + 7)
+        : Math.max(CFG.lineHeight + bump, CFG.fontSize + 8);
       if (compactTypography) {
-        CFG.padX = Math.max(9, CFG.padX - 4);
-        CFG.padY = Math.max(3, CFG.padY - 2);
-        CFG.svgPad = Math.max(16, CFG.svgPad - 14);
+        CFG.padX = Math.max(8, CFG.padX - 5);
+        CFG.padY = Math.max(2, CFG.padY - 3);
+        CFG.svgPad = Math.max(14, CFG.svgPad - 16);
       } else {
         CFG.padX += bump;
         CFG.padY += Math.ceil(bump / 2);
@@ -5441,10 +5443,12 @@
       CFG.multOffset += bump;
       UMLShared.NOTE_CFG.fontSize += bump;
       UMLShared.NOTE_CFG.codeFontSize += bump;
-      UMLShared.NOTE_CFG.lineHeight = Math.max(UMLShared.NOTE_CFG.lineHeight + bump, UMLShared.NOTE_CFG.fontSize + 6);
+      UMLShared.NOTE_CFG.lineHeight = compactTypography
+        ? Math.max(UMLShared.NOTE_CFG.lineHeight + bump - 1, UMLShared.NOTE_CFG.fontSize + 5)
+        : Math.max(UMLShared.NOTE_CFG.lineHeight + bump, UMLShared.NOTE_CFG.fontSize + 6);
       if (compactTypography) {
-        UMLShared.NOTE_CFG.padX = Math.max(9, UMLShared.NOTE_CFG.padX - 3);
-        UMLShared.NOTE_CFG.padY = Math.max(7, UMLShared.NOTE_CFG.padY - 2);
+        UMLShared.NOTE_CFG.padX = Math.max(8, UMLShared.NOTE_CFG.padX - 4);
+        UMLShared.NOTE_CFG.padY = Math.max(6, UMLShared.NOTE_CFG.padY - 3);
       } else {
         UMLShared.NOTE_CFG.padX += bump;
         UMLShared.NOTE_CFG.padY += Math.ceil(bump / 2);
@@ -5720,10 +5724,10 @@
       // larger typography, not a different semantic layout. Keep enough gap
       // for obstacle-aware routing lanes so relationship lines can avoid
       // model boxes even in dense diagrams.
-      var compactScaleX = hasHierarchyEdges ? 0.62 : 0.6;
-      var compactScaleY = hasHierarchyEdges ? 0.58 : 0.56;
-      var softFloorX = Math.max(20, Math.round(measuredFloor.minX * 0.62));
-      var softFloorY = Math.max(22, Math.round(measuredFloor.minY * 0.64));
+      var compactScaleX = hasHierarchyEdges ? 0.58 : 0.56;
+      var compactScaleY = hasHierarchyEdges ? 0.55 : 0.53;
+      var softFloorX = Math.max(18, Math.round(measuredFloor.minX * 0.58));
+      var softFloorY = Math.max(20, Math.round(measuredFloor.minY * 0.6));
       effectiveGapX = Math.max(softFloorX, Math.round(effectiveGapX * compactScaleX));
       effectiveGapY = Math.max(softFloorY, Math.round(CFG.gapY * compactScaleY));
     } else if (hasHierarchyEdges && layoutPreference === 'landscape') {
