@@ -6043,6 +6043,43 @@
       return shifted;
     }
 
+    function enforceCompactDependencySourcePort(points, rel, fromEntry, sourceSide, sourceOffset) {
+      if (!points || points.length < 2) return points;
+      if (parsed.layoutPreference !== 'compact') return points;
+      if (!rel || (rel.type !== 'dependency' && rel.type !== 'navigable')) return points;
+      if (sourceSide !== 'top' && sourceSide !== 'bottom') return points;
+      if (!isFinite(sourceOffset) || Math.abs(sourceOffset) < 3) return points;
+      if (!fromEntry || !fromEntry.box) return points;
+
+      var boundaryY = sourceSide === 'bottom'
+        ? fromEntry.y + fromEntry.box.height
+        : fromEntry.y;
+      if (Math.abs(points[0].y - boundaryY) > 2) return points;
+
+      var anchorX = Math.max(
+        fromEntry.x + 12,
+        Math.min(fromEntry.x + fromEntry.box.width - 12, fromEntry.x + fromEntry.box.width / 2 + sourceOffset)
+      );
+      var oldX = points[0].x;
+      var adjusted = cloneClassRoutePoints(points);
+      adjusted[0].x = anchorX;
+      adjusted[0].y = boundaryY;
+
+      if (adjusted[1] && Math.abs(adjusted[1].x - oldX) < 1) {
+        adjusted[1].x = anchorX;
+      } else {
+        var stub = Math.max(18, CFG.junctionGap + 8);
+        adjusted.splice(1, 0, {
+          x: anchorX,
+          y: boundaryY + (sourceSide === 'bottom' ? stub : -stub)
+        });
+      }
+
+      adjusted = UMLShared.simplifyOrthogonalPath(adjusted);
+      if (classRouteHitsNonEndpointClass(adjusted, rel.from, rel.to)) return points;
+      return adjusted;
+    }
+
     // ── Draw relationships ──
     var decorSvg = []; // arrowhead decorations drawn above boxes and lines, below labels
 
@@ -7234,6 +7271,7 @@
       }
 
       pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
+      pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
       pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
       if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
           safePathPoints.length >= 2 &&
