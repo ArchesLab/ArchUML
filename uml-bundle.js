@@ -434,22 +434,87 @@
     function applyPortPosition(entry, alias, pos) {
       if (!entry || !entry.portPositions || !entry.portPositions[alias] || !pos) return false;
       var port = entry.portPositions[alias];
+      var targetX = parseLayoutNumber(pos.x);
       var targetY = parseLayoutNumber(pos.y);
       if (targetY === null) return false;
 
-      var lower = entry.y + 8;
-      var upper = entry.y + (entry.box && entry.box.height ? entry.box.height : 0) - 8;
-      if (upper < lower) {
-        lower = entry.y;
-        upper = entry.y + (entry.box && entry.box.height ? entry.box.height : 0);
+      var width = entry.box && entry.box.width ? entry.box.width : 0;
+      var height = entry.box && entry.box.height ? entry.box.height : 0;
+      var half = port.kind === 'require'
+        ? 8
+        : (port.kind === 'provide' ? 7 : 6);
+      var inset = Math.max(8, half + 2);
+      var left = entry.x;
+      var right = entry.x + width;
+      var top = entry.y;
+      var bottom = entry.y + height;
+      var minX = left + inset;
+      var maxX = right - inset;
+      var minY = top + inset;
+      var maxY = bottom - inset;
+      if (maxX < minX) {
+        minX = left;
+        maxX = right;
       }
-      var nextY = Math.max(lower, Math.min(upper, targetY));
-      var dy = nextY - port.cy;
+      if (maxY < minY) {
+        minY = top;
+        maxY = bottom;
+      }
+
+      function clamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+      }
+
+      function nearestSide(x, y) {
+        if (x === null) return port.side || 'left';
+        var candidates = [
+          { side: 'left', distance: Math.abs(x - left) },
+          { side: 'right', distance: Math.abs(x - right) },
+          { side: 'top', distance: Math.abs(y - top) },
+          { side: 'bottom', distance: Math.abs(y - bottom) }
+        ];
+        candidates.sort(function(a, b) {
+          if (Math.abs(a.distance - b.distance) > 0.75) return a.distance - b.distance;
+          if (a.side === port.side) return -1;
+          if (b.side === port.side) return 1;
+          return 0;
+        });
+        return candidates[0].side;
+      }
+
+      var side = nearestSide(targetX, targetY);
+      var nextX = side === 'left' ? left : (side === 'right' ? right : clamp(targetX === null ? port.cx : targetX, minX, maxX));
+      var nextY = side === 'top' ? top : (side === 'bottom' ? bottom : clamp(targetY, minY, maxY));
+
+      var oldCx = port.cx;
+      var oldCy = port.cy;
+      var oldSide = port.side;
       port.manual = true;
-      if (Math.abs(dy) < 0.5) return true;
-      if (typeof port.y === 'number') port.y += dy;
-      if (typeof port.cy === 'number') port.cy += dy;
-      if (typeof port.connY === 'number') port.connY += dy;
+      port.side = side;
+      port.cx = nextX;
+      port.cy = nextY;
+      port.x = nextX - half;
+      port.y = nextY - half;
+
+      if (side === 'left') {
+        port.connX = left - half;
+        port.connY = nextY;
+      } else if (side === 'right') {
+        port.connX = right + half;
+        port.connY = nextY;
+      } else if (side === 'top') {
+        port.connX = nextX;
+        port.connY = top - half;
+      } else {
+        port.connX = nextX;
+        port.connY = bottom + half;
+      }
+
+      if (Math.abs((oldCx || 0) - nextX) < 0.5 &&
+          Math.abs((oldCy || 0) - nextY) < 0.5 &&
+          oldSide === side) {
+        return true;
+      }
       return true;
     }
 
@@ -958,7 +1023,7 @@
       }
       if (contained) continue;
       routes.push({
-        id: 'edge-' + routes.length,
+        id: routeAttribute(el, 'data-layout-route-id') || ('edge-' + routes.length),
         index: routes.length,
         element: el,
         source: routeAttribute(el, 'data-layout-source') || null,
@@ -1011,11 +1076,21 @@
       if (!layoutMetadata.routes.hasOwnProperty(id)) continue;
       var route = layoutMetadata.routes[id];
       if (!route || !route.points || route.points.length < 2) continue;
-      var idxMatch = String(id).match(/^edge-(\d+)$/);
-      var idx = idxMatch ? Number(idxMatch[1]) : Number(id);
-      if (!isFinite(idx) || !routes[idx]) continue;
-      moveRouteDecorations(svg, routes[idx].element, routes[idx].points, route.points);
-      routes[idx].element = setRoutePointsForElement(routes[idx].element, route.points) || routes[idx].element;
+      var targetRoute = null;
+      for (var ri = 0; ri < routes.length; ri++) {
+        if (routes[ri].id === id) {
+          targetRoute = routes[ri];
+          break;
+        }
+      }
+      if (!targetRoute) {
+        var idxMatch = String(id).match(/^edge-(\d+)$/);
+        var idx = idxMatch ? Number(idxMatch[1]) : Number(id);
+        if (isFinite(idx) && routes[idx]) targetRoute = routes[idx];
+      }
+      if (!targetRoute) continue;
+      moveRouteDecorations(svg, targetRoute.element, targetRoute.points, route.points);
+      targetRoute.element = setRoutePointsForElement(targetRoute.element, route.points) || targetRoute.element;
     }
   }
 
@@ -1149,7 +1224,6 @@
   function svgOpen(w, h, ox, oy, fontFamily, options) {
     var ff = fontFamily || BASE_CFG.fontFamily;
     var shadowEnabled = !options || options.shadowEnabled !== false;
-    var shadowFilter = shadowEnabled ? 'url(#uml-node-shadow)' : 'none';
     // Transparent texture overlays — drawn on top of a solid fill so the
     // underlying colour shows through between pattern strokes.
     var patternDefs =
@@ -1169,16 +1243,34 @@
       '<pattern id="uml-tx-striped" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(90)">' +
         '<rect width="4" height="10" fill="#000" fill-opacity="0.16"/>' +
       '</pattern>';
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" ' +
+    // Drop-shadow filter built from SVG 1.1 primitives (feGaussianBlur +
+    // feOffset + feFlood + feComposite + feMerge) instead of feDropShadow,
+    // which is SVG 2 and not supported by PowerPoint, Word, Inkscape <1.0,
+    // or other renderers using older SVG engines. Without this, downstream
+    // renderers either silently drop the shadow or fail to render the
+    // filtered element entirely (the latter is what makes activation bars,
+    // sequence headers, class headers, etc. disappear in PowerPoint).
+    // When `shadow off` is specified, define a no-op identity filter so
+    // elements that reference url(#uml-node-shadow) still render (an
+    // unresolved filter URL hides the element under SVG 2 rules).
+    var shadowFilter = shadowEnabled
+      ? '<filter id="uml-node-shadow" x="-20%" y="-20%" width="150%" height="170%" color-interpolation-filters="sRGB">' +
+          '<feGaussianBlur in="SourceAlpha" stdDeviation="3" result="blur"/>' +
+          '<feOffset in="blur" dx="1.5" dy="3" result="offsetBlur"/>' +
+          '<feFlood flood-color="#000" flood-opacity="0.35" result="shadowColor"/>' +
+          '<feComposite in="shadowColor" in2="offsetBlur" operator="in" result="shadow"/>' +
+          '<feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>' +
+        '</filter>'
+      : '<filter id="uml-node-shadow">' +
+          '<feColorMatrix type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0"/>' +
+        '</filter>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + w + '" height="' + h + '" ' +
       'viewBox="0 0 ' + w + ' ' + h + '" ' +
       'style="font-family: ' + ff + '; max-width: 100%; height: auto;">' +
       '<defs>' +
-      '<filter id="uml-node-shadow" x="-20%" y="-20%" width="150%" height="170%" color-interpolation-filters="sRGB">' +
-      '<feDropShadow dx="1.5" dy="3" stdDeviation="3" flood-color="#000" flood-opacity="0.35"/>' +
-      '</filter>' +
+      shadowFilter +
       patternDefs +
       '</defs>' +
-      '<style>.uml-node-shadow{filter:' + shadowFilter + ';}line,polyline,path{stroke-linecap:square;stroke-linejoin:miter;}</style>' +
       '<g transform="translate(' + ox + ',' + oy + ')">';
   }
 
@@ -1570,7 +1662,7 @@
   function drawNoteBox(svg, x, y, w, h, colors) {
     var f = NOTE_CFG.foldSize;
     // Main body polygon (6 points: skip the top-right corner for the fold)
-    svg.push('<polygon class="uml-node-shadow uml-note-box" points="' +
+    svg.push('<polygon class="uml-note-box" filter="url(#uml-node-shadow)" points="' +
       x + ',' + y + ' ' +
       (x + w - f) + ',' + y + ' ' +
       (x + w) + ',' + (y + f) + ' ' +
@@ -1578,7 +1670,7 @@
       x + ',' + (y + h) +
       '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
     // Fold triangle
-    svg.push('<polyline class="uml-node-shadow uml-note-fold" points="' +
+    svg.push('<polyline class="uml-note-fold" filter="url(#uml-node-shadow)" points="' +
       (x + w - f) + ',' + y + ' ' +
       (x + w - f) + ',' + (y + f) + ' ' +
       (x + w) + ',' + (y + f) +
@@ -3357,7 +3449,7 @@
     var bodyBot = bodyTop + bodyLen;
     var armBaseY = bodyTop + armY;
 
-    svg.push('<g class="uml-node-shadow">');
+    svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<circle cx="' + cx + '" cy="' + headCy + '" r="' + headR +
       '" fill="' + headFill + '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
     svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot +
@@ -8749,7 +8841,7 @@
       var hasBody = box.attrH > 0 || box.methH > 0;
       var headerFill = (cls.highlight && !hasBody) ? fills.fill : fills.headerFill;
 
-      svg.push('<g class="uml-node-shadow">');
+      svg.push('<g filter="url(#uml-node-shadow)">');
 
       // Header compartment
       svg.push('<rect x="' + x + '" y="' + y + '" width="' + box.width + '" height="' + box.nameH +
@@ -10907,7 +10999,7 @@
       var pid = participants[li].id;
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
-      svg.push('<line class="uml-node-shadow" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
+      svg.push('<line filter="url(#uml-node-shadow)" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
     }
 
@@ -10918,7 +11010,7 @@
       var ab = activationBars[abi];
       var abx = partX[ab.pIdx] - CFG.activationW / 2 + (ab.depth || 0) * CFG.activationOffset;
       var abH = Math.max(2, ab.endY - ab.startY);
-      svg.push('<rect class="uml-node-shadow" x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
+      svg.push('<rect filter="url(#uml-node-shadow)" x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
         '" height="' + abH +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     }
@@ -11094,7 +11186,7 @@
         var cIdx = findPIdx(m.target);
         var cpx = partX[cIdx] - partWidths[cIdx] / 2;
         var cpart = participants[cIdx];
-        svg.push('<rect class="uml-node-shadow" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
+        svg.push('<rect filter="url(#uml-node-shadow)" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
           '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         pushSequenceRectObstacle(cpx, my, partWidths[cIdx], partH);
         var cDisp = participantDisplay(cpart);
@@ -11282,7 +11374,7 @@
           UMLShared.escapeXml(displayText) + '</text>');
       } else {
         // Rectangle participant
-        svg.push('<rect class="uml-node-shadow" x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
+        svg.push('<rect filter="url(#uml-node-shadow)" x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
           '" fill="' + partFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (partFills.textureUrl) {
           svg.push('<rect x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
@@ -12668,7 +12760,7 @@
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
       var cFills = UMLShared.highlightFills(colors, ce.state.highlight, ce.state.texture);
-      svg.push('<g class="uml-node-shadow">');
+      svg.push('<g filter="url(#uml-node-shadow)">');
       // Large rounded rectangle
       svg.push('<rect x="' + ce.x + '" y="' + ce.y + '" width="' + ce.box.width + '" height="' + ce.box.height +
         '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
@@ -12712,7 +12804,7 @@
         var dh = e.box.width / 2;
         var choicePts = cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy;
-        svg.push('<polygon class="uml-node-shadow" points="' + choicePts +
+        svg.push('<polygon filter="url(#uml-node-shadow)" points="' + choicePts +
           '" fill="' + choiceFills.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (choiceFills.textureUrl) {
@@ -12721,7 +12813,7 @@
       } else {
         var stateFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
         // Regular state: rounded rectangle
-        svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+        svg.push('<rect filter="url(#uml-node-shadow)" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + stateFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (stateFills.textureUrl) {
@@ -15503,8 +15595,11 @@
       return alias ? componentPortLayoutId(compName, alias) : compName;
     }
 
-    function connectorLayoutAttrs(conn, endpoints) {
+    function connectorLayoutAttrs(conn, endpoints, routeId) {
       var attrs = ' data-route-style="component"';
+      if (routeId) {
+        attrs += ' data-layout-route-id="' + UMLShared.escapeXml(routeId) + '"';
+      }
       if (!endpoints || endpoints.source) {
         attrs += ' data-layout-source="' + UMLShared.escapeXml(connectorEndpointLayoutId(conn.from, conn.fromPort)) + '"';
       }
@@ -15548,6 +15643,12 @@
       var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
       if (pos.standalone) {
         return { x: pos.cx, y: pos.cy, r: radius };
+      }
+      if (pos.side === 'top') {
+        return { x: pos.cx, y: pos.cy - CFG.ifaceStick - radius, r: radius };
+      }
+      if (pos.side === 'bottom') {
+        return { x: pos.cx, y: pos.cy + CFG.ifaceStick + radius, r: radius };
       }
       return {
         x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
@@ -15593,13 +15694,18 @@
       return rects;
     }
 
-    function drawInterfaceConnectionLabel(svgParts, labelText, x, y, colorsRef, fontSize) {
+    function drawInterfaceConnectionLabel(svgParts, labelText, x, y, colorsRef, fontSize, layoutId) {
       if (!labelText) return null;
+      if (layoutId) {
+        svgParts.push('<g data-layout-id="' + UMLShared.escapeXml(layoutId) +
+          '" data-layout-kind="edge-label">');
+      }
       svgParts.push('<text x="' + x + '" y="' + y +
         '" class="uml-component-connector-label" text-anchor="middle" font-size="' + fontSize + '"' +
         ' font-style="italic" fill="' + colorsRef.text +
         '" stroke="' + colorsRef.fill + '" stroke-width="4" stroke-opacity="0.9" stroke-linejoin="round" paint-order="stroke">' +
         UMLShared.escapeXml(labelText) + '</text>');
+      if (layoutId) svgParts.push('</g>');
       return {
         left: x - UMLShared.textWidth(labelText, false, fontSize) / 2,
         right: x + UMLShared.textWidth(labelText, false, fontSize) / 2,
@@ -15874,12 +15980,30 @@
       if (pos.standalone) return pos.connX;
       if (isJoinedAssembly) return pos.cx;
       if (pos.kind === 'provide') {
+        if (pos.side === 'top' || pos.side === 'bottom') return pos.cx;
         return pos.side === 'right' ? pos.cx + CFG.ifaceStick + CFG.ifaceRadius : pos.cx - CFG.ifaceStick - CFG.ifaceRadius;
       }
       if (pos.kind === 'require') {
+        if (pos.side === 'top' || pos.side === 'bottom') return pos.cx;
         return pos.side === 'right' ? pos.cx + CFG.ifaceStick : pos.cx - CFG.ifaceStick;
       }
       return pos.connX;
+    }
+
+    function componentEndpointY(pos, candidateY, isJoinedAssembly) {
+      if (!pos) return candidateY;
+      if (pos.standalone || isJoinedAssembly) return candidateY;
+      if (pos.side === 'top') {
+        if (pos.kind === 'provide') return candidateY - CFG.ifaceStick - CFG.ifaceRadius;
+        if (pos.kind === 'require') return candidateY - CFG.ifaceStick;
+        return candidateY - CFG.portSize / 2;
+      }
+      if (pos.side === 'bottom') {
+        if (pos.kind === 'provide') return candidateY + CFG.ifaceStick + CFG.ifaceRadius;
+        if (pos.kind === 'require') return candidateY + CFG.ifaceStick;
+        return candidateY + CFG.portSize / 2;
+      }
+      return candidateY;
     }
 
     function buildComponentEndpointCandidates(entry, alias, pos, sideAnchor, otherEntry, otherPos, isJoinedAssembly, role, slotY) {
@@ -15935,7 +16059,7 @@
             var candidateStub = endpointStubs[sti];
             pushCandidate({
               x: componentEndpointX(pos, isJoinedAssembly),
-              y: candidateY,
+              y: componentEndpointY(pos, candidateY, isJoinedAssembly),
               side: pos.side,
               stub: candidateStub,
               movePenalty: Math.abs(candidateY - pos.cy) * (hasSlotY ? 0.16 : 0.5) + Math.abs(candidateStub - stub) * 0.12,
@@ -16598,6 +16722,7 @@
         // Check source port group
         if (pc.fromPort && pcFromE.portPositions && pcFromE.portPositions[pc.fromPort]) {
           var fp = pcFromE.portPositions[pc.fromPort];
+          if (fp.manual) continue;
           var otherY = pc.toPort && pcToE.portPositions && pcToE.portPositions[pc.toPort]
             ? pcToE.portPositions[pc.toPort].cy
             : pcToE.y + pcToE.box.height / 2;
@@ -16629,6 +16754,7 @@
         // Check target port group
         if (pc.toPort && pcToE.portPositions && pcToE.portPositions[pc.toPort]) {
           var tp = pcToE.portPositions[pc.toPort];
+          if (tp.manual) continue;
           var otherY2 = pc.fromPort && pcFromE.portPositions && pcFromE.portPositions[pc.fromPort]
             ? pcFromE.portPositions[pc.fromPort].cy
             : pcFromE.y + pcFromE.box.height / 2;
@@ -16815,6 +16941,7 @@
     // ── Draw connectors ──
     var placedLabels = [];
     var connectorRoutes = [];
+    var renderedRouteCount = 0;
     function componentRoutePairCrosses(pointsA, pointsB) {
       if (!pointsA || !pointsB) return 0;
       var crossings = 0;
@@ -16864,9 +16991,10 @@
 
       var isDash = conn.type === 'dependency' || conn.visualStyle === 'dashed';
       var dAttr = isDash ? COMPONENT_DASH_ATTR : '';
-      var routeDataAttr = connectorLayoutAttrs(conn);
-      var routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false });
-      var routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true });
+      var routeId = null;
+      var routeDataAttr = '';
+      var routeSourceDataAttr = '';
+      var routeTargetDataAttr = '';
 
       // Detect joined assembly (provide ↔ require via assembly connector)
       var fpPos = conn.fromPort && fromE.portPositions[conn.fromPort] ? fromE.portPositions[conn.fromPort] : null;
@@ -17615,6 +17743,10 @@
       UMLShared.reserveOrthogonalRoute(points, occupiedSegments);
 
       if (isJoinedAssembly) {
+        var sourceRouteId = 'edge-' + renderedRouteCount++;
+        var targetRouteId = 'edge-' + renderedRouteCount++;
+        routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false }, sourceRouteId);
+        routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true }, targetRouteId);
         // ── Ball-and-socket: prefer the longest horizontal segment ──
         var bsSi = 0, bsSLen = 0, bsFoundH = false;
         for (var bsi = 0; bsi < points.length - 1; bsi++) {
@@ -17706,6 +17838,8 @@
           UMLShared.routeDirectionAtPlacement(points, { x: bsMx, y: bsMy })
         );
       } else {
+        routeId = 'edge-' + renderedRouteCount++;
+        routeDataAttr = connectorLayoutAttrs(conn, null, routeId);
         // Draw full polyline for non-joined connectors
         var pStr = '';
         for (var pi = 0; pi < points.length; pi++) {
@@ -17753,7 +17887,7 @@
         }
       }
 
-      connectorRoutes.push({ routeIndex: ci, conn: conn, points: points });
+      connectorRoutes.push({ routeIndex: ci, routeId: routeId, conn: conn, points: points });
     }
 
     var componentRouteSegments = buildComponentRouteSegments(connectorRoutes);
@@ -17820,7 +17954,12 @@
       );
       if (!labelPlacement) continue;
       labelPlacement.label = routeInfo.conn.label;
+      var labelLayoutId = routeInfo.routeId ? ('label:' + routeInfo.routeId) : null;
       var componentLabelRect = labelPlacement.rect;
+      if (labelLayoutId) {
+        svg.push('<g data-layout-id="' + UMLShared.escapeXml(labelLayoutId) +
+          '" data-layout-kind="edge-label">');
+      }
       if (routeInfo.conn.label) {
         pushComponentLabelText(svg, labelPlacement, colors, CFG);
       }
@@ -17837,6 +17976,7 @@
           textRect: makeComponentLabelRect(labelPlacement.x, labelPlacement.y, componentTextMetrics, labelPlacement.anchor)
         }
       );
+      if (labelLayoutId) svg.push('</g>');
       placedLabels.push(UMLShared.unionRects(componentLabelRect, componentDirectionRect));
     }
 
@@ -17949,7 +18089,39 @@
             var labelX, labelY, labelAnchor;
             var interfacePortDataAttr = componentPortAttrs(e.comp.name, pname, pp);
 
-            if (pp.side === 'right') {
+            if (pp.side === 'top') {
+              ifCx = pp.cx;
+              ifCy = pp.cy - ifS - ifR;
+              svg.push('<line x1="' + pp.cx + '" y1="' + pp.cy + '" x2="' + pp.cx + '" y2="' + (ifCy + ifR) +
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              if (pp.kind === 'provide') {
+                svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              } else {
+                svg.push('<path d="M' + (ifCx - ifR) + ',' + ifCy + ' A' + ifR + ',' + ifR +
+                  ' 0 0,1 ' + (ifCx + ifR) + ',' + ifCy +
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              }
+              labelX = ifCx;
+              labelAnchor = 'middle';
+              labelY = ifCy - ifR - 4;
+            } else if (pp.side === 'bottom') {
+              ifCx = pp.cx;
+              ifCy = pp.cy + ifS + ifR;
+              svg.push('<line x1="' + pp.cx + '" y1="' + pp.cy + '" x2="' + pp.cx + '" y2="' + (ifCy - ifR) +
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              if (pp.kind === 'provide') {
+                svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              } else {
+                svg.push('<path d="M' + (ifCx - ifR) + ',' + ifCy + ' A' + ifR + ',' + ifR +
+                  ' 0 0,0 ' + (ifCx + ifR) + ',' + ifCy +
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
+              }
+              labelX = ifCx;
+              labelAnchor = 'middle';
+              labelY = ifCy + ifR + portLblFs2 + 2;
+            } else if (pp.side === 'right') {
               ifCx = pp.cx + ifS + ifR;
               // Stick line from component edge
               svg.push('<line x1="' + pp.cx + '" y1="' + ifCy + '" x2="' + (ifCx - ifR) + '" y2="' + ifCy +
@@ -18001,9 +18173,12 @@
             if (pp.side === 'left') {
               jpLabelX = bx + portHalf2 + 6;
               jpAnchor = 'start';
-            } else {
+            } else if (pp.side === 'right') {
               jpLabelX = bx + bw - portHalf2 - 6;
               jpAnchor = 'end';
+            } else {
+              jpLabelX = pp.cx;
+              jpAnchor = 'middle';
             }
             svg.push('<text x="' + jpLabelX + '" y="' + (pp.cy + portLblFs2 * 0.35) +
               '" text-anchor="' + jpAnchor + '" font-size="' + portLblFs2 + '"' +
@@ -18022,9 +18197,12 @@
           if (pp.side === 'left') {
             plLabelX = bx + portHalf2 + 6;
             plAnchor = 'start';
-          } else {
+          } else if (pp.side === 'right') {
             plLabelX = bx + bw - portHalf2 - 6;
             plAnchor = 'end';
+          } else {
+            plLabelX = pp.cx;
+            plAnchor = 'middle';
           }
           svg.push('<text x="' + plLabelX + '" y="' + (pp.cy + portLblFs2 * 0.35) +
             '" text-anchor="' + plAnchor + '" font-size="' + portLblFs2 + '"' +
@@ -18130,6 +18308,17 @@
     }
   }
 
+  function componentLabelLayout(layoutMetadata) {
+    var positions = {};
+    var source = layoutMetadata && layoutMetadata.positions ? layoutMetadata.positions : {};
+    for (var id in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, id)) continue;
+      if (String(id).indexOf('label:') !== 0) continue;
+      positions[id] = source[id];
+    }
+    return { positions: positions };
+  }
+
   function render(container, text) {
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var parsed = parse(layoutExtract.text);
@@ -18148,6 +18337,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     adjustRenderedComponentLabels(container);
+    UMLShared.applyRenderedPositions(container, componentLabelLayout(parsed.layout));
     // Compact: trim the auto-fit padding so the final viewBox sits closer
     // to the actual content. The layout itself (node positions, edge
     // routes) is untouched — this only shrinks the margin that autoFit
@@ -18915,7 +19105,7 @@
       var d = CFG.node3dDepth;
       var nodeFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
 
-      svg.push('<g class="uml-node-shadow">');
+      svg.push('<g filter="url(#uml-node-shadow)">');
 
       // 3D effect: top face (parallelogram)
       svg.push('<polygon points="' +
@@ -20073,7 +20263,7 @@
       var rx = e.box.width / 2;
       var ry = e.box.height / 2;
       var ucFills = UMLShared.highlightFills(colors, e.data.highlight, e.data.texture);
-      svg.push('<ellipse class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
+      svg.push('<ellipse filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
         '" fill="' + ucFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       if (ucFills.textureUrl) {
         svg.push('<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
@@ -21389,7 +21579,7 @@
         var dw = e.box.width / 2;
         var decPts = cx + ',' + (cy - dh) + ' ' + (cx + dw) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dw) + ',' + cy;
-        svg.push('<polygon class="uml-node-shadow" points="' + decPts +
+        svg.push('<polygon filter="url(#uml-node-shadow)" points="' + decPts +
           '" fill="' + decFills.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (decFills.textureUrl) {
@@ -21408,7 +21598,7 @@
       } else {
         var actFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
         // Action node: rounded rectangle
-        svg.push('<rect class="uml-node-shadow" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+        svg.push('<rect filter="url(#uml-node-shadow)" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.actionRx + '" ry="' + CFG.actionRx +
           '" fill="' + actFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (actFills.textureUrl) {
@@ -21811,11 +22001,11 @@
 
     if (n.shape === 'circle') {
       var r = Math.min(w, h) / 2;
-      svg.push('<circle class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" r="' + r +
+      svg.push('<circle filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" r="' + r +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + tx + '" stroke="none"/>');
     } else if (n.shape === 'ellipse') {
-      svg.push('<ellipse class="uml-node-shadow" cx="' + cx + '" cy="' + cy + '" rx="' + (w / 2) + '" ry="' + (h / 2) +
+      svg.push('<ellipse filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" rx="' + (w / 2) + '" ry="' + (h / 2) +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + (w / 2) + '" ry="' + (h / 2) +
         '" fill="' + tx + '" stroke="none"/>');
@@ -21827,18 +22017,18 @@
         (x + w - inset) + ',' + (y + h) + ' ' +
         (x + inset) + ',' + (y + h) + ' ' +
         x + ',' + cy;
-      svg.push('<polygon class="uml-node-shadow" points="' + hexPts +
+      svg.push('<polygon filter="url(#uml-node-shadow)" points="' + hexPts +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<polygon points="' + hexPts + '" fill="' + tx + '" stroke="none"/>');
     } else if (n.shape === 'pill') {
       var pr = h / 2;
-      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+      svg.push('<rect filter="url(#uml-node-shadow)" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
         '" rx="' + pr + '" ry="' + pr +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
         '" rx="' + pr + '" ry="' + pr + '" fill="' + tx + '" stroke="none"/>');
     } else if (n.shape === 'round') {
-      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+      svg.push('<rect filter="url(#uml-node-shadow)" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
         '" rx="' + CFG.roundRx + '" ry="' + CFG.roundRx +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
@@ -21850,7 +22040,7 @@
         (x + w) + ',' + (y + f) + ' ' +
         (x + w) + ',' + (y + h) + ' ' +
         x + ',' + (y + h);
-      svg.push('<polygon class="uml-node-shadow" points="' + notePts +
+      svg.push('<polygon filter="url(#uml-node-shadow)" points="' + notePts +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<polygon points="' + notePts + '" fill="' + tx + '" stroke="none"/>');
       svg.push('<polyline points="' +
@@ -21859,7 +22049,7 @@
         (x + w) + ',' + (y + f) +
         '" fill="none" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
     } else {
-      svg.push('<rect class="uml-node-shadow" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+      svg.push('<rect filter="url(#uml-node-shadow)" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
         '" rx="' + CFG.rx + '" ry="' + CFG.rx +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strw + '"/>');
       if (tx) svg.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
@@ -24504,7 +24694,7 @@
     // other UML renderers (class headers, deployment nodes, component
     // boxes). Wrapped in a uml-node-shadow group so drop shadows apply
     // when `layout shadows on` is set.
-    svg.push('<g class="uml-node-shadow">');
+    svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<rect x="' + x + '" y="' + y +
       '" width="' + w + '" height="' + h +
       '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
@@ -24532,7 +24722,7 @@
       cx + ',' + (cy + h / 2),
       (cx - w / 2) + ',' + cy
     ].join(' ');
-    svg.push('<g class="uml-node-shadow">');
+    svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<polygon points="' + pts +
       '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
       '" stroke-width="' + CFG.strokeWidth + '"/>');
@@ -24577,7 +24767,7 @@
       var rx = a.size.w / 2, ry = a.size.h / 2;
       var extra = '';
       if (a.attr.kind === 'derived') extra = ' stroke-dasharray="5,4"';
-      svg.push('<g class="uml-node-shadow">');
+      svg.push('<g filter="url(#uml-node-shadow)">');
       svg.push('<ellipse cx="' + a.cx + '" cy="' + a.cy +
         '" rx="' + rx + '" ry="' + ry +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke +
