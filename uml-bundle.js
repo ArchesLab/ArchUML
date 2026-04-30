@@ -4249,13 +4249,25 @@
     });
 
     // Count edge crossings between two adjacent layers
+    var layerMembership = [];
+    for (var lmi = 0; lmi <= layerMax; lmi++) {
+      layerMembership[lmi] = Object.create(null);
+      if (!layerGroups[lmi]) continue;
+      for (var lmj = 0; lmj < layerGroups[lmi].length; lmj++) layerMembership[lmi][layerGroups[lmi][lmj]] = true;
+    }
+
     function countCrossings(l1, l2) {
-      if (!l1 || !l2) return 0;
+      if (!l1 || !l2 || l2.length === 0) return 0;
       var c = 0;
+      var l2Member = layerMembership[layers[l2[0]]] || {};
       for (var i = 0; i < l1.length; i++) {
         for (var j = i + 1; j < l1.length; j++) {
-          var t1 = adj[l1[i]] ? adj[l1[i]].filter(function(v) { return l2.indexOf(v) !== -1; }) : [];
-          var t2 = adj[l1[j]] ? adj[l1[j]].filter(function(v) { return l2.indexOf(v) !== -1; }) : [];
+          var t1 = [];
+          var t2 = [];
+          var adjI = adj[l1[i]] || [];
+          var adjJ = adj[l1[j]] || [];
+          for (var ai = 0; ai < adjI.length; ai++) if (l2Member[adjI[ai]]) t1.push(adjI[ai]);
+          for (var aj = 0; aj < adjJ.length; aj++) if (l2Member[adjJ[aj]]) t2.push(adjJ[aj]);
           for (var ti = 0; ti < t1.length; ti++)
             for (var tj = 0; tj < t2.length; tj++)
               if (pos[t1[ti]] > pos[t2[tj]]) {
@@ -4535,105 +4547,110 @@
     // For an odd fan-out, the visual middle subclass should sit directly
     // under the superclass so that one inheritance stem stays straight.
     function alignMedianHierarchyFanouts() {
-      var groups = {};
-      for (var dei = 0; dei < directedEdges.length; dei++) {
-        var de = directedEdges[dei];
-        if (!de || !de.orig ||
-            (de.orig.type !== 'generalization' && de.orig.type !== 'realization')) {
-          continue;
-        }
-        if (!coords[de.src] || !coords[de.tgt]) continue;
-        if (layers[de.src] == null || layers[de.tgt] == null) continue;
-        var key = de.src + ':' + de.orig.type + ':' + layers[de.tgt];
-        if (!groups[key]) groups[key] = { parent: de.src, childLayer: layers[de.tgt], children: [] };
-        if (groups[key].children.indexOf(de.tgt) === -1) groups[key].children.push(de.tgt);
-      }
-
       function centerX(id) {
         return coords[id].x + coords[id].w / 2;
-      }
-
-      function moveNodeIfClear(id, delta) {
-        if (Math.abs(delta) < 0.5) return true;
-        var layer = layers[id];
-        var range = nudgeRange(id, layer);
-        if (!range || !coords[id]) return false;
-        var nextX = coords[id].x + delta;
-        if (nextX < range[0] - 0.5 || nextX > range[1] + 0.5) return false;
-        coords[id].x = nextX;
-        return true;
       }
 
       function isDummyLayoutNode(id) {
         return typeof id === 'string' && id.indexOf('--dummy--') === 0;
       }
 
-      function blockMoveRange(ids, layer) {
+      function hierarchyGroupKey(edge) {
+        if (!edge || !edge.orig ||
+            (edge.orig.type !== 'generalization' && edge.orig.type !== 'realization')) {
+          return null;
+        }
+        if (!coords[edge.src] || !coords[edge.tgt]) return null;
+        if (layers[edge.src] == null || layers[edge.tgt] == null) return null;
+        return edge.src + ':' + edge.orig.type + ':' + layers[edge.tgt];
+      }
+
+      var nonHierarchyIncident = {};
+      for (var ei = 0; ei < edges.length; ei++) {
+        var edge = edges[ei];
+        if (!edge || edge.type === 'generalization' || edge.type === 'realization') continue;
+        if (edge.source != null) nonHierarchyIncident[edge.source] = true;
+        if (edge.target != null) nonHierarchyIncident[edge.target] = true;
+      }
+
+      function addGroupChild(group, childId) {
+        if (!group.childSeen) group.childSeen = {};
+        if (group.childSeen[childId]) return;
+        group.childSeen[childId] = true;
+        group.children.push(childId);
+      }
+
+      function cleanGroup(group) {
+        if (group.childSeen) {
+          delete group.childSeen;
+        }
+        return group;
+      }
+
+      function neighborOutsideGroup(group, fromIndex, step, moving) {
+        for (var ni = fromIndex; ni >= 0 && ni < group.length; ni += step) {
+          var id = group[ni];
+          if (!moving[id] && !isDummyLayoutNode(id)) return id;
+        }
+        return null;
+      }
+
+      function canShiftChildren(ids, layer, delta) {
         var moving = {};
         for (var mi = 0; mi < ids.length; mi++) moving[ids[mi]] = true;
         var g = layerGroups[layer];
-        if (!g) return null;
+        if (!g) return false;
 
-        var lower = Number.NEGATIVE_INFINITY;
-        var upper = Number.POSITIVE_INFINITY;
         for (var gi = 0; gi < g.length; gi++) {
           var id = g[gi];
           if (!moving[id] || !coords[id]) continue;
 
-          var prevIdx = gi - 1;
-          while (prevIdx >= 0 && (moving[g[prevIdx]] || isDummyLayoutNode(g[prevIdx]))) prevIdx--;
-          var prev = prevIdx >= 0 ? g[prevIdx] : null;
+          var prev = neighborOutsideGroup(g, gi - 1, -1, moving);
           if (prev && coords[prev]) {
-            lower = Math.max(lower, coords[prev].x + coords[prev].w + gapX - coords[id].x);
+            var minX = coords[prev].x + coords[prev].w + gapX;
+            if (coords[id].x + delta < minX - 0.5) return false;
           }
 
-          var nextIdx = gi + 1;
-          while (nextIdx < g.length && (moving[g[nextIdx]] || isDummyLayoutNode(g[nextIdx]))) nextIdx++;
-          var next = nextIdx < g.length ? g[nextIdx] : null;
+          var next = neighborOutsideGroup(g, gi + 1, 1, moving);
           if (next && coords[next]) {
-            upper = Math.min(upper, coords[next].x - coords[id].w - gapX - coords[id].x);
+            var maxX = coords[next].x - coords[id].w - gapX;
+            if (coords[id].x + delta > maxX + 0.5) return false;
           }
-        }
-        return { lower: lower, upper: upper };
-      }
-
-      function moveBlockIfClear(ids, layer, delta) {
-        if (Math.abs(delta) < 0.5) return true;
-        var range = blockMoveRange(ids, layer);
-        if (!range) return false;
-        if (delta < range.lower - 0.5 || delta > range.upper + 0.5) return false;
-        for (var mi = 0; mi < ids.length; mi++) {
-          if (coords[ids[mi]]) coords[ids[mi]].x += delta;
         }
         return true;
       }
 
-      function hasNonHierarchyIncident(id) {
-        for (var ei = 0; ei < edges.length; ei++) {
-          var edge = edges[ei];
-          if (!edge || (edge.source !== id && edge.target !== id)) continue;
-          if (edge.type === 'generalization' || edge.type === 'realization') continue;
-          return true;
+      function shiftChildren(ids, delta) {
+        for (var mi = 0; mi < ids.length; mi++) {
+          if (coords[ids[mi]]) coords[ids[mi]].x += delta;
         }
-        return false;
+      }
+
+      var groups = {};
+      for (var dei = 0; dei < directedEdges.length; dei++) {
+        var de = directedEdges[dei];
+        var key = hierarchyGroupKey(de);
+        if (!key) continue;
+        if (!groups[key]) groups[key] = { parent: de.src, childLayer: layers[de.tgt], children: [] };
+        addGroupChild(groups[key], de.tgt);
       }
 
       var fanouts = [];
       for (var gk in groups) {
         if (!Object.prototype.hasOwnProperty.call(groups, gk)) continue;
-        var group = groups[gk];
+        var group = cleanGroup(groups[gk]);
         if (group.children.length < 3 || group.children.length % 2 === 0) continue;
         fanouts.push(group);
       }
       fanouts.sort(function(a, b) {
-        return (layers[b.parent] || 0) - (layers[a.parent] || 0);
+        return (layers[a.parent] || 0) - (layers[b.parent] || 0);
       });
 
       for (var fi = 0; fi < fanouts.length; fi++) {
         var fanout = fanouts[fi];
         // Mixed-role parents often encode the primary context alignment.
         // Preserve that anchor instead of moving it for a secondary fan-out.
-        if (hasNonHierarchyIncident(fanout.parent)) continue;
+        if (nonHierarchyIncident[fanout.parent]) continue;
         var children = fanout.children.slice().filter(function(id) { return !!coords[id]; });
         if (children.length < 3 || children.length % 2 === 0) continue;
         children.sort(function(a, b) {
@@ -4642,12 +4659,10 @@
           return (layers[a] || 0) - (layers[b] || 0);
         });
         var median = children[Math.floor(children.length / 2)];
-        var deltaToMedian = centerX(median) - centerX(fanout.parent);
-        if (Math.abs(deltaToMedian) < 0.5) continue;
+        var delta = centerX(fanout.parent) - centerX(median);
+        if (Math.abs(delta) < 0.5) continue;
 
-        if (!moveBlockIfClear(children, fanout.childLayer, -deltaToMedian)) {
-          moveNodeIfClear(fanout.parent, deltaToMedian);
-        }
+        if (canShiftChildren(children, fanout.childLayer, delta)) shiftChildren(children, delta);
       }
     }
 
@@ -5707,8 +5722,8 @@
       // larger typography, not a different semantic layout. Keep enough gap
       // for obstacle-aware routing lanes so relationship lines can avoid
       // model boxes even in dense diagrams.
-      var compactScaleX = hasHierarchyEdges ? 0.58 : 0.56;
-      var compactScaleY = hasHierarchyEdges ? 0.55 : 0.53;
+      var compactScaleX = 0.56;
+      var compactScaleY = 0.53;
       var softFloorX = Math.max(18, Math.round(measuredFloor.minX * 0.58));
       var softFloorY = Math.max(20, Math.round(measuredFloor.minY * 0.6));
       effectiveGapX = Math.max(softFloorX, Math.round(effectiveGapX * compactScaleX));
