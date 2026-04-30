@@ -253,6 +253,772 @@
     return null;
   }
 
+  function parseLayoutHeader(line, layout) {
+    var body = line.replace(/^@layout\b/i, '').trim();
+    if (!layout) layout = {};
+    layout.schema = layout.schema || 1;
+    if (!body) return layout;
+    body.replace(/([a-zA-Z][\w-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g, function(_, key, rawValue) {
+      var value = String(rawValue || '').replace(/^['"]|['"]$/g, '');
+      if (key === 'schema') {
+        var schema = parseInt(value, 10);
+        if (isFinite(schema)) layout.schema = schema;
+      } else if (key === 'renderer') {
+        layout.renderer = value;
+      }
+      return '';
+    });
+    return layout;
+  }
+
+  function parseLayoutNumber(value) {
+    var n = Number(value);
+    return isFinite(n) ? n : null;
+  }
+
+  function unquoteLayoutId(id) {
+    return String(id || '').trim().replace(/^"((?:[^"\\]|\\.)*)"$/, '$1').replace(/\\"/g, '"');
+  }
+
+  function inferLayoutTargetId(line) {
+    var clean = String(line || '').trim();
+    if (!clean) return null;
+
+    var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
+    if (aliasMatch) return aliasMatch[1];
+
+    var boxAliasMatch = clean.match(/^box(?:\s+[a-z]+)?\s+"(?:[^"\\]|\\.)*"\s+as\s+(\S+)/i);
+    if (boxAliasMatch) return boxAliasMatch[1];
+
+    var participantMatch = clean.match(/^(?:participant|actor)\s+(\S+)/i);
+    if (participantMatch) return participantMatch[1];
+
+    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
+    if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
+
+    var bareMatch = clean.match(/^([A-Za-z0-9_.:-]+)(?:\s+merge\s+\S+|\s+"(?:[^"\\]|\\.)*"|\s*)$/);
+    if (bareMatch && !/^(layout|head|branch)$/i.test(bareMatch[1])) return bareMatch[1];
+
+    return null;
+  }
+
+  function addLayoutPosition(layout, id, x, y) {
+    if (!layout || !id) return;
+    if (!layout.positions) layout.positions = {};
+    var px = parseLayoutNumber(x);
+    var py = parseLayoutNumber(y);
+    if (px === null && py === null) return;
+    layout.positions[id] = {
+      x: px === null ? undefined : px,
+      y: py === null ? undefined : py
+    };
+  }
+
+  function parseLayoutRoutePoints(raw) {
+    var body = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
+    if (!body) return [];
+    var points = [];
+    body.split(/\s+/).forEach(function(part) {
+      var m = part.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
+      if (!m) return;
+      points.push({ x: Number(m[1]), y: Number(m[2]) });
+    });
+    return points;
+  }
+
+  function addLayoutRoute(layout, id, rawPoints) {
+    if (!layout || id === undefined || id === null) return;
+    var points = Array.isArray(rawPoints) ? rawPoints : parseLayoutRoutePoints(rawPoints);
+    if (!points || points.length < 2) return;
+    if (!layout.routes) layout.routes = {};
+    layout.routes[unquoteLayoutId(id)] = { points: points };
+  }
+
+  function parseLayoutBlockLine(line, layout) {
+    var clean = String(line || '').trim();
+    if (!clean || clean.charAt(0) === '#') return;
+
+    var posCall = clean.match(/^(.+?)\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/i);
+    if (posCall) {
+      addLayoutPosition(layout, unquoteLayoutId(posCall[1]), posCall[2], posCall[3]);
+      return;
+    }
+
+    var kv = clean.match(/^(?:node|element|position|pos)\s+("[^"]+"|\S+)(?:\s+x\s*=\s*(-?\d+(?:\.\d+)?))?(?:\s+y\s*=\s*(-?\d+(?:\.\d+)?))?/i);
+    if (kv && (kv[2] !== undefined || kv[3] !== undefined)) {
+      addLayoutPosition(layout, unquoteLayoutId(kv[1]), kv[2], kv[3]);
+      return;
+    }
+
+    var tuple = clean.match(/^(?:node|element|position|pos)\s+("[^"]+"|\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/i);
+    if (tuple) {
+      addLayoutPosition(layout, unquoteLayoutId(tuple[1]), tuple[2], tuple[3]);
+      return;
+    }
+
+    var route = clean.match(/^(?:edge|route)\s+("[^"]+"|\S+)\s+points\s*=\s*("[^"]*"|'[^']*'|.+)$/i);
+    if (route) {
+      addLayoutRoute(layout, route[1], route[2]);
+    }
+  }
+
+  function extractLayoutMetadata(text) {
+    var source = String(text || '');
+    var lines = source.split('\n');
+    var layout = { schema: 1, positions: {}, routes: {} };
+    var out = [];
+    var inLayout = false;
+
+    for (var i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      var trimmed = raw.trim();
+
+      if (/^@layout\b/i.test(trimmed)) {
+        parseLayoutHeader(trimmed, layout);
+        inLayout = true;
+        continue;
+      }
+      if (/^@endlayout\b/i.test(trimmed)) {
+        inLayout = false;
+        continue;
+      }
+      if (inLayout) {
+        parseLayoutBlockLine(trimmed, layout);
+        continue;
+      }
+
+      var inlinePos = raw.match(/\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/i);
+      if (inlinePos) {
+        var before = raw.slice(0, inlinePos.index);
+        var after = raw.slice(inlinePos.index + inlinePos[0].length);
+        var targetId = inferLayoutTargetId(before + after);
+        addLayoutPosition(layout, targetId, inlinePos[1], inlinePos[2]);
+        raw = before + after;
+      }
+      out.push(raw);
+    }
+
+    return { text: out.join('\n'), layout: layout };
+  }
+
+  function findLayoutPosition(layout, id) {
+    if (!layout || !layout.positions || !id) return null;
+    if (layout.positions.hasOwnProperty(id)) return layout.positions[id];
+    var raw = String(id);
+    var unquoted = unquoteLayoutId(raw);
+    if (layout.positions.hasOwnProperty(unquoted)) return layout.positions[unquoted];
+    var quoted = '"' + raw.replace(/"/g, '\\"') + '"';
+    if (layout.positions.hasOwnProperty(quoted)) return layout.positions[quoted];
+    return null;
+  }
+
+  function applyLayoutPositions(layoutResult, layoutMetadata) {
+    if (!layoutResult || !layoutResult.entries || !layoutMetadata || !layoutMetadata.positions) return layoutResult;
+    var entries = layoutResult.entries;
+    var changed = false;
+
+    function translateEntryPorts(entry, dx, dy) {
+      if (!entry || !entry.portPositions) return;
+      for (var alias in entry.portPositions) {
+        if (!entry.portPositions.hasOwnProperty(alias)) continue;
+        var port = entry.portPositions[alias];
+        ['x', 'cx', 'connX'].forEach(function(key) {
+          if (typeof port[key] === 'number') port[key] += dx;
+        });
+        ['y', 'cy', 'connY'].forEach(function(key) {
+          if (typeof port[key] === 'number') port[key] += dy;
+        });
+      }
+    }
+
+    function applyPortPosition(entry, alias, pos) {
+      if (!entry || !entry.portPositions || !entry.portPositions[alias] || !pos) return false;
+      var port = entry.portPositions[alias];
+      var targetY = parseLayoutNumber(pos.y);
+      if (targetY === null) return false;
+
+      var lower = entry.y + 8;
+      var upper = entry.y + (entry.box && entry.box.height ? entry.box.height : 0) - 8;
+      if (upper < lower) {
+        lower = entry.y;
+        upper = entry.y + (entry.box && entry.box.height ? entry.box.height : 0);
+      }
+      var nextY = Math.max(lower, Math.min(upper, targetY));
+      var dy = nextY - port.cy;
+      port.manual = true;
+      if (Math.abs(dy) < 0.5) return true;
+      if (typeof port.y === 'number') port.y += dy;
+      if (typeof port.cy === 'number') port.cy += dy;
+      if (typeof port.connY === 'number') port.connY += dy;
+      return true;
+    }
+
+    function findEntryPort(id) {
+      var raw = String(id || '');
+      for (var entryId in entries) {
+        if (!entries.hasOwnProperty(entryId)) continue;
+        var prefix = entryId + '.';
+        if (raw.indexOf(prefix) !== 0) continue;
+        var alias = raw.slice(prefix.length);
+        if (entries[entryId] && entries[entryId].portPositions && entries[entryId].portPositions[alias]) {
+          return { entry: entries[entryId], alias: alias };
+        }
+      }
+      return null;
+    }
+
+    for (var key in entries) {
+      if (!entries.hasOwnProperty(key)) continue;
+      var entryForLookup = entries[key];
+      var pos = findLayoutPosition(layoutMetadata, key);
+      if (!pos && entryForLookup.node) {
+        pos = findLayoutPosition(layoutMetadata, entryForLookup.node.id) ||
+          findLayoutPosition(layoutMetadata, entryForLookup.node.name) ||
+          findLayoutPosition(layoutMetadata, entryForLookup.node.label);
+      }
+      if (!pos && entryForLookup.cls) {
+        pos = findLayoutPosition(layoutMetadata, entryForLookup.cls.name);
+      }
+      if (!pos && entryForLookup.state) {
+        pos = findLayoutPosition(layoutMetadata, entryForLookup.state.name);
+      }
+      if (!pos && entryForLookup.comp) {
+        pos = findLayoutPosition(layoutMetadata, entryForLookup.comp.name);
+      }
+      if (!pos && entryForLookup.data) {
+        pos = findLayoutPosition(layoutMetadata, entryForLookup.data.id) ||
+          findLayoutPosition(layoutMetadata, entryForLookup.data.name);
+      }
+      if (!pos) continue;
+      var oldX = entryForLookup.x;
+      var oldY = entryForLookup.y;
+      if (pos.x !== undefined) entryForLookup.x = pos.x;
+      if (pos.y !== undefined) entryForLookup.y = pos.y;
+      translateEntryPorts(entryForLookup, entryForLookup.x - oldX, entryForLookup.y - oldY);
+      changed = true;
+    }
+
+    for (var posId in layoutMetadata.positions) {
+      if (!layoutMetadata.positions.hasOwnProperty(posId)) continue;
+      var portRef = findEntryPort(posId);
+      if (portRef && applyPortPosition(portRef.entry, portRef.alias, layoutMetadata.positions[posId])) {
+        changed = true;
+      }
+    }
+
+    if (!changed) return layoutResult;
+
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var id in entries) {
+      if (!entries.hasOwnProperty(id)) continue;
+      var entry = entries[id];
+      var box = entry.box || { width: 0, height: 0 };
+      minX = Math.min(minX, entry.x);
+      minY = Math.min(minY, entry.y);
+      maxX = Math.max(maxX, entry.x + (box.width || box.w || 0));
+      maxY = Math.max(maxY, entry.y + (box.height || box.h || 0));
+    }
+
+    if (isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY)) {
+      layoutResult.width = Math.max(0, maxX - minX);
+      layoutResult.height = Math.max(0, maxY - minY);
+      layoutResult.offsetX = -minX;
+      layoutResult.offsetY = -minY;
+    }
+    return layoutResult;
+  }
+
+  function layoutRoutePointsToString(points) {
+    return (points || []).map(function(p) {
+      return Math.round(p.x) + ',' + Math.round(p.y);
+    }).join(' ');
+  }
+
+  function parseSvgPoints(raw) {
+    return String(raw || '').trim().split(/\s+/).map(function(part) {
+      var xy = part.split(',');
+      if (xy.length !== 2) return null;
+      var x = Number(xy[0]);
+      var y = Number(xy[1]);
+      if (!isFinite(x) || !isFinite(y)) return null;
+      return { x: x, y: y };
+    }).filter(Boolean);
+  }
+
+  function parsePathLinePoints(raw) {
+    var points = [];
+    String(raw || '').replace(/([ML])\s*(-?\d+(?:\.\d+)?)\s*,?\s*(-?\d+(?:\.\d+)?)/ig, function(_, cmd, x, y) {
+      points.push({ x: Number(x), y: Number(y) });
+      return '';
+    });
+    return points.filter(function(p) { return isFinite(p.x) && isFinite(p.y); });
+  }
+
+  function routePointsForElement(el) {
+    if (!el || !el.tagName) return null;
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'line') {
+      var x1 = Number(el.getAttribute('x1'));
+      var y1 = Number(el.getAttribute('y1'));
+      var x2 = Number(el.getAttribute('x2'));
+      var y2 = Number(el.getAttribute('y2'));
+      if ([x1, y1, x2, y2].some(function(v) { return !isFinite(v); })) return null;
+      return [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+    }
+    if (tag === 'polyline') {
+      var points = parseSvgPoints(el.getAttribute('points'));
+      return points.length >= 2 ? points : null;
+    }
+    if (tag === 'path') {
+      if ((el.getAttribute('fill') || 'none') !== 'none') return null;
+      var d = el.getAttribute('d') || '';
+      if (!/[CQAST]/i.test(d)) {
+        var linePoints = parsePathLinePoints(d);
+        if (linePoints.length >= 2) return linePoints;
+      }
+      var nums = d.match(/-?\d+(?:\.\d+)?/g);
+      if (!nums || nums.length < 4) return null;
+      var start = { x: Number(nums[0]), y: Number(nums[1]) };
+      var end = { x: Number(nums[nums.length - 2]), y: Number(nums[nums.length - 1]) };
+      if ([start.x, start.y, end.x, end.y].some(function(v) { return !isFinite(v); })) return null;
+      return [start, end];
+    }
+    if (tag === 'rect') {
+      var w = Number(el.getAttribute('width'));
+      var h = Number(el.getAttribute('height'));
+      var x = Number(el.getAttribute('x'));
+      var y = Number(el.getAttribute('y'));
+      if ([x, y, w, h].some(function(v) { return !isFinite(v); })) return null;
+      if (h > 18 && w <= 18) return [{ x: x + w / 2, y: y }, { x: x + w / 2, y: y + h }];
+    }
+    return null;
+  }
+
+  function routeOwnerForElement(el) {
+    if (!el || !el.closest) return null;
+    return el.closest('[data-layout-source],[data-layout-target],[data-route-style]');
+  }
+
+  function routeAttribute(el, name) {
+    if (!el) return '';
+    var direct = el.getAttribute && el.getAttribute(name);
+    if (direct) return direct;
+    var owner = routeOwnerForElement(el);
+    return owner && owner.getAttribute ? (owner.getAttribute(name) || '') : '';
+  }
+
+  function isGitGraphRouteElement(el) {
+    return routeAttribute(el, 'data-route-style') === 'gitgraph' ||
+      (el && el.classList && el.classList.contains('git-graph-edge-shaft'));
+  }
+
+  function gitGraphRoutePathD(points) {
+    var start = points[0];
+    var end = points[points.length - 1];
+    var midY = (start.y + end.y) / 2;
+    return 'M ' + start.x + ' ' + start.y +
+      ' C ' + start.x + ' ' + midY + ', ' + end.x + ' ' + midY + ', ' + end.x + ' ' + end.y;
+  }
+
+  function snapHalf(v) {
+    return Math.round(Number(v) * 2) / 2;
+  }
+
+  function gitGraphEdgeHeadTransform(points) {
+    var start = points[0];
+    var end = points[points.length - 1];
+    var x = snapHalf(end.x);
+    var y = snapHalf(end.y);
+    var angle = y >= snapHalf(start.y) ? 90 : -90;
+    return 'translate(' + x + ' ' + y + ') rotate(' + angle + ') translate(0 -6)';
+  }
+
+  function updateGitGraphRouteHead(el, points) {
+    var owner = routeOwnerForElement(el);
+    var head = owner ? owner.querySelector('.git-graph-edge-head') : null;
+    if (head) head.setAttribute('transform', gitGraphEdgeHeadTransform(points));
+  }
+
+  function replaceLineWithPolyline(el, points) {
+    if (!el || !el.parentNode || !points || points.length < 2) return el;
+    var poly = el.ownerDocument.createElementNS(el.namespaceURI || 'http://www.w3.org/2000/svg', 'polyline');
+    for (var i = 0; i < el.attributes.length; i++) {
+      var attr = el.attributes[i];
+      if (!/^(x1|y1|x2|y2)$/i.test(attr.name)) {
+        poly.setAttribute(attr.name, attr.value);
+      }
+    }
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('points', points.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+    el.parentNode.replaceChild(poly, el);
+    return poly;
+  }
+
+  function setRoutePointsForElement(el, points) {
+    if (!el || !points || points.length < 2) return el;
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'line') {
+      if (points.length > 2) return replaceLineWithPolyline(el, points);
+      el.setAttribute('x1', points[0].x);
+      el.setAttribute('y1', points[0].y);
+      el.setAttribute('x2', points[points.length - 1].x);
+      el.setAttribute('y2', points[points.length - 1].y);
+    } else if (tag === 'polyline') {
+      el.setAttribute('points', points.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+    } else if (tag === 'path') {
+      if (isGitGraphRouteElement(el)) {
+        el.setAttribute('d', gitGraphRoutePathD(points));
+        updateGitGraphRouteHead(el, points);
+      } else {
+        el.setAttribute('d', points.map(function(p, i) {
+          return (i === 0 ? 'M ' : 'L ') + p.x + ' ' + p.y;
+        }).join(' '));
+      }
+    } else if (tag === 'rect') {
+      var width = Number(el.getAttribute('width') || 0);
+      var x = Math.min(points[0].x, points[points.length - 1].x) - width / 2;
+      var y = Math.min(points[0].y, points[points.length - 1].y);
+      var h = Math.abs(points[points.length - 1].y - points[0].y);
+      el.setAttribute('x', x);
+      el.setAttribute('y', y);
+      el.setAttribute('height', h);
+    }
+    return el;
+  }
+
+  function renderedPoint(svg, clientX, clientY) {
+    var pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    var ctm = svg.getScreenCTM();
+    return ctm ? pt.matrixTransform(ctm.inverse()) : { x: clientX, y: clientY };
+  }
+
+  function renderedBox(svg, el) {
+    if (!svg || !el || !el.getBoundingClientRect) return safeElementBBox(el);
+    var rect = el.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return safeElementBBox(el);
+    var p1 = renderedPoint(svg, rect.left, rect.top);
+    var p2 = renderedPoint(svg, rect.right, rect.bottom);
+    var x = Math.min(p1.x, p2.x);
+    var y = Math.min(p1.y, p2.y);
+    return { x: x, y: y, width: Math.abs(p2.x - p1.x), height: Math.abs(p2.y - p1.y) };
+  }
+
+  function unionSvgBoxes(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    var x1 = Math.min(a.x, b.x);
+    var y1 = Math.min(a.y, b.y);
+    var x2 = Math.max(a.x + a.width, b.x + b.width);
+    var y2 = Math.max(a.y + a.height, b.y + b.height);
+    return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+  }
+
+  function layoutElementsById(svg, id) {
+    var raw = String(id || '');
+    return Array.prototype.slice.call(svg.querySelectorAll('[data-layout-id]')).filter(function(el) {
+      return el.getAttribute('data-layout-id') === raw && !el.closest('defs');
+    });
+  }
+
+  function layoutBoundsElementsById(svg, id) {
+    var raw = String(id || '');
+    return Array.prototype.slice.call(svg.querySelectorAll('[data-layout-bounds-id]')).filter(function(el) {
+      return el.getAttribute('data-layout-bounds-id') === raw && !el.closest('defs');
+    });
+  }
+
+  function renderedElementsBox(svg, elements) {
+    var box = null;
+    for (var i = 0; i < elements.length; i++) {
+      box = unionSvgBoxes(box, renderedBox(svg, elements[i]));
+    }
+    return box;
+  }
+
+  function layoutRenderedBox(svg, id, parts) {
+    var bounds = layoutBoundsElementsById(svg, id);
+    return renderedElementsBox(svg, bounds.length ? bounds : parts);
+  }
+
+  function applyRenderedPositions(container, layoutMetadata) {
+    if (!container || !layoutMetadata || !layoutMetadata.positions) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+
+    var deltas = {};
+    for (var id in layoutMetadata.positions) {
+      if (!layoutMetadata.positions.hasOwnProperty(id)) continue;
+      var pos = layoutMetadata.positions[id];
+      if (!pos || pos.x === undefined || pos.y === undefined) continue;
+      var parts = layoutElementsById(svg, id);
+      if (!parts.length) continue;
+      var box = layoutRenderedBox(svg, id, parts);
+      if (!box) continue;
+      var dx = pos.x - box.x;
+      var dy = pos.y - box.y;
+      for (var pi = 0; pi < parts.length; pi++) {
+        translateSvgElement(parts[pi], dx, dy);
+      }
+      if (dx || dy) deltas[id] = { x: dx, y: dy };
+    }
+    applyAnchoredLayoutDeltas(svg, deltas, layoutMetadata.positions);
+    moveConnectedRoutes(svg, deltas);
+  }
+
+  function applyAnchoredLayoutDeltas(svg, deltas, explicitPositions) {
+    var anchored = Array.prototype.slice.call(svg.querySelectorAll('[data-layout-id][data-layout-anchor]')).filter(function(el) {
+      return !el.closest('defs');
+    });
+    for (var i = 0; i < anchored.length; i++) {
+      var el = anchored[i];
+      var id = el.getAttribute('data-layout-id') || '';
+      var anchor = el.getAttribute('data-layout-anchor') || '';
+      if (!id || !anchor) continue;
+      var anchorDelta = deltas[anchor] || { x: 0, y: 0 };
+      var labelDelta = deltas[id] || null;
+      if (!labelDelta && !(explicitPositions && Object.prototype.hasOwnProperty.call(explicitPositions, id))) {
+        if (!anchorDelta.x && !anchorDelta.y) continue;
+        translateSvgElement(el, anchorDelta.x, anchorDelta.y);
+        labelDelta = anchorDelta;
+      }
+      if (!labelDelta) labelDelta = { x: 0, y: 0 };
+      adjustAnchoredLabelConnectors(el, anchorDelta.x - labelDelta.x, anchorDelta.y - labelDelta.y);
+    }
+  }
+
+  function adjustAnchoredLabelConnectors(labelEl, dx, dy) {
+    if (!labelEl || (!dx && !dy)) return;
+    var connectors = Array.prototype.slice.call(labelEl.querySelectorAll('.git-graph-label-connector'));
+    for (var i = 0; i < connectors.length; i++) {
+      var el = connectors[i];
+      var tag = el.tagName ? el.tagName.toLowerCase() : '';
+      if (tag === 'line') {
+        var x1 = Number(el.getAttribute('x1') || 0);
+        var y1 = Number(el.getAttribute('y1') || 0);
+        var x2 = Number(el.getAttribute('x2') || 0) + dx;
+        var y2 = Number(el.getAttribute('y2') || 0) + dy;
+        if (Math.abs(y2 - y1) > 0.5) {
+          var poly = el.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+          for (var ai = 0; ai < el.attributes.length; ai++) {
+            var attr = el.attributes[ai];
+            if (!/^(x1|y1|x2|y2)$/i.test(attr.name)) poly.setAttribute(attr.name, attr.value);
+          }
+          poly.setAttribute('fill', 'none');
+          poly.setAttribute('points', x1 + ',' + y1 + ' ' + x2 + ',' + y1 + ' ' + x2 + ',' + y2);
+          if (el.parentNode) el.parentNode.replaceChild(poly, el);
+        } else {
+          el.setAttribute('x2', x2);
+          el.setAttribute('y2', y2);
+        }
+      } else if (tag === 'polyline') {
+        var points = parseSvgPoints(el.getAttribute('points'));
+        if (!points.length) continue;
+        var end = points.length - 1;
+        var firstSegmentHorizontal = points.length < 3 ||
+          Math.abs(points[1].y - points[0].y) <= Math.abs(points[1].x - points[0].x);
+        points[end].x += dx;
+        points[end].y += dy;
+        if (points.length > 2) {
+          if (firstSegmentHorizontal) points[end - 1].x += dx;
+          else points[end - 1].y += dy;
+        }
+        el.setAttribute('points', points.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+      }
+    }
+  }
+
+  function sameRouteDelta(oldPoints, newPoints) {
+    if (!oldPoints || !newPoints || oldPoints.length !== newPoints.length) return null;
+    var dx = newPoints[0].x - oldPoints[0].x;
+    var dy = newPoints[0].y - oldPoints[0].y;
+    for (var i = 1; i < oldPoints.length; i++) {
+      if (Math.abs((newPoints[i].x - oldPoints[i].x) - dx) > 0.5) return null;
+      if (Math.abs((newPoints[i].y - oldPoints[i].y) - dy) > 0.5) return null;
+    }
+    return { x: dx, y: dy };
+  }
+
+  function pointDistance(a, b) {
+    var dx = a.x - b.x;
+    var dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function translateSvgElement(el, dx, dy) {
+    if (!el || (!dx && !dy)) return;
+    if (el.classList && el.classList.contains('git-graph-label-g')) {
+      var cssPrior = el.style.transform || '';
+      var cssNext = 'translate(' + dx + 'px,' + dy + 'px)';
+      el.style.transform = cssPrior ? cssPrior + ' ' + cssNext : cssNext;
+      return;
+    }
+    var prior = el.getAttribute('transform') || '';
+    var next = 'translate(' + dx + ' ' + dy + ')';
+    el.setAttribute('transform', prior ? prior + ' ' + next : next);
+  }
+
+  function moveRouteDecorations(svg, routeEl, oldPoints, newPoints) {
+    if (!svg || !oldPoints || !newPoints || oldPoints.length < 2 || newPoints.length < 2) return;
+    var oldStart = oldPoints[0];
+    var oldEnd = oldPoints[oldPoints.length - 1];
+    var startDelta = { x: newPoints[0].x - oldStart.x, y: newPoints[0].y - oldStart.y };
+    var endDelta = {
+      x: newPoints[newPoints.length - 1].x - oldEnd.x,
+      y: newPoints[newPoints.length - 1].y - oldEnd.y
+    };
+    var wholeDelta = sameRouteDelta(oldPoints, newPoints);
+    var oldBox = routeBox(oldPoints);
+
+    var candidates = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
+      if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+      var b = safeElementBBox(el);
+      if (!b) return false;
+      if (el.tagName.toLowerCase() !== 'text' && Math.max(b.width, b.height) > 34) return false;
+      return true;
+    });
+
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var b = safeElementBBox(el);
+      if (!b) continue;
+      var c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+      if (pointDistance(c, oldStart) <= 18) {
+        translateSvgElement(el, startDelta.x, startDelta.y);
+      } else if (pointDistance(c, oldEnd) <= 18) {
+        translateSvgElement(el, endDelta.x, endDelta.y);
+      } else if (wholeDelta && el.tagName.toLowerCase() === 'text' &&
+          c.x >= oldBox.x - 28 && c.x <= oldBox.x + oldBox.width + 28 &&
+          c.y >= oldBox.y - 28 && c.y <= oldBox.y + oldBox.height + 28) {
+        translateSvgElement(el, wholeDelta.x, wholeDelta.y);
+      }
+    }
+  }
+
+  function safeElementBBox(el) {
+    try {
+      var b = el.getBBox();
+      if (!isFinite(b.x) || !isFinite(b.y) || b.width <= 0 || b.height <= 0) return null;
+      return { x: b.x, y: b.y, width: b.width, height: b.height };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function routeBox(points) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var i = 0; i < points.length; i++) {
+      minX = Math.min(minX, points[i].x);
+      minY = Math.min(minY, points[i].y);
+      maxX = Math.max(maxX, points[i].x);
+      maxY = Math.max(maxY, points[i].y);
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  function boxContainsBox(outer, inner, pad) {
+    pad = pad || 0;
+    return inner.x >= outer.x - pad &&
+      inner.y >= outer.y - pad &&
+      inner.x + inner.width <= outer.x + outer.width + pad &&
+      inner.y + inner.height <= outer.y + outer.height + pad;
+  }
+
+  function collectRouteObstacleBoxes(svg) {
+    return Array.prototype.slice.call(svg.querySelectorAll('rect,ellipse,circle,polygon,path')).filter(function(el) {
+      if (el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'path' && (el.getAttribute('fill') || 'none') === 'none') return false;
+      var b = safeElementBBox(el);
+      if (!b || b.width < 24 || b.height < 16) return false;
+      return tag !== 'rect' || !(b.height > 18 && b.width <= 18);
+    }).map(safeElementBBox).filter(Boolean);
+  }
+
+  function collectEditableRoutes(svg) {
+    if (!svg) return [];
+    var obstacles = collectRouteObstacleBoxes(svg);
+    var candidates = Array.prototype.slice.call(svg.querySelectorAll('line,polyline,path,rect')).filter(function(el) {
+      return !el.closest('defs') && !el.closest('.uml-pg-edit-layer');
+    });
+    var routes = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var points = routePointsForElement(el);
+      if (!points || points.length < 2) continue;
+      var rb = routeBox(points);
+      if (Math.max(rb.width, rb.height) < 18) continue;
+      var contained = false;
+      for (var oi = 0; oi < obstacles.length; oi++) {
+        if (boxContainsBox(obstacles[oi], rb, 2)) {
+          contained = true;
+          break;
+        }
+      }
+      if (contained) continue;
+      routes.push({
+        id: 'edge-' + routes.length,
+        index: routes.length,
+        element: el,
+        source: routeAttribute(el, 'data-layout-source') || null,
+        target: routeAttribute(el, 'data-layout-target') || null,
+        style: routeAttribute(el, 'data-route-style') || null,
+        points: points,
+        box: rb
+      });
+    }
+    return routes;
+  }
+
+  function moveConnectedRoutes(svg, deltas) {
+    if (!svg || !deltas) return [];
+    var routes = collectEditableRoutes(svg);
+    var changed = [];
+    for (var i = 0; i < routes.length; i++) {
+      var route = routes[i];
+      var sourceDelta = route.source ? deltas[route.source] : null;
+      var targetDelta = route.target ? deltas[route.target] : null;
+      if (!sourceDelta && !targetDelta) continue;
+      var points = route.points.map(function(p) { return { x: p.x, y: p.y }; });
+      if (sourceDelta) {
+        points[0].x += sourceDelta.x;
+        points[0].y += sourceDelta.y;
+      }
+      if (targetDelta) {
+        var end = points.length - 1;
+        points[end].x += targetDelta.x;
+        points[end].y += targetDelta.y;
+      }
+      route.element = setRoutePointsForElement(route.element, points) || route.element;
+      changed.push({
+        id: route.id,
+        source: route.source,
+        target: route.target,
+        element: route.element,
+        points: points
+      });
+    }
+    return changed;
+  }
+
+  function applyLayoutRoutes(container, layoutMetadata) {
+    if (!container || !layoutMetadata || !layoutMetadata.routes) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    var routes = collectEditableRoutes(svg);
+    for (var id in layoutMetadata.routes) {
+      if (!layoutMetadata.routes.hasOwnProperty(id)) continue;
+      var route = layoutMetadata.routes[id];
+      if (!route || !route.points || route.points.length < 2) continue;
+      var idxMatch = String(id).match(/^edge-(\d+)$/);
+      var idx = idxMatch ? Number(idxMatch[1]) : Number(id);
+      if (!isFinite(idx) || !routes[idx]) continue;
+      moveRouteDecorations(svg, routes[idx].element, routes[idx].points, route.points);
+      routes[idx].element = setRoutePointsForElement(routes[idx].element, route.points) || routes[idx].element;
+    }
+  }
+
   // ─── Theme Colors ───────────────────────────────────────────────
 
   function getThemeColors(container) {
@@ -2624,6 +3390,16 @@
     buildLabelDirectionTriangle: buildLabelDirectionTriangle,
     pushLabelDirectionTriangle: pushLabelDirectionTriangle,
     parseLayoutDirective: parseLayoutDirective,
+    extractLayoutMetadata: extractLayoutMetadata,
+    applyLayoutPositions: applyLayoutPositions,
+    findLayoutPosition: findLayoutPosition,
+    collectEditableRoutes: collectEditableRoutes,
+    routePointsForElement: routePointsForElement,
+    setRoutePointsForElement: setRoutePointsForElement,
+    moveConnectedRoutes: moveConnectedRoutes,
+    layoutRoutePointsToString: layoutRoutePointsToString,
+    applyRenderedPositions: applyRenderedPositions,
+    applyLayoutRoutes: applyLayoutRoutes,
     parseHighlightColor: parseHighlightColor,
     highlightFills: highlightFills,
     darkenHexColor: darkenHexColor,
@@ -9227,7 +10003,9 @@
    * @param {Object} [options] - Optional overrides
    */
   function render(container, text, options) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     renderFromData(container, parsed, options);
   }
 
@@ -9257,10 +10035,12 @@
 
     var rendered = withAdaptiveClassTypography(parsed, function() {
       var layout = computeLayout(parsed);
+      UMLShared.applyLayoutPositions(layout, parsed.layout);
       return generateSVG(layout, parsed, colors);
     });
     var svgStr = rendered;
     container.innerHTML = svgStr;
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -9662,7 +10442,9 @@
   // ─── Layout & Render ──────────────────────────────────────────────
 
   function render(container, text, options) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.participants || parsed.participants.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No participants to display.</div>';
       return;
@@ -9672,6 +10454,7 @@
     var colors = UMLShared.getThemeColors(container);
     var svg = generateSequenceSVG(parsed, colors);
     container.innerHTML = svg;
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -9770,6 +10553,22 @@
       }
     }
     var totalW = curX + CFG.svgPad;
+    if (parsed.layout && parsed.layout.positions) {
+      var manualMinX = Infinity;
+      var manualMaxX = -Infinity;
+      for (var lpi = 0; lpi < participants.length; lpi++) {
+        var lp = UMLShared.findLayoutPosition(parsed.layout, participants[lpi].id);
+        if (lp && lp.x !== undefined) partX[lpi] = lp.x;
+        manualMinX = Math.min(manualMinX, partX[lpi] - partWidths[lpi] / 2);
+        manualMaxX = Math.max(manualMaxX, partX[lpi] + partWidths[lpi] / 2);
+      }
+      if (isFinite(manualMinX) && manualMinX < CFG.svgPad) {
+        var manualShift = CFG.svgPad - manualMinX;
+        for (var spi = 0; spi < partX.length; spi++) partX[spi] += manualShift;
+        manualMaxX += manualShift;
+      }
+      if (isFinite(manualMaxX)) totalW = Math.max(totalW, manualMaxX + CFG.svgPad);
+    }
 
     // ── Process messages to compute Y positions ──
     var curY = CFG.svgPad + partH + firstMessageGapY; // Start below participant boxes
@@ -11988,7 +12787,9 @@
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.states || parsed.states.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No states to display.</div>';
       return;
@@ -11999,7 +12800,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -14678,6 +15481,39 @@
     var placedLabels = [];
     var placedRouteSegments = [];
     svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+
+    function componentLayoutAttr(id) {
+      return id ? ' data-layout-id="' + UMLShared.escapeXml(id) + '"' : '';
+    }
+
+    function componentPortLayoutId(compName, alias) {
+      return compName + '.' + alias;
+    }
+
+    function componentPortAttrs(compName, alias, pos) {
+      var id = componentPortLayoutId(compName, alias);
+      return componentLayoutAttr(id) +
+        ' data-layout-kind="port"' +
+        ' data-layout-parent="' + UMLShared.escapeXml(compName) + '"' +
+        ' data-layout-port="' + UMLShared.escapeXml(alias) + '"' +
+        ' data-port-side="' + UMLShared.escapeXml(pos && pos.side ? pos.side : '') + '"';
+    }
+
+    function connectorEndpointLayoutId(compName, alias) {
+      return alias ? componentPortLayoutId(compName, alias) : compName;
+    }
+
+    function connectorLayoutAttrs(conn, endpoints) {
+      var attrs = ' data-route-style="component"';
+      if (!endpoints || endpoints.source) {
+        attrs += ' data-layout-source="' + UMLShared.escapeXml(connectorEndpointLayoutId(conn.from, conn.fromPort)) + '"';
+      }
+      if (!endpoints || endpoints.target) {
+        attrs += ' data-layout-target="' + UMLShared.escapeXml(connectorEndpointLayoutId(conn.to, conn.toPort)) + '"';
+      }
+      return attrs;
+    }
+
     // Build port kind map for interface detection
     var portKindMap = {};
     for (var pki = 0; pki < parsed.components.length; pki++) {
@@ -14939,6 +15775,7 @@
     function getPortMovementBounds(entry, alias) {
       var pos = entry && entry.portPositions ? entry.portPositions[alias] : null;
       if (!pos || (pos.side !== 'left' && pos.side !== 'right')) return null;
+      if (pos.manual) return null;
       if ((portUsageCount[componentPortUsageKey(entry.comp.name, alias)] || 0) !== 1) return null;
 
       var sidePorts = pos.side === 'left' ? entry.leftPorts : entry.rightPorts;
@@ -14976,6 +15813,7 @@
     function getPortSlotBounds(entry, alias) {
       var pos = entry && entry.portPositions ? entry.portPositions[alias] : null;
       if (!pos || (pos.side !== 'left' && pos.side !== 'right')) return null;
+      if (pos.manual) return { pos: pos, lower: pos.cy, upper: pos.cy, halfPort: CFG.portSize / 2 };
 
       var sidePorts = pos.side === 'left' ? entry.leftPorts : entry.rightPorts;
       var portIdx = sidePorts.indexOf(alias);
@@ -16026,6 +16864,9 @@
 
       var isDash = conn.type === 'dependency' || conn.visualStyle === 'dashed';
       var dAttr = isDash ? COMPONENT_DASH_ATTR : '';
+      var routeDataAttr = connectorLayoutAttrs(conn);
+      var routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false });
+      var routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true });
 
       // Detect joined assembly (provide ↔ require via assembly connector)
       var fpPos = conn.fromPort && fromE.portPositions[conn.fromPort] ? fromE.portPositions[conn.fromPort] : null;
@@ -16838,9 +17679,9 @@
           pts2 += ' ' + points[pi2].x + ',' + points[pi2].y;
         }
         svg.push('<polyline points="' + pts1 +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + routeSourceDataAttr + '/>');
         svg.push('<polyline points="' + pts2 +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + routeTargetDataAttr + '/>');
 
         // Draw ball (filled circle)
         svg.push('<circle cx="' + ballCx + '" cy="' + ballCy + '" r="' + ballR +
@@ -16872,7 +17713,7 @@
           pStr += points[pi].x + ',' + points[pi].y;
         }
         svg.push('<polyline points="' + pStr +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + routeDataAttr + '/>');
       }
 
       if (!isJoinedAssembly && conn.type !== 'link') {
@@ -17014,21 +17855,22 @@
           var sp = e.portPositions[spName];
           var spText = sp.label !== undefined ? sp.label : spName;
           var spDashAttr = sp.visualStyle === 'dashed' ? COMPONENT_DASH_ATTR : '';
+          var spDataAttr = componentLayoutAttr(e.comp.name);
           var spLabelX, spAnchor;
 
           if (sp.kind === 'provide' || sp.kind === 'require') {
             var spR = sp.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
             if (sp.kind === 'provide') {
               svg.push('<circle cx="' + sp.cx + '" cy="' + sp.cy + '" r="' + spR +
-                '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+                '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + spDataAttr + '/>');
             } else if (sp.side === 'right') {
               svg.push('<path d="M' + sp.cx + ',' + (sp.cy - spR) + ' A' + spR + ',' + spR +
                 ' 0 0,0 ' + sp.cx + ',' + (sp.cy + spR) +
-                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + spDataAttr + '/>');
             } else {
               svg.push('<path d="M' + sp.cx + ',' + (sp.cy - spR) + ' A' + spR + ',' + spR +
                 ' 0 0,1 ' + sp.cx + ',' + (sp.cy + spR) +
-                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+                '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + spDataAttr + '/>');
             }
             if (sp.side === 'left') {
               spLabelX = sp.cx + spR + 8;
@@ -17041,7 +17883,7 @@
             svg.push('<rect x="' + sp.x + '" y="' + sp.y +
               '" width="' + CFG.portSize + '" height="' + CFG.portSize +
               '" fill="' + colors.fill + '" stroke="' + colors.stroke +
-              '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + '/>');
+              '" stroke-width="' + CFG.strokeWidth + '"' + spDashAttr + spDataAttr + '/>');
             if (sp.side === 'left') {
               spLabelX = sp.x + CFG.portSize + 8;
               spAnchor = 'start';
@@ -17061,32 +17903,33 @@
 
       // Main rectangle
       svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' + compDashAttr + '/>');
+        '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' +
+        compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
       if (compFills.textureUrl) {
         svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-          '" fill="' + compFills.textureUrl + '" stroke="none"/>');
+          '" fill="' + compFills.textureUrl + '" stroke="none"' + componentLayoutAttr(e.comp.name) + '/>');
       }
 
       // Component icon (top-right): small rectangle with two tabs
       var ix = bx + bw - CFG.iconW - 8;
       var iy = by + 6;
       svg.push('<rect x="' + ix + '" y="' + iy + '" width="' + CFG.iconW + '" height="' + CFG.iconH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + CFG.iconH - CFG.iconTabH - 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
-        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + '/>');
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
 
       if (e.hasPorts) {
         // Name at top-left when component has ports
         svg.push('<text x="' + (bx + CFG.padX) + '" y="' + (by + CFG.padY + CFG.fontSizeBold * 0.35 + 2) +
-          '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+          '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
           UMLShared.escapeXml(e.comp.name) + '</text>');
 
       } else {
         // Centered name when no ports
         svg.push('<text x="' + (bx + (bw - CFG.iconW - 8) / 2) + '" y="' + (by + bh / 2 + CFG.fontSize * 0.35) +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
           UMLShared.escapeXml(e.comp.name) + '</text>');
       }
 
@@ -17104,21 +17947,22 @@
             var ifS = CFG.ifaceStick;
             var ifCx, ifCy = pp.cy;
             var labelX, labelY, labelAnchor;
+            var interfacePortDataAttr = componentPortAttrs(e.comp.name, pname, pp);
 
             if (pp.side === 'right') {
               ifCx = pp.cx + ifS + ifR;
               // Stick line from component edge
               svg.push('<line x1="' + pp.cx + '" y1="' + ifCy + '" x2="' + (ifCx - ifR) + '" y2="' + ifCy +
-                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               if (pp.kind === 'provide') {
                 // Lollipop: circle at end of stick
                 svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
-                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               } else {
                 // Socket: `(` arc opening right (toward provider)
                 svg.push('<path d="M' + ifCx + ',' + (ifCy - ifR) + ' A' + ifR + ',' + ifR +
                   ' 0 0,0 ' + ifCx + ',' + (ifCy + ifR) +
-                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               }
               // Label centered below the symbol (avoids collision with the opposing port's label)
               labelX = ifCx;
@@ -17127,15 +17971,15 @@
             } else {
               ifCx = pp.cx - ifS - ifR;
               svg.push('<line x1="' + pp.cx + '" y1="' + ifCy + '" x2="' + (ifCx + ifR) + '" y2="' + ifCy +
-                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               if (pp.kind === 'provide') {
                 svg.push('<circle cx="' + ifCx + '" cy="' + ifCy + '" r="' + ifR +
-                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                  '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               } else {
                 // Socket: `)` arc opening left
                 svg.push('<path d="M' + ifCx + ',' + (ifCy - ifR) + ' A' + ifR + ',' + ifR +
                   ' 0 0,1 ' + ifCx + ',' + (ifCy + ifR) +
-                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+                  '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + interfacePortDataAttr + '/>');
               }
               // Label centered below the symbol (avoids collision with the opposing port's label)
               labelX = ifCx;
@@ -17171,7 +18015,7 @@
           svg.push('<rect x="' + pp.x + '" y="' + pp.y +
             '" width="' + CFG.portSize + '" height="' + CFG.portSize +
             '" fill="' + colors.fill + '" stroke="' + colors.stroke +
-            '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + '/>');
+            '" stroke-width="' + CFG.strokeWidth + '"' + portDashAttr + componentPortAttrs(e.comp.name, pname, pp) + '/>');
 
           // Port label inside the box, next to the port
           var plLabelX, plAnchor;
@@ -17287,7 +18131,9 @@
   }
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.components || parsed.components.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No components to display.</div>';
       return;
@@ -17298,7 +18144,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     adjustRenderedComponentLabels(container);
     // Compact: trim the auto-fit padding so the final viewBox sits closer
     // to the actual content. The layout itself (node positions, edge
@@ -18159,7 +19007,9 @@
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No nodes to display.</div>';
       return;
@@ -18170,7 +19020,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -19497,7 +20349,9 @@
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (parsed.actors.length === 0 && parsed.usecases.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No elements to display.</div>';
       return;
@@ -19508,7 +20362,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -20659,7 +21515,9 @@
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No activities to display.</div>';
       return;
@@ -20670,7 +21528,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -21204,7 +22064,9 @@
   }
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No boxes to display.</div>';
       return;
@@ -21215,7 +22077,9 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -21458,7 +22322,8 @@
   }
 
   function render(container, text) {
-    var data = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var data = parse(layoutExtract.text);
     if (!window.GitGraph) {
       container.innerHTML = '<div style="padding:20px;color:#b00;text-align:center;">' +
         'GitGraph renderer not loaded. Include <code>js/git-graph.js</code> on the page.</div>';
@@ -21470,6 +22335,8 @@
     }
     UMLShared.prepareDiagramContainer(container, 'gitgraph');
     container.innerHTML = window.GitGraph.renderToSVG(data);
+    UMLShared.applyRenderedPositions(container, layoutExtract.layout);
+    UMLShared.applyLayoutRoutes(container, layoutExtract.layout);
   }
 
   // Accept both `diagram-gitgraph` (explicit HTML) and `language-gitgraph`
@@ -21706,7 +22573,9 @@
   }
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     if (!parsed.rows || parsed.rows.length === 0) {
       container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No folder tree to display.</div>';
       return;
@@ -21714,6 +22583,7 @@
     UMLShared.prepareDiagramContainer(container, 'folder-tree');
     var colors = UMLShared.getThemeColors(container);
     container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -22509,9 +23379,13 @@
     return lines;
   }
 
-  function shapeTag(s, fill, opacity, stroke, sw) {
+  function layoutDataAttr(id) {
+    return id ? ' data-layout-id="' + UMLShared.escapeXml(id) + '"' : '';
+  }
+
+  function shapeTag(s, fill, opacity, stroke, sw, layoutId) {
     var common = 'fill="' + fill + '" fill-opacity="' + opacity + '" stroke="' + stroke +
-                 '" stroke-width="' + sw + '"';
+                 '" stroke-width="' + sw + '"' + layoutDataAttr(layoutId);
     if (s.kind === 'circle') {
       return '<circle cx="' + s.cx + '" cy="' + s.cy + '" r="' + s.r + '" ' + common + '/>';
     }
@@ -22519,8 +23393,8 @@
     return '<ellipse cx="' + s.cx + '" cy="' + s.cy + '" rx="' + s.rx + '" ry="' + s.ry + '"' + rot + ' ' + common + '/>';
   }
 
-  function shapeOutlineTag(s, stroke, sw) {
-    var common = 'fill="none" stroke="' + stroke + '" stroke-width="' + sw + '"';
+  function shapeOutlineTag(s, stroke, sw, layoutId) {
+    var common = 'fill="none" stroke="' + stroke + '" stroke-width="' + sw + '"' + layoutDataAttr(layoutId);
     if (s.kind === 'circle') {
       return '<circle cx="' + s.cx + '" cy="' + s.cy + '" r="' + s.r + '" ' + common + '/>';
     }
@@ -22731,14 +23605,16 @@
     //   stay crisp (blend modes would wash them out).
     svg.push('<g style="mix-blend-mode: multiply">');
     for (var si = 0; si < layout.shapes.length; si++) {
+      var setLayoutId = parsed.sets[si] && parsed.sets[si].name;
       svg.push(shapeTag(layout.shapes[si], setColors[si], CFG.fillOpacity,
-                        darkenForStroke(setColors[si]), 0));
+                        darkenForStroke(setColors[si]), 0, setLayoutId));
     }
     svg.push('</g>');
 
     // Outlines
     for (var sj = 0; sj < layout.shapes.length; sj++) {
-      svg.push(shapeOutlineTag(layout.shapes[sj], darkenForStroke(setColors[sj]), 1.6));
+      var outlineLayoutId = parsed.sets[sj] && parsed.sets[sj].name;
+      svg.push(shapeOutlineTag(layout.shapes[sj], darkenForStroke(setColors[sj]), 1.6, outlineLayoutId));
     }
 
     // Set labels
@@ -22747,7 +23623,8 @@
       var lblColor = darkenForStroke(setColors[sk]);
       svg.push('<text x="' + lab.x + '" y="' + lab.y +
         '" text-anchor="' + lab.anchor + '" font-size="' + CFG.setLabelFontSize +
-        '" font-weight="600" fill="' + lblColor + '">' +
+        '" font-weight="600" fill="' + lblColor + '"' +
+        layoutDataAttr(parsed.sets[sk].name) + '>' +
         UMLShared.escapeXml(parsed.sets[sk].name) + '</text>');
     }
 
@@ -22837,10 +23714,15 @@
   }
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     UMLShared.prepareDiagramContainer(container, 'venn');
     var colors = UMLShared.getThemeColors(container);
     container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.autoFitSVG(container);
+    UMLShared.applyRenderedPositions(container, parsed.layout);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
@@ -23327,6 +24209,27 @@
       relPos[rel._key] = { cx: mx, cy: my, box: measureDiamond(rel), relationship: rel };
     }
 
+    if (parsed.layout && parsed.layout.positions) {
+      for (var ekey in entityPos) {
+        var entPos = entityPos[ekey];
+        var manualEnt = UMLShared.findLayoutPosition(parsed.layout, entPos.entity.name) ||
+          UMLShared.findLayoutPosition(parsed.layout, ekey);
+        if (manualEnt) {
+          if (manualEnt.x !== undefined) entPos.cx = manualEnt.x + entPos.box.w / 2;
+          if (manualEnt.y !== undefined) entPos.cy = manualEnt.y + entPos.box.h / 2;
+        }
+      }
+      for (var rkey in relPos) {
+        var relPosEntry = relPos[rkey];
+        var manualRel = UMLShared.findLayoutPosition(parsed.layout, relPosEntry.relationship.name) ||
+          UMLShared.findLayoutPosition(parsed.layout, rkey);
+        if (manualRel) {
+          if (manualRel.x !== undefined) relPosEntry.cx = manualRel.x + relPosEntry.box.w / 2;
+          if (manualRel.y !== undefined) relPosEntry.cy = manualRel.y + relPosEntry.box.h / 2;
+        }
+      }
+    }
+
     // Place attributes around entities & relationships. For each host,
     // compute "blocked angular sectors" pointing at connected partners,
     // then fan the attributes into the free angular space.
@@ -23783,10 +24686,13 @@
   }
 
   function render(container, text) {
-    var parsed = parse(text);
+    var layoutExtract = UMLShared.extractLayoutMetadata(text);
+    var parsed = parse(layoutExtract.text);
+    parsed.layout = layoutExtract.layout;
     UMLShared.prepareDiagramContainer(container, 'er');
     var colors = UMLShared.getThemeColors(container);
     container.innerHTML = generateSVG(parsed, colors);
+    UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
 
