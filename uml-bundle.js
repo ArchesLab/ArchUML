@@ -37,6 +37,321 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function normalizeAccessibleName(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function diagramTypeLabel(type) {
+    var labels = {
+      class: 'UML class diagram',
+      sequence: 'UML sequence diagram',
+      state: 'UML state diagram',
+      component: 'UML component diagram',
+      deployment: 'UML deployment diagram',
+      usecase: 'UML use case diagram',
+      activity: 'UML activity diagram',
+      freeform: 'diagram',
+      gitgraph: 'Git commit graph',
+      'folder-tree': 'folder tree diagram',
+      venn: 'Venn diagram',
+      er: 'entity relationship diagram'
+    };
+    return labels[type] || 'diagram';
+  }
+
+  function cleanDiagramTerm(term) {
+    term = normalizeAccessibleName(term).replace(/^["']|["']$/g, '');
+    var alias = term.match(/^(.+?)\s+as\s+\w+$/i);
+    if (alias) term = normalizeAccessibleName(alias[1]).replace(/^["']|["']$/g, '');
+    return term;
+  }
+
+  function extractDiagramTitle(text) {
+    var lines = String(text || '').split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var match = lines[i].trim().match(/^title\s+(.+)$/i);
+      if (match) return cleanDiagramTerm(match[1]);
+    }
+    return '';
+  }
+
+  function addUniqueTerm(terms, term) {
+    term = cleanDiagramTerm(term);
+    if (!term || terms.indexOf(term) >= 0) return;
+    terms.push(term);
+  }
+
+  function collectDiagramTerms(type, text) {
+    var terms = [];
+    var lines = String(text || '').split('\n');
+    for (var i = 0; i < lines.length && terms.length < 6; i++) {
+      var line = lines[i].trim();
+      if (!line || line[0] === "'" || line.indexOf('@') === 0 || /^title\s+/i.test(line)) continue;
+      var match = null;
+      if (type === 'class') {
+        match = line.match(/^(?:abstract\s+)?(?:class|interface|enum)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'sequence') {
+        match = line.match(/^(?:actor|participant|boundary|control|entity|database|collections?)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'state') {
+        match = line.match(/^state\s+("[^"]+"|[A-Za-z_][\w.]*)/i) || line.match(/^("[^"]+"|[A-Za-z_][\w.]*)\s+-->/);
+      } else if (type === 'component') {
+        match = line.match(/^(?:component|interface|package)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'deployment') {
+        match = line.match(/^(?:node|artifact|database|cloud|component)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'usecase') {
+        match = line.match(/^(?:actor|usecase)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'activity') {
+        match = line.match(/^:([^;]+);/);
+      } else if (type === 'er') {
+        match = line.match(/^(?:entity|relationship|attribute)\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'venn') {
+        match = line.match(/^set\s+("[^"]+"|[A-Za-z_][\w.]*)/i);
+      } else if (type === 'gitgraph') {
+        match = line.match(/^commit\s+([^\s].*)$/i) || line.match(/^branch\s+([^\s].*)$/i);
+      } else if (type === 'folder-tree') {
+        match = line.match(/^([^#\/←]+\/?)/);
+      }
+      if (match) addUniqueTerm(terms, match[1]);
+    }
+    return terms;
+  }
+
+  function buildDiagramAccessibleName(container, type, text, explicitName) {
+    var explicit = normalizeAccessibleName(explicitName);
+    if (!explicit && container) {
+      explicit = normalizeAccessibleName(container.getAttribute('data-uml-alt') || container.getAttribute('aria-label') || '');
+    }
+    if (explicit) return explicit;
+
+    var label = diagramTypeLabel(type);
+    var title = extractDiagramTitle(text);
+    if (title) return label + ': ' + title;
+
+    var terms = collectDiagramTerms(type, text);
+    if (terms.length > 0) {
+      var suffix = terms.length >= 6 ? ', and related elements' : '';
+      return label + ' showing ' + terms.join(', ') + suffix + '.';
+    }
+    return label;
+  }
+
+  var _diagramDescriptionCounter = 0;
+
+  function listText(items, limit) {
+    var clean = [];
+    for (var i = 0; i < (items || []).length; i++) {
+      var item = normalizeAccessibleName(items[i]);
+      if (item) clean.push(item);
+    }
+    if (!clean.length) return '';
+    var max = limit || clean.length;
+    var shown = clean.slice(0, max);
+    var text = shown.join('; ');
+    if (clean.length > shown.length) text += '; and ' + (clean.length - shown.length) + ' more';
+    return text;
+  }
+
+  function countText(count, singular, plural) {
+    return count + ' ' + (count === 1 ? singular : (plural || singular + 's'));
+  }
+
+  function displayClassMember(member) {
+    return normalizeAccessibleName(member && (member.text || member.name || ''));
+  }
+
+  function describeClassEntry(cls) {
+    if (!cls || !cls.name) return '';
+    var kind = cls.type === 'interface' ? 'interface'
+      : cls.type === 'enum' ? 'enum'
+      : cls.type === 'abstract' ? 'abstract class'
+      : 'class';
+    var parts = [kind + ' ' + cls.name];
+    var attrs = (cls.attributes || []).map(displayClassMember).filter(Boolean);
+    var methods = (cls.methods || []).map(displayClassMember).filter(Boolean);
+    var counts = [];
+    if (attrs.length) counts.push(countText(attrs.length, 'attribute'));
+    if (methods.length) counts.push(countText(methods.length, 'method'));
+    if (counts.length) parts.push('with ' + counts.join(' and '));
+    var details = [];
+    if (attrs.length) details.push('attributes ' + listText(attrs, 3));
+    if (methods.length) details.push('methods ' + listText(methods, 3));
+    if (details.length) parts.push('(' + details.join('; ') + ')');
+    return parts.join(' ');
+  }
+
+  function describeClassRelationship(rel) {
+    if (!rel || !rel.from || !rel.to) return '';
+    var phrase;
+    if (rel.type === 'generalization') phrase = rel.from + ' inherits from ' + rel.to;
+    else if (rel.type === 'realization') phrase = rel.from + ' realizes ' + rel.to;
+    else if (rel.type === 'composition') phrase = rel.from + ' is composed of ' + rel.to;
+    else if (rel.type === 'aggregation') phrase = rel.from + ' aggregates ' + rel.to;
+    else if (rel.type === 'dependency') phrase = rel.from + ' depends on ' + rel.to;
+    else if (rel.type === 'navigable') phrase = rel.from + ' navigates to ' + rel.to;
+    else phrase = rel.from + ' is associated with ' + rel.to;
+    if (rel.label) phrase += ', labeled ' + rel.label;
+    if (rel.fromMult || rel.toMult) {
+      var mult = [];
+      if (rel.fromMult) mult.push(rel.from + ' multiplicity ' + rel.fromMult);
+      if (rel.toMult) mult.push(rel.to + ' multiplicity ' + rel.toMult);
+      phrase += ' (' + mult.join(', ') + ')';
+    }
+    return phrase;
+  }
+
+  function describeClassDiagram(parsed) {
+    var classes = (parsed && parsed.classes) || [];
+    var relationships = (parsed && parsed.relationships) || [];
+    var parts = ['Inferred UML class specification.'];
+    if (classes.length) {
+      parts.push('Classes: ' + listText(classes.map(describeClassEntry), 8) + '.');
+    }
+    if (relationships.length) {
+      parts.push('Relationships: ' + listText(relationships.map(describeClassRelationship), 8) + '.');
+    }
+    return parts.join(' ');
+  }
+
+  function participantName(participants, id) {
+    for (var i = 0; i < (participants || []).length; i++) {
+      if (participants[i].id === id) return participants[i].label || participants[i].id;
+    }
+    return id;
+  }
+
+  function describeSequenceMessage(msg, participants) {
+    if (!msg) return '';
+    if (msg.type === 'message') {
+      var verb = msg.msgType === 'response' ? 'returns to'
+        : msg.msgType === 'async' ? 'sends asynchronously to'
+        : 'calls';
+      var line = participantName(participants, msg.from) + ' ' + verb + ' ' + participantName(participants, msg.to);
+      if (msg.label) line += ': ' + msg.label;
+      return line;
+    }
+    if (msg.type === 'lost') return participantName(participants, msg.from) + ' sends a lost message' + (msg.label ? ': ' + msg.label : '');
+    if (msg.type === 'found') return participantName(participants, msg.to) + ' receives a found message' + (msg.label ? ': ' + msg.label : '');
+    if (msg.type === 'create') return 'Creates participant ' + participantName(participants, msg.target);
+    if (msg.type === 'destroy') return 'Destroys participant ' + participantName(participants, msg.target);
+    if (msg.type === 'fragment_start') return 'Starts ' + msg.fragType + ' fragment' + (msg.condition ? ' with condition ' + msg.condition : '');
+    if (msg.type === 'fragment_else') return 'Alternative branch' + (msg.condition ? ' with condition ' + msg.condition : '');
+    return '';
+  }
+
+  function describeSequenceDiagram(parsed) {
+    var participants = (parsed && parsed.participants) || [];
+    var messages = (parsed && parsed.messages) || [];
+    var parts = ['Inferred UML sequence specification.'];
+    if (participants.length) {
+      parts.push('Participants: ' + listText(participants.map(function (p) { return p.label || p.id; }), 8) + '.');
+    }
+    var describedMessages = messages.map(function (m) { return describeSequenceMessage(m, participants); }).filter(Boolean);
+    if (describedMessages.length) {
+      parts.push('Flow: ' + listText(describedMessages, 10) + '.');
+    }
+    return parts.join(' ');
+  }
+
+  function meaningfulSpecLines(text, limit) {
+    var lines = String(text || '').split('\n');
+    var out = [];
+    var total = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var line = normalizeAccessibleName(lines[i]);
+      if (!line || line === '@startuml' || line === '@enduml' || line[0] === "'") continue;
+      if (/^caption\s*:/i.test(line) || /^layout\s+/i.test(line) || /^@layout\b/i.test(line) || /^@endlayout\b/i.test(line)) continue;
+      total++;
+      if (out.length < limit) out.push(line);
+    }
+    return { lines: out, total: total };
+  }
+
+  function describeFromSource(type, text) {
+    var source = meaningfulSpecLines(text, 12);
+    if (!source.lines.length) return diagramTypeLabel(type);
+    var extra = source.total > source.lines.length ? ' ' + (source.total - source.lines.length) + ' more specification lines omitted.' : '';
+    return 'Diagram specification: ' + source.lines.join('; ') + '.' + extra;
+  }
+
+  function parsedDiagramForDescription(type, text) {
+    var renderers = {
+      class: function () { return window.UMLClassDiagram; },
+      sequence: function () { return window.UMLSequenceDiagram; },
+      gitgraph: function () { return window.UMLGitGraphDiagram; }
+    };
+    var getRenderer = renderers[type];
+    var renderer = getRenderer && getRenderer();
+    if (!renderer || typeof renderer.parse !== 'function') return null;
+    try {
+      var layoutExtract = extractLayoutMetadata(text);
+      return renderer.parse(layoutExtract.text);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function buildDiagramAccessibleDescription(type, text, explicitDescription) {
+    var explicit = normalizeAccessibleName(explicitDescription);
+    if (explicit) return explicit;
+
+    var parsed = parsedDiagramForDescription(type, text);
+    if (type === 'class' && parsed) return describeClassDiagram(parsed);
+    if (type === 'sequence' && parsed) return describeSequenceDiagram(parsed);
+    if (type === 'gitgraph' && parsed && window.GitGraph && typeof window.GitGraph.describeData === 'function') {
+      return window.GitGraph.describeData(parsed).description;
+    }
+    return describeFromSource(type, text);
+  }
+
+  function ensureDescriptionElement(container) {
+    if (!container || !container.querySelector || typeof document === 'undefined') return null;
+    var desc = container.querySelector('.uml-accessible-description');
+    if (!desc) {
+      desc = document.createElement('div');
+      desc.className = 'sr-only uml-accessible-description';
+      desc.id = 'uml-accessible-description-' + (++_diagramDescriptionCounter);
+      container.appendChild(desc);
+    } else if (!desc.id) {
+      desc.id = 'uml-accessible-description-' + (++_diagramDescriptionCounter);
+    }
+    return desc;
+  }
+
+  function applySvgAccessibility(container, type, text, explicitName, explicitDescription) {
+    if (!container || !container.querySelector) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    var label = buildDiagramAccessibleName(container, type, text, explicitName);
+    var description = buildDiagramAccessibleDescription(type, text, explicitDescription);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', label);
+    var title = null;
+    for (var i = 0; i < svg.childNodes.length; i++) {
+      var child = svg.childNodes[i];
+      if (child.nodeType === 1 && child.tagName && child.tagName.toLowerCase() === 'title') {
+        title = child;
+        break;
+      }
+    }
+    if (!title) {
+      title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      svg.insertBefore(title, svg.firstChild);
+    }
+    title.textContent = label;
+    if (description) {
+      var desc = ensureDescriptionElement(container);
+      if (desc) {
+        desc.textContent = description;
+        svg.setAttribute('aria-describedby', desc.id);
+        if (container.getAttribute && container.getAttribute('role') === 'img') {
+          container.setAttribute('aria-describedby', desc.id);
+        }
+      }
+    } else {
+      svg.removeAttribute('aria-describedby');
+    }
+  }
+
   function parseLabelDirectionCue(label) {
     var text = (label || '').trim();
     var hasDirection = false;
@@ -1107,6 +1422,7 @@
       line: get('--uml-line', '#444'),
       secondaryLine: get('--uml-secondary-line', '#6c7c8d'),
       secondaryFill: get('--uml-secondary-fill', '#eef4fa'),
+      annotationText: get('--uml-annotation-text', '#5a6573'),
       labelBg: get('--uml-label-fill', 'rgba(255,255,255,0.94)'),
       labelStroke: get('--uml-label-stroke', 'rgba(64,96,160,0.18)'),
     };
@@ -1224,6 +1540,7 @@
   function svgOpen(w, h, ox, oy, fontFamily, options) {
     var ff = fontFamily || BASE_CFG.fontFamily;
     var shadowEnabled = !options || options.shadowEnabled !== false;
+    var accessibleName = normalizeAccessibleName(options && (options.accessibleName || options.title)) || 'Diagram';
     // Transparent texture overlays — drawn on top of a solid fill so the
     // underlying colour shows through between pattern strokes.
     var patternDefs =
@@ -1264,9 +1581,10 @@
       : '<filter id="uml-node-shadow">' +
           '<feColorMatrix type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0"/>' +
         '</filter>';
-    return '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + w + '" height="' + h + '" ' +
+    return '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" role="img" aria-label="' + escapeXml(accessibleName) + '" width="' + w + '" height="' + h + '" ' +
       'viewBox="0 0 ' + w + ' ' + h + '" ' +
       'style="font-family: ' + ff + '; max-width: 100%; height: auto;">' +
+      '<title>' + escapeXml(accessibleName) + '</title>' +
       '<defs>' +
       shadowFilter +
       patternDefs +
@@ -1496,6 +1814,48 @@
     return targetClass;
   }
 
+  // ─── Figure caption helpers (WCAG 2.2 §1.1.1, WCAG 3 figures) ──────
+
+  // Pull a leading caption line off the diagram source. Authors can write
+  // either of these as the first non-blank line of any UML/diagram block:
+  //   caption: A class diagram of the Observer pattern
+  //   ' caption: A class diagram of the Observer pattern   (PlantUML-style)
+  // The line is consumed (not passed to the renderer) so it doesn't appear
+  // inside the diagram.
+  function extractDiagramCaption(text) {
+    if (!text) return { caption: null, source: '' };
+    var lines = text.split('\n');
+    var idx = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].trim() !== '') { idx = i; break; }
+    }
+    if (idx === -1) return { caption: null, source: text };
+    var head = lines[idx];
+    var match = head.match(/^\s*(?:'\s*)?caption\s*:\s*(.+?)\s*$/i);
+    if (!match) return { caption: null, source: text };
+    var rest = lines.slice();
+    rest.splice(idx, 1);
+    return { caption: match[1], source: rest.join('\n') };
+  }
+
+  var DEFAULT_DIAGRAM_LABEL = {
+    class:        'UML class diagram',
+    sequence:     'UML sequence diagram',
+    state:        'UML state diagram',
+    component:    'UML component diagram',
+    deployment:   'UML deployment diagram',
+    usecase:      'UML use-case diagram',
+    activity:     'UML activity diagram',
+    freeform:     'UML diagram',
+    gitgraph:     'Git history graph',
+    'folder-tree':'Folder tree diagram',
+    venn:         'Venn diagram',
+    er:           'Entity-relationship diagram'
+  };
+  function defaultDiagramLabel(type) {
+    return DEFAULT_DIAGRAM_LABEL[type] || 'UML diagram';
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -1584,12 +1944,39 @@
       for (var i = 0; i < blocks.length; i++) {
         var codeEl = blocks[i];
         var pre = codeEl.parentElement;
-        var text = extractText(codeEl);
+        var rawText = extractText(codeEl);
+        // WCAG 2.2 §1.1.1 + WCAG 3 figure-caption requirement: every diagram
+        // is wrapped in <figure><figcaption>. If the source begins with a
+        // `caption: ...` line (or `' caption: ...` in PlantUML-style), strip
+        // it from the diagram text and use it as the figure caption AND the
+        // SVG container's accessible name. Without an explicit caption we
+        // still emit a generic per-type label ("UML class diagram", etc.) so
+        // the diagram is at least announced as a figure with a name.
+        var captionInfo = extractDiagramCaption(rawText);
+        var text = captionInfo.source;
+        var diagramType = (opts && opts.type) || 'class';
+        var captionText = captionInfo.caption || defaultDiagramLabel(diagramType);
+
+        var figure = document.createElement('figure');
+        figure.className = 'sebook-figure sebook-figure--archuml';
         var container = document.createElement('div');
         prepareDiagramContainer(container, opts && opts.type);
-        pre.parentElement.replaceChild(container, pre);
+        container.setAttribute('role', 'img');
+        container.setAttribute('aria-label', captionText);
+        figure.appendChild(container);
+
+        var figcaption = document.createElement('figcaption');
+        figcaption.className = 'sebook-figure__caption';
+        if (!captionInfo.caption) {
+          figcaption.classList.add('sebook-figure__caption--auto');
+        }
+        figcaption.textContent = captionText;
+        figure.appendChild(figcaption);
+
+        pre.parentElement.replaceChild(figure, pre);
         renderFn(container, text);
-        diagrams.push({ container: container, text: text });
+        applySvgAccessibility(container, diagramType, text, captionText);
+        diagrams.push({ container: container, text: text, type: diagramType, caption: captionText });
         if (visibilityObserver) visibilityObserver.observe(container);
       }
       queueRefitAll();
@@ -1620,6 +2007,7 @@
             setTimeout(function () {
               for (var d = 0; d < diagrams.length; d++) {
                 renderFn(diagrams[d].container, diagrams[d].text);
+                applySvgAccessibility(diagrams[d].container, diagrams[d].type, diagrams[d].text, diagrams[d].caption);
                 if (visibilityObserver) visibilityObserver.observe(diagrams[d].container);
               }
               queueRefitAll();
@@ -3497,6 +3885,9 @@
     darkenHexColor: darkenHexColor,
     getThemeColors: getThemeColors,
     prepareDiagramContainer: prepareDiagramContainer,
+    buildDiagramAccessibleName: buildDiagramAccessibleName,
+    buildDiagramAccessibleDescription: buildDiagramAccessibleDescription,
+    applySvgAccessibility: applySvgAccessibility,
     svgOpen: svgOpen,
     svgClose: svgClose,
     createAutoInit: createAutoInit,
@@ -3636,6 +4027,7 @@
         if (R) {
           prepareDiagramContainer(el, type);
           R.render(el, spec);
+          applySvgAccessibility(el, type, spec);
           el.dataset.umlRendered = 'true';
           el.style.setProperty('display', 'block', 'important');
         }
@@ -3674,6 +4066,7 @@
             container.className = 'uml-' + key + '-diagram-container';
             pre.parentElement.replaceChild(container, pre);
             R2.render(container, text);
+            applySvgAccessibility(container, key, text);
             container.dataset.umlRendered = 'true';
           }
         }
@@ -10099,6 +10492,9 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     renderFromData(container, parsed, options);
+    UMLShared.applySvgAccessibility(container, 'class', text,
+      options && (options.accessibleName || options.title),
+      options && options.accessibleDescription);
   }
 
   /**
@@ -10548,6 +10944,9 @@
     container.innerHTML = svg;
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'sequence', text,
+      options && (options.accessibleName || options.title),
+      options && options.accessibleDescription);
   }
 
   function generateSequenceSVG(parsed, colors) {
@@ -10999,7 +11398,7 @@
       var pid = participants[li].id;
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
-      svg.push('<line filter="url(#uml-node-shadow)" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
+      svg.push('<line class="uml-sequence-lifeline" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
     }
 
@@ -12896,6 +13295,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'state', text);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -18344,6 +18744,7 @@
     // adds around the bounding box of rendered elements.
     var autoFitPad = parsed.layoutPreference === 'compact' ? 10 : 24;
     UMLShared.autoFitSVG(container, autoFitPad);
+    UMLShared.applySvgAccessibility(container, 'component', text);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -19214,6 +19615,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'deployment', text);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -20556,6 +20958,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'usecase', text);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -21722,6 +22125,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'activity', text);
   }
 
   // ─── Auto-init ────────────────────────────────────────────────────
@@ -22271,6 +22675,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'freeform', text);
   }
 
   // Accept both the explicit HTML class (`diagram-freeform`) and the
@@ -22515,24 +22920,51 @@
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var data = parse(layoutExtract.text);
     if (!window.GitGraph) {
-      container.innerHTML = '<div style="padding:20px;color:#b00;text-align:center;">' +
+      container.innerHTML = '<div class="uml-gitgraph-fallback uml-gitgraph-fallback-error">' +
         'GitGraph renderer not loaded. Include <code>js/git-graph.js</code> on the page.</div>';
       return;
     }
     if (!data.commits || data.commits.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No commits to display.</div>';
+      container.innerHTML = '<div class="uml-gitgraph-fallback uml-gitgraph-fallback-empty">No commits to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'gitgraph');
-    container.innerHTML = window.GitGraph.renderToSVG(data);
+    // Pass the container as host so renderToSVG reads the live
+    // `--git-graph-bg` from its computed style. Without this, branch-label
+    // text fills bake the light-mode default and drop below 4.5:1 after
+    // a dark-mode toggle (the `_data/tutorials/git-playground.yml` static
+    // gitgraph in step 1 was hitting ~2:1 in dark mode for that reason).
+    container.innerHTML = window.GitGraph.renderToSVG(data, container);
+    container._umlGitGraphSrc = text;
     UMLShared.applyRenderedPositions(container, layoutExtract.layout);
     UMLShared.applyLayoutRoutes(container, layoutExtract.layout);
+    UMLShared.applySvgAccessibility(container, 'gitgraph', text);
   }
 
   // Accept both `diagram-gitgraph` (explicit HTML) and `language-gitgraph`
   // (from ```gitgraph fences processed by marked.js in tutorial steps).
   UMLShared.createAutoInit('pre > code.diagram-gitgraph, pre > code.language-gitgraph', render, { type: 'gitgraph' });
   window.UMLGitGraphDiagram = { render: render, parse: parse };
+
+  // Theme-toggle re-render for static gitgraphs. Each render() bakes the
+  // branch-label text fills against the host's current `--git-graph-bg`,
+  // so a dark-mode flip needs a redraw to recompute readable colours —
+  // mirrors the folder-tree pattern below.
+  if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+    new MutationObserver(function (mutations) {
+      var classChanged = mutations.some(function (m) { return m.attributeName === 'class'; });
+      if (!classChanged) return;
+      setTimeout(function () {
+        var containers = document.querySelectorAll('.uml-gitgraph-diagram-container');
+        for (var i = 0; i < containers.length; i++) {
+          var c = containers[i];
+          if (c && c.isConnected && c._umlGitGraphSrc) {
+            try { render(c, c._umlGitGraphSrc); } catch (e) { /* ignore */ }
+          }
+        }
+      }, 50);
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  }
 })();
 /**
  * Folder-Tree Diagram Renderer
@@ -22693,7 +23125,10 @@
     var h = rows.length * CFG.rowHeight + CFG.svgPad * 2;
 
     var connectorColor = colors.secondaryLine || '#88a';
-    var annotColor = colors.secondaryLine || '#888';
+    // Annotations are real text and must clear WCAG 1.4.3 (4.5:1) on white;
+    // `secondaryLine` (#6c7c8d) sits at ~4.21:1 — fine for connector strokes
+    // (non-text needs only 3:1) but failing as text. Use a darker variant.
+    var annotColor = colors.annotationText || '#5a6573';
 
     var svg = [];
     svg.push(UMLShared.svgOpen(w, h, CFG.svgPad, CFG.svgPad, CFG.fontFamily, { shadowEnabled: false }));
@@ -22775,12 +23210,38 @@
     container.innerHTML = generateSVG(parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'folder-tree', text);
+    // Cache the source so the global theme-toggle observer can re-render
+    // diagrams that were created outside the createAutoInit pipeline (e.g.
+    // fs-command-lab calls UMLFolderTreeDiagram.render directly per state).
+    container._umlSrc = text;
+    container._umlRender = render;
   }
 
   // Accept both explicit HTML class (`diagram-folder-tree`) and fence-derived
   // `language-folder-tree` (from marked.js / Rouge).
   UMLShared.createAutoInit('pre > code.diagram-folder-tree, pre > code.language-folder-tree', render, { type: 'folder-tree' });
   window.UMLFolderTreeDiagram = { render: render, parse: parse };
+
+  // Theme-toggle re-render for externally-rendered folder-tree containers.
+  // The createAutoInit observer only tracks diagrams it created itself; this
+  // top-level observer covers any container with a cached `_umlSrc` regardless
+  // of provenance, so fs-command-lab folder-trees pick up `--uml-text` flips.
+  if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+    new MutationObserver(function (mutations) {
+      var classChanged = mutations.some(function (m) { return m.attributeName === 'class'; });
+      if (!classChanged) return;
+      setTimeout(function () {
+        var containers = document.querySelectorAll('.uml-folder-tree-diagram-container');
+        for (var i = 0; i < containers.length; i++) {
+          var c = containers[i];
+          if (c && c.isConnected && c._umlSrc && typeof c._umlRender === 'function') {
+            try { c._umlRender(c, c._umlSrc); } catch (e) { /* ignore */ }
+          }
+        }
+      }, 50);
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  }
 })();
 /**
  * Venn Diagram Renderer
@@ -23160,6 +23621,38 @@
     var whiteRatio = contrastRatio(1.0, bgL);
     var blackRatio = contrastRatio(bgL, 0.0);
     return whiteRatio >= blackRatio ? '#ffffff' : '#1a1a1a';
+  }
+
+  // The venn renderer composites circle fills with `mix-blend-mode:
+  // multiply` (dense overlap → darker visual), but no contrast tooling
+  // models that — both axe-core and the project's custom checker fall
+  // back to straight alpha. Pick whichever of #1a1a1a / #ffffff has the
+  // higher MIN contrast across both estimates so the rendered visual
+  // AND the audit both clear 4.5:1.
+  function pickTextColorForBoth(multiplyHex, alphaHex) {
+    var ml = relativeLuminance(multiplyHex);
+    var al = relativeLuminance(alphaHex);
+    var dark = relativeLuminance('#1a1a1a');
+    var darkMin = Math.min(contrastRatio(ml, dark), contrastRatio(al, dark));
+    var lightMin = Math.min(contrastRatio(1.0, ml), contrastRatio(1.0, al));
+    return darkMin >= lightMin ? '#1a1a1a' : '#ffffff';
+  }
+
+  // Approximate the browser's stacked-fill compositing under straight
+  // alpha (no blend mode). Used alongside `estimateMultiplyBlend` so the
+  // text-colour picker can satisfy both the rendered visual (multiply)
+  // and the contrast audit (straight alpha).
+  function estimateAlphaBlend(colors, opacity, bgHex) {
+    var bg = hexToRgb(bgHex || '#ffffff');
+    var r = bg.r / 255, g = bg.g / 255, b = bg.b / 255;
+    for (var i = 0; i < colors.length; i++) {
+      var c = hexToRgb(colors[i]);
+      var fr = c.r / 255, fg = c.g / 255, fb = c.b / 255;
+      r = r * (1 - opacity) + fr * opacity;
+      g = g * (1 - opacity) + fg * opacity;
+      b = b * (1 - opacity) + fb * opacity;
+    }
+    return rgbToHex(r * 255, g * 255, b * 255);
   }
 
   // Approximate what the browser draws when stacking `<shape fill="X" fill-opacity="a">`
@@ -23807,10 +24300,15 @@
       svg.push(shapeOutlineTag(layout.shapes[sj], darkenForStroke(setColors[sj]), 1.6, outlineLayoutId));
     }
 
-    // Set labels
+    // Set labels — `darkenForStroke` (0.35) is too pale for the label
+    // text to clear 4.5:1 against the page background AND the diluted
+    // circle fill the audit composites under it (pastel palette colours
+    // bottom out at ~2:1 with that level of darkening). `darkenForLabel`
+    // pushes to a near-black tint that retains brand hue while clearing
+    // contrast in both directions.
     for (var sk = 0; sk < layout.setLabels.length; sk++) {
       var lab = layout.setLabels[sk];
-      var lblColor = darkenForStroke(setColors[sk]);
+      var lblColor = darkenForLabel(setColors[sk]);
       svg.push('<text x="' + lab.x + '" y="' + lab.y +
         '" text-anchor="' + lab.anchor + '" font-size="' + CFG.setLabelFontSize +
         '" font-weight="600" fill="' + lblColor + '"' +
@@ -23835,6 +24333,12 @@
 
     // Region labels — only for regions the user populated. Rendered AFTER
     // note connectors so the labels stay on top of the connector lines.
+    //
+    // Text-colour choice: the SVG paints fills under `mix-blend-mode:
+    // multiply`, but the WCAG audit composites preceding fills with
+    // straight alpha (no engine implements multiply-aware contrast). Pick
+    // the text colour that maximises the WORST of the two estimates so
+    // both the rendered visual AND the audit see ≥4.5:1.
     for (var maskStr in parsed.regions) {
       if (!Object.prototype.hasOwnProperty.call(parsed.regions, maskStr)) continue;
       var mask = Number(maskStr);
@@ -23844,8 +24348,9 @@
       var anchor = layout.regionAnchors[mask];
       if (!anchor) continue;
       var fillsHere = maskFills(mask, setColors);
-      var bgEstimate = estimateMultiplyBlend(fillsHere, CFG.fillOpacity, '#ffffff');
-      var textColor = pickTextColor(bgEstimate);
+      var multiplyBg = estimateMultiplyBlend(fillsHere, CFG.fillOpacity, '#ffffff');
+      var alphaBg = estimateAlphaBlend(fillsHere, CFG.fillOpacity, '#ffffff');
+      var textColor = pickTextColorForBoth(multiplyBg, alphaBg);
       var lines = formatItems(items);
       var lh = 18;
       var totalH = lines.length * lh;
@@ -23899,6 +24404,11 @@
     return d || hex;
   }
 
+  function darkenForLabel(hex) {
+    var d = UMLShared.darkenHexColor(hex, 0.65);
+    return d || hex;
+  }
+
   function invertColor(hex) {
     return hex === '#ffffff' ? '#000000' : '#ffffff';
   }
@@ -23914,6 +24424,7 @@
     UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'venn', text);
   }
 
   UMLShared.createAutoInit('pre > code.diagram-venn, pre > code.language-venn', render, { type: 'venn' });
@@ -24884,6 +25395,7 @@
     container.innerHTML = generateSVG(parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'er', text);
   }
 
   UMLShared.createAutoInit('pre > code.diagram-er, pre > code.language-er', render, { type: 'er' });
