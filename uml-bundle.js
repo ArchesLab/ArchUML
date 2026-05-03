@@ -303,16 +303,24 @@
     return describeFromSource(type, text);
   }
 
+  function nextDiagramDescriptionId() {
+    var id;
+    do {
+      id = 'uml-accessible-description-' + (++_diagramDescriptionCounter);
+    } while (document.getElementById && document.getElementById(id));
+    return id;
+  }
+
   function ensureDescriptionElement(container) {
     if (!container || !container.querySelector || typeof document === 'undefined') return null;
     var desc = container.querySelector('.uml-accessible-description');
     if (!desc) {
       desc = document.createElement('div');
       desc.className = 'sr-only uml-accessible-description';
-      desc.id = 'uml-accessible-description-' + (++_diagramDescriptionCounter);
+      desc.id = nextDiagramDescriptionId();
       container.appendChild(desc);
     } else if (!desc.id) {
-      desc.id = 'uml-accessible-description-' + (++_diagramDescriptionCounter);
+      desc.id = nextDiagramDescriptionId();
     }
     return desc;
   }
@@ -23403,9 +23411,9 @@
         continue;
       }
 
-      // set <name> [#color]
+      // set <name> [color]
       //   name allows a quoted string ("My Set") or a bare identifier.
-      var setMatch = line.match(/^set\s+(?:"([^"]+)"|(\S+))(?:\s+(#(?:[0-9a-fA-F]{3,8}|[A-Za-z][A-Za-z0-9]*)))?\s*$/i);
+      var setMatch = line.match(/^set\s+(?:"([^"]+)"|(\S+))(?:\s+(#(?:[0-9a-fA-F]{3,8})|[A-Za-z][A-Za-z0-9]*))?\s*$/i);
       if (setMatch) {
         var setName = setMatch[1] || setMatch[2];
         var setColor = setMatch[3] || null;
