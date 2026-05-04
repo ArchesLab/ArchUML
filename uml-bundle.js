@@ -1559,6 +1559,8 @@
 
     var container = document.createElement('div');
     prepareDiagramContainer(container, normalized);
+    container.setAttribute('data-uml-type', normalized);
+    container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
     figure.appendChild(container);
