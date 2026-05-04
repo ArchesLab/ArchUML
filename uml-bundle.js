@@ -1496,6 +1496,85 @@
     return targetClass;
   }
 
+  var ARCHUML_FALLBACK_CAPTIONS = {
+    class: 'UML class diagram',
+    sequence: 'UML sequence diagram',
+    state: 'UML state diagram',
+    component: 'UML component diagram',
+    deployment: 'UML deployment diagram',
+    usecase: 'UML use case diagram',
+    activity: 'UML activity diagram',
+    freeform: 'Freeform diagram',
+    gitgraph: 'Git graph diagram',
+    'folder-tree': 'Folder tree diagram',
+    venn: 'Venn diagram',
+    er: 'Entity-relationship diagram'
+  };
+
+  function normalizeDiagramType(type) {
+    return String(type || 'class').trim().toLowerCase();
+  }
+
+  function diagramTypeClass(type) {
+    return normalizeDiagramType(type).replace(/[^a-z0-9_-]/g, '-');
+  }
+
+  function fallbackArchUmlCaption(type) {
+    var normalized = normalizeDiagramType(type);
+    return ARCHUML_FALLBACK_CAPTIONS[normalized] || 'ArchUML diagram';
+  }
+
+  function extractArchUmlCaption(text, type) {
+    var lines = String(text || '').split('\n');
+    var caption = '';
+    var explicit = false;
+
+    for (var i = 0; i < lines.length; i++) {
+      var trimmed = lines[i].trim();
+      if (!trimmed || /^@startuml$/i.test(trimmed) || /^layout\s+/i.test(trimmed)) {
+        continue;
+      }
+      var match = trimmed.match(/^(?:(?:\/\/|#|'|%%)\s*)?caption\s*:\s*(.+)$/i);
+      if (match) {
+        caption = match[1].trim();
+        lines.splice(i, 1);
+        explicit = true;
+      }
+      break;
+    }
+
+    return {
+      source: lines.join('\n'),
+      caption: caption || fallbackArchUmlCaption(type),
+      explicit: explicit
+    };
+  }
+
+  function createArchUmlFigure(type, text) {
+    var captionInfo = extractArchUmlCaption(text, type);
+    var normalized = normalizeDiagramType(type);
+    var safeType = diagramTypeClass(type);
+    var figure = document.createElement('figure');
+    figure.className = 'sebook-figure sebook-figure--archuml sebook-figure--archuml-' + safeType;
+
+    var container = document.createElement('div');
+    prepareDiagramContainer(container, normalized);
+    container.setAttribute('role', 'img');
+    container.setAttribute('aria-label', captionInfo.caption);
+    figure.appendChild(container);
+
+    var figcaption = document.createElement('figcaption');
+    figcaption.className = 'sebook-figure__caption' + (captionInfo.explicit ? '' : ' sebook-figure__caption--auto');
+    figcaption.textContent = captionInfo.caption;
+    figure.appendChild(figcaption);
+
+    return {
+      figure: figure,
+      container: container,
+      text: captionInfo.source
+    };
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -1585,12 +1664,11 @@
         var codeEl = blocks[i];
         var pre = codeEl.parentElement;
         var text = extractText(codeEl);
-        var container = document.createElement('div');
-        prepareDiagramContainer(container, opts && opts.type);
-        pre.parentElement.replaceChild(container, pre);
-        renderFn(container, text);
-        diagrams.push({ container: container, text: text });
-        if (visibilityObserver) visibilityObserver.observe(container);
+        var wrapped = createArchUmlFigure(opts && opts.type, text);
+        pre.parentElement.replaceChild(wrapped.figure, pre);
+        renderFn(wrapped.container, wrapped.text);
+        diagrams.push({ container: wrapped.container, text: wrapped.text });
+        if (visibilityObserver) visibilityObserver.observe(wrapped.container);
       }
       queueRefitAll();
       startSettleLoop();
@@ -3634,10 +3712,13 @@
         if (!getR || !spec) continue;
         var R = getR();
         if (R) {
-          prepareDiagramContainer(el, type);
-          R.render(el, spec);
-          el.dataset.umlRendered = 'true';
-          el.style.setProperty('display', 'block', 'important');
+          var wrapped = createArchUmlFigure(type, spec);
+          if (el.parentElement) {
+            el.parentElement.replaceChild(wrapped.figure, el);
+          }
+          R.render(wrapped.container, wrapped.text);
+          wrapped.container.dataset.umlRendered = 'true';
+          wrapped.container.style.setProperty('display', 'block', 'important');
         }
       }
 
@@ -3670,11 +3751,10 @@
           var R2 = RENDERERS[key]();
           if (R2) {
             var text = codeEl.textContent;
-            var container = document.createElement('div');
-            container.className = 'uml-' + key + '-diagram-container';
-            pre.parentElement.replaceChild(container, pre);
-            R2.render(container, text);
-            container.dataset.umlRendered = 'true';
+            var wrappedBlock = createArchUmlFigure(key, text);
+            pre.parentElement.replaceChild(wrappedBlock.figure, pre);
+            R2.render(wrappedBlock.container, wrappedBlock.text);
+            wrappedBlock.container.dataset.umlRendered = 'true';
           }
         }
       }
@@ -5433,10 +5513,11 @@
         return edge.src + ':' + edge.orig.type + ':' + layers[edge.tgt];
       }
 
-      function adjacentNonHierarchyCenters(id) {
-        var centers = [];
+      function adjacentNonHierarchyNodeIds(id) {
+        var ids = [];
+        var seen = {};
         var idLayer = layers[id];
-        if (idLayer == null) return centers;
+        if (idLayer == null) return ids;
         for (var ei = 0; ei < edges.length; ei++) {
           var edge = edges[ei];
           var edgeType = edge && (edge.type || (edge.orig && edge.orig.type));
@@ -5446,8 +5527,17 @@
           else if (edge.target === id) other = edge.source;
           if (!other || !coords[other] || isDummyLayoutNode(other) || layers[other] == null) continue;
           if (Math.abs(layers[other] - idLayer) > 1) continue;
-          centers.push(centerX(other));
+          if (seen[other]) continue;
+          seen[other] = true;
+          ids.push(other);
         }
+        return ids;
+      }
+
+      function adjacentNonHierarchyCenters(id) {
+        var ids = adjacentNonHierarchyNodeIds(id);
+        var centers = [];
+        for (var ai = 0; ai < ids.length; ai++) centers.push(centerX(ids[ai]));
         return centers;
       }
 
@@ -5462,6 +5552,21 @@
         if (Math.abs(clamped - coords[id].x) < 0.5) return false;
         coords[id].x = clamped;
         return true;
+      }
+
+      function tryAlignAdjacentNeighborsToParent(id) {
+        var ids = adjacentNonHierarchyNodeIds(id);
+        if (!ids.length || !coords[id]) return;
+        var targetCenter = centerX(id);
+        for (var ani = 0; ani < ids.length; ani++) {
+          var other = ids[ani];
+          if (!coords[other]) continue;
+          var targetX = targetCenter - coords[other].w / 2;
+          var range = rowAwareMoveRange(other);
+          var clamped = Math.max(range[0], Math.min(range[1], targetX));
+          if (Math.abs(clamped - targetX) > 0.5) continue;
+          coords[other].x = clamped;
+        }
       }
 
       function rowAwareMoveRange(id) {
@@ -5546,11 +5651,17 @@
         addGroupChild(groups[key], de.tgt);
       }
 
+      function shouldAlignFanout(group) {
+        if (!group || group.children.length < 2) return false;
+        if (group.children.length >= 3 && group.children.length % 2 === 1) return true;
+        return adjacentNonHierarchyCenters(group.parent).length > 0;
+      }
+
       var fanouts = [];
       for (var gk in groups) {
         if (!Object.prototype.hasOwnProperty.call(groups, gk)) continue;
         var group = cleanGroup(groups[gk]);
-        if (group.children.length < 3 || group.children.length % 2 === 0) continue;
+        if (!shouldAlignFanout(group)) continue;
         fanouts.push(group);
       }
       fanouts.sort(function(a, b) {
@@ -5560,7 +5671,9 @@
       for (var fi = 0; fi < fanouts.length; fi++) {
         var fanout = fanouts[fi];
         var children = fanout.children.slice().filter(function(id) { return !!coords[id]; });
-        if (children.length < 3 || children.length % 2 === 0) continue;
+        if (children.length < 2) continue;
+        var isEvenAnchoredFanout = children.length % 2 === 0 && adjacentNonHierarchyCenters(fanout.parent).length > 0;
+        if (children.length % 2 === 0 && !isEvenAnchoredFanout) continue;
         var parentOriginalX = coords[fanout.parent] ? coords[fanout.parent].x : null;
         tryAlignParentToAdjacentNeighbor(fanout.parent);
         children.sort(function(a, b) {
@@ -5570,7 +5683,10 @@
         });
         var median = children[Math.floor(children.length / 2)];
         var delta = centerX(fanout.parent) - centerX(median);
-        if (Math.abs(delta) < 0.5) continue;
+        if (Math.abs(delta) < 0.5) {
+          if (isEvenAnchoredFanout) tryAlignAdjacentNeighborsToParent(fanout.parent);
+          continue;
+        }
 
         if (canShiftChildren(children, fanout.childLayer, delta)) {
           shiftChildren(children, delta);
@@ -5581,6 +5697,7 @@
             shiftChildren(children, delta);
           }
         }
+        if (isEvenAnchoredFanout) tryAlignAdjacentNeighborsToParent(fanout.parent);
       }
     }
 
@@ -6995,7 +7112,7 @@
 
     nudgeFreeClassEntriesWithinBands(result.direction || effectiveDirection);
 
-    function alignContextEntriesToOddHierarchyMedians(direction) {
+    function alignContextEntriesToHierarchyMedians(direction) {
       if (!hasHierarchyEdges || (direction || 'TB') !== 'TB') return;
 
       var childrenByParent = {};
@@ -7036,7 +7153,7 @@
       for (var parentName in childrenByParent) {
         if (!Object.prototype.hasOwnProperty.call(childrenByParent, parentName) || !entries[parentName]) continue;
         var children = childrenByParent[parentName].filter(function(childName) { return !!entries[childName]; });
-        if (children.length < 3 || children.length % 2 === 0) continue;
+        if (children.length < 2) continue;
         children.sort(function(a, b) { return entryCenterX(a) - entryCenterX(b); });
         var medianChild = children[Math.floor(children.length / 2)];
         if (Math.abs(entryCenterX(parentName) - entryCenterX(medianChild)) > 2.5) continue;
@@ -7059,7 +7176,7 @@
       }
     }
 
-    alignContextEntriesToOddHierarchyMedians(result.direction || effectiveDirection);
+    alignContextEntriesToHierarchyMedians(result.direction || effectiveDirection);
 
     function packCompactHierarchyFamilies(direction) {
       if (layoutPreference !== 'compact' || !hasHierarchyEdges) return;
@@ -10999,7 +11116,7 @@
       var pid = participants[li].id;
       var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
       var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
-      svg.push('<line filter="url(#uml-node-shadow)" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
+      svg.push('<line class="uml-sequence-lifeline" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
     }
 
@@ -22944,7 +23061,7 @@
 
       // set <name> [#color]
       //   name allows a quoted string ("My Set") or a bare identifier.
-      var setMatch = line.match(/^set\s+(?:"([^"]+)"|(\S+))(?:\s+(#(?:[0-9a-fA-F]{3,8}|[A-Za-z][A-Za-z0-9]*)))?\s*$/i);
+      var setMatch = line.match(/^set\s+(?:"([^"]+)"|(\S+))(?:\s+(#(?:[0-9a-fA-F]{3,8}|[A-Za-z][A-Za-z0-9]*)|[A-Za-z][A-Za-z0-9]*))?\s*$/i);
       if (setMatch) {
         var setName = setMatch[1] || setMatch[2];
         var setColor = setMatch[3] || null;
