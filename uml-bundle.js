@@ -1907,7 +1907,9 @@
   var SYNTAX_COLORS = {
     keyword: '#0033b3',
     string: '#067d17',
-    comment: '#8c8c8c',
+    // #8c8c8c on pale-yellow note bg measured at 3.04:1 (WCAG 1.4.3); the
+    // darker grey clears 4.5:1 on both white and the note fill we use.
+    comment: '#5a5a5a',
     number: '#1750eb',
     builtin: '#871094',
     decorator: '#9e880d',
@@ -22634,12 +22636,15 @@
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var data = parse(layoutExtract.text);
     if (!window.GitGraph) {
-      container.innerHTML = '<div style="padding:20px;color:#b00;text-align:center;">' +
+      // Use the .uml-gitgraph-fallback-* classes so dark-mode contrast (WCAG
+      // 1.4.3) overrides in css/uml-diagram.css take effect; inline colors
+      // bypass them and dropped to ~2.78:1 on dark.
+      container.innerHTML = '<div class="uml-gitgraph-fallback uml-gitgraph-fallback-error">' +
         'GitGraph renderer not loaded. Include <code>js/git-graph.js</code> on the page.</div>';
       return;
     }
     if (!data.commits || data.commits.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No commits to display.</div>';
+      container.innerHTML = '<div class="uml-gitgraph-fallback uml-gitgraph-fallback-empty">No commits to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'gitgraph');
@@ -23926,13 +23931,18 @@
       svg.push(shapeOutlineTag(layout.shapes[sj], darkenForStroke(setColors[sj]), 1.6, outlineLayoutId));
     }
 
-    // Set labels
+    // Set labels — fill darkened until contrast clears 4.5:1 against the
+    // page bg (WCAG 1.4.3); a paint-order: stroke halo adds belt-and-braces
+    // legibility for cases where the label overlaps the multiply-blended
+    // fill instead of sitting on the bare page.
     for (var sk = 0; sk < layout.setLabels.length; sk++) {
       var lab = layout.setLabels[sk];
-      var lblColor = darkenForStroke(setColors[sk]);
+      var lblColor = accessibleLabelColor(setColors[sk], '#ffffff');
       svg.push('<text x="' + lab.x + '" y="' + lab.y +
         '" text-anchor="' + lab.anchor + '" font-size="' + CFG.setLabelFontSize +
-        '" font-weight="600" fill="' + lblColor + '"' +
+        '" font-weight="600" fill="' + lblColor +
+        '" stroke="' + invertColor(lblColor) +
+        '" stroke-width="3.2" stroke-opacity="0.7" stroke-linejoin="round" paint-order="stroke"' +
         layoutDataAttr(parsed.sets[sk].name) + '>' +
         UMLShared.escapeXml(parsed.sets[sk].name) + '</text>');
     }
@@ -23964,7 +23974,16 @@
       if (!anchor) continue;
       var fillsHere = maskFills(mask, setColors);
       var bgEstimate = estimateMultiplyBlend(fillsHere, CFG.fillOpacity, '#ffffff');
-      var textColor = pickTextColor(bgEstimate);
+      // estimateMultiplyBlend assumes every fill in the region overlaps at
+      // the label anchor; in practice the layout-engine anchor isn't always
+      // at the deepest-overlap pixel, so the actual rendered background is
+      // often lighter than the estimate. Bias toward black (which clears
+      // 4.5:1 against any bg with luminance ≥ 0.175 — i.e. all but truly
+      // dark fills). Switch to white only when the estimate is dark enough
+      // that black would fail. Halo at full opacity gives belt-and-braces
+      // legibility in either direction. (WCAG 1.4.3.)
+      var bgL = relativeLuminance(bgEstimate);
+      var textColor = bgL < 0.10 ? '#ffffff' : '#1a1a1a';
       var lines = formatItems(items);
       var lh = 18;
       var totalH = lines.length * lh;
@@ -23973,7 +23992,7 @@
         svg.push('<text x="' + anchor[0] + '" y="' + (startY + li * lh) +
           '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + textColor +
           '" stroke="' + invertColor(textColor) +
-          '" stroke-width="3.2" stroke-opacity="0.55" stroke-linejoin="round" paint-order="stroke">' +
+          '" stroke-width="3.2" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
           UMLShared.escapeXml(lines[li]) + '</text>');
       }
     }
@@ -24016,6 +24035,22 @@
   function darkenForStroke(hex) {
     var d = UMLShared.darkenHexColor(hex, 0.35);
     return d || hex;
+  }
+
+  // WCAG 1.4.3: produce a label color derived from `hex` that clears 4.5:1
+  // against `bgHex`. Iterate darkening amounts so saturated colors keep some
+  // tonal character; fall back to pickTextColor (binary black/white) when
+  // even maximum darkening can't reach the threshold.
+  function accessibleLabelColor(hex, bgHex) {
+    var bg = bgHex || '#ffffff';
+    var bgL = relativeLuminance(bg);
+    var amounts = [0.35, 0.5, 0.65, 0.78, 0.88];
+    for (var i = 0; i < amounts.length; i++) {
+      var c = UMLShared.darkenHexColor(hex, amounts[i]);
+      if (!c) continue;
+      if (contrastRatio(relativeLuminance(c), bgL) >= 4.5) return c;
+    }
+    return pickTextColor(bg);
   }
 
   function invertColor(hex) {
