@@ -1016,16 +1016,19 @@
       if (!points || points.length < 2) continue;
       var rb = routeBox(points);
       if (Math.max(rb.width, rb.height) < 18) continue;
-      var contained = false;
-      for (var oi = 0; oi < obstacles.length; oi++) {
-        if (boxContainsBox(obstacles[oi], rb, 2)) {
-          contained = true;
-          break;
+      var explicitRouteId = routeAttribute(el, 'data-layout-route-id');
+      if (!explicitRouteId) {
+        var contained = false;
+        for (var oi = 0; oi < obstacles.length; oi++) {
+          if (boxContainsBox(obstacles[oi], rb, 2)) {
+            contained = true;
+            break;
+          }
         }
+        if (contained) continue;
       }
-      if (contained) continue;
       routes.push({
-        id: routeAttribute(el, 'data-layout-route-id') || ('edge-' + routes.length),
+        id: explicitRouteId || ('edge-' + routes.length),
         index: routes.length,
         element: el,
         source: routeAttribute(el, 'data-layout-source') || null,
@@ -6966,7 +6969,9 @@
           hasInheritAtBottomLocal[rel.to],
           null,
           null,
-          false
+          false,
+          null,
+          { fastScore: true, maxSourceCandidates: 3, maxTargetCandidates: 3 }
         );
         if (!route || !route.points || route.points.length < 2) return Number.POSITIVE_INFINITY;
 
@@ -8614,6 +8619,14 @@
     // route scoring and visible bridge drawing; treating them as walls causes
     // large, low-readability detours in State/Command-style hierarchies.
     var hierarchyRouteObstacles = [];
+    var entryCount = Object.keys(entries).length;
+    var useSmallClassRouteBudget = parsed.layoutPreference !== 'compact' &&
+      (!parsed.notes || parsed.notes.length === 0) &&
+      entryCount <= 8 &&
+      otherRels.length <= 2 &&
+      !otherRels.some(function (smallRel) {
+        return !!(smallRel.label || smallRel.labelDirection || smallRel.fromMult || smallRel.toMult);
+      });
 
     // Pre-compute port offsets: when multiple edges exit from the same side of a box,
     // assign port indices sorted by target X to minimize crossings
@@ -8729,7 +8742,8 @@
         classOccupiedSegments,
         hierarchyRouteObstacles,
         restrictSourceSide,
-        classNoteSidePressure[orel.to]
+        classNoteSidePressure[orel.to],
+        useSmallClassRouteBudget ? { fastScore: true, maxSourceCandidates: 6, maxTargetCandidates: 6 } : null
       );
       var pathPoints = route.points; // array of {x,y}
       var safePathPoints = cloneClassRoutePoints(pathPoints);
@@ -9619,7 +9633,7 @@
    * Compute orthogonal (Manhattan) route between two class boxes using the
    * shared obstacle-aware router and multi-anchor candidate scoring.
    */
-  function computeOrthogonalRoute(fromE, toE, avoidFromBottom, avoidToTop, portOffset, allEntries, fromId, toId, targetEntryOffset, targetEntrySide, sourceSide, avoidFromTop, avoidToBottom, occupiedSegments, extraObstacleRects, restrictSourceSide, blockedTargetSides) {
+  function computeOrthogonalRoute(fromE, toE, avoidFromBottom, avoidToTop, portOffset, allEntries, fromId, toId, targetEntryOffset, targetEntrySide, sourceSide, avoidFromTop, avoidToBottom, occupiedSegments, extraObstacleRects, restrictSourceSide, blockedTargetSides, routeOptions) {
     portOffset = portOffset || 0;
     targetEntryOffset = targetEntryOffset || 0;
     avoidFromTop = !!avoidFromTop;
@@ -9690,6 +9704,11 @@
       avoidBottom: avoidToBottom,
       stub: stub
     });
+
+    if (routeOptions && routeOptions.fastScore) {
+      sourceCandidates = sourceCandidates.slice(0, routeOptions.maxSourceCandidates || 4);
+      targetCandidates = targetCandidates.slice(0, routeOptions.maxTargetCandidates || 4);
+    }
 
     var best = null;
     for (var si2 = 0; si2 < sourceCandidates.length; si2++) {
@@ -10486,7 +10505,7 @@
         var condition = (fragMatch[2] || fragMatch[3] || '').trim();
         if (condition.startsWith('[')) condition = condition.substring(1);
         if (condition.endsWith(']')) condition = condition.substring(0, condition.length - 1);
-        messages.push({ type: 'fragment_start', fragType: fragType, condition: condition.trim() });
+        messages.push({ type: 'fragment_start', fragType: fragType, condition: condition.trim(), sourceIndex: i });
         continue;
       }
 
@@ -10496,13 +10515,13 @@
         var elseCond = (elseMatch[1] || elseMatch[2] || '').trim();
         if (elseCond.startsWith('[')) elseCond = elseCond.substring(1);
         if (elseCond.endsWith(']')) elseCond = elseCond.substring(0, elseCond.length - 1);
-        messages.push({ type: 'fragment_else', condition: elseCond.trim() });
+        messages.push({ type: 'fragment_else', condition: elseCond.trim(), sourceIndex: i });
         continue;
       }
 
       // End fragment
       if (/^end$/i.test(line)) {
-        messages.push({ type: 'fragment_end' });
+        messages.push({ type: 'fragment_end', sourceIndex: i });
         continue;
       }
 
@@ -10563,7 +10582,7 @@
       }
 
       // Found message: o-> receiver : label
-      var foundMatch = line.match(/^o->\s+(\S+)\s*(?::\s*(.*))?$/);
+      var foundMatch = line.match(/^o->\s+([^\s:]+)\s*(?::\s*(.*))?$/);
       if (foundMatch) {
         var foundTo = foundMatch[1];
         var foundLabelInfo = UMLShared.parseLabelDirectionCue(foundMatch[2] || '');
@@ -10573,7 +10592,7 @@
       }
 
       // Message arrow: from ARROW to : label
-      var msgMatch = line.match(/^(\S+)\s+(--?>|--?>>|<--?|<<--?|->\s*\*|->x)\s+(\S+)\s*(?::\s*(.*))?$/);
+      var msgMatch = line.match(/^(\S+)\s+(--?>|--?>>|<--?|<<--?|->\s*\*|->x)\s+([^\s:]+)\s*(?::\s*(.*))?$/);
       if (msgMatch) {
         var from = msgMatch[1];
         var arrow = msgMatch[2];
@@ -10879,7 +10898,7 @@
           }
         }
       } else if (msg.type === 'fragment_start') {
-        fragmentStack.push({ startY: curY - 15, fragType: msg.fragType, condition: msg.condition, elseYs: [], minPIdx: Infinity, maxPIdx: -Infinity, depth: fragmentStack.length, lastMsgY: curY });
+        fragmentStack.push({ startY: curY - 15, fragType: msg.fragType, condition: msg.condition, elseYs: [], minPIdx: Infinity, maxPIdx: -Infinity, depth: fragmentStack.length, lastMsgY: curY, sourceIndex: msg.sourceIndex });
         curY += CFG.fragmentLabelH;
         // Extra space for condition text below the tab
         if (msg.condition) curY += 18;
@@ -10887,7 +10906,7 @@
         msgYs.push(curY);
       } else if (msg.type === 'fragment_else') {
         if (fragmentStack.length > 0) {
-          fragmentStack[fragmentStack.length - 1].elseYs.push({ y: curY, condition: msg.condition });
+          fragmentStack[fragmentStack.length - 1].elseYs.push({ y: curY, condition: msg.condition, sourceIndex: msg.sourceIndex });
         }
         lastEventY = curY;
         // Space for the dashed divider line + condition label + gap before next message
@@ -11203,8 +11222,16 @@
       }
       var fragW = fragR - fragL;
 
-      // Fragment border
-      svg.push('<rect x="' + fragL + '" y="' + frag.startY + '" width="' + fragW +
+      // Fragment border. Tag with a fragment id so the editor can select it
+      // and the obstacle filter can skip it (the rect uses fill="none" but
+      // visually contains all the messages inside the fragment).
+      var fragLayoutId = (frag.sourceIndex !== undefined && frag.sourceIndex !== null)
+        ? 'frag:' + frag.sourceIndex
+        : '';
+      var fragLayoutAttrs = fragLayoutId
+        ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-route-decorative="true"'
+        : ' data-layout-route-decorative="true"';
+      svg.push('<rect' + fragLayoutAttrs + ' x="' + fragL + '" y="' + frag.startY + '" width="' + fragW +
         '" height="' + (frag.endY - frag.startY) +
         '" fill="none" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
 
@@ -11214,20 +11241,22 @@
       var foldSize = 6;
       var lx = fragL, ly = frag.startY;
       // Pentagon: top-left, top-right, fold point, bottom-right, bottom-left
-      svg.push('<polygon points="' +
+      svg.push('<polygon' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '"' : '') + ' points="' +
         lx + ',' + ly + ' ' +
         (lx + labelW) + ',' + ly + ' ' +
         (lx + labelW) + ',' + (ly + lh - foldSize) + ' ' +
         (lx + labelW - foldSize) + ',' + (ly + lh) + ' ' +
         lx + ',' + (ly + lh) +
         '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
-      svg.push('<text x="' + (lx + 8) + '" y="' + (ly + lh - 7) +
+      svg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '"' : '') + ' x="' + (lx + 8) + '" y="' + (ly + lh - 7) +
         '" font-size="' + CFG.fontSizeFragment + '" font-weight="bold" fill="' + colors.text + '">' +
         UMLShared.escapeXml(frag.fragType.toUpperCase()) + '</text>');
 
-      // Condition text — deferred to render on top of everything
+      // Condition text — deferred to render on top of everything. Tag with the
+      // fragment id so the editor can recognize it for inline editing.
       if (frag.condition) {
-        guardSvg.push('<text x="' + (fragL + 10) + '" y="' + (ly + lh + 14) +
+        guardSvg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-fragment-role="condition"' : '') +
+          ' x="' + (fragL + 10) + '" y="' + (ly + lh + 14) +
           '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
           '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
           UMLShared.escapeXml(frag.condition) + ']</text>');
@@ -11236,10 +11265,15 @@
       // Else divider lines
       for (var ei = 0; ei < frag.elseYs.length; ei++) {
         var ey = frag.elseYs[ei].y;
-        svg.push('<line x1="' + fragL + '" y1="' + ey + '" x2="' + fragR + '" y2="' + ey +
+        var elseSourceIdx = frag.elseYs[ei].sourceIndex;
+        var elseLineAttrs = (elseSourceIdx !== undefined && elseSourceIdx !== null)
+          ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId || '') + '" data-layout-branch-line="' + elseSourceIdx + '"'
+          : '';
+        svg.push('<line' + elseLineAttrs + ' x1="' + fragL + '" y1="' + ey + '" x2="' + fragR + '" y2="' + ey +
           '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="6,4"/>');
         if (frag.elseYs[ei].condition) {
-          guardSvg.push('<text x="' + (fragL + 10) + '" y="' + (ey + 16) +
+          guardSvg.push('<text' + (elseLineAttrs ? elseLineAttrs + ' data-layout-fragment-role="branch"' : '') +
+            ' x="' + (fragL + 10) + '" y="' + (ey + 16) +
             '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
             '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
             UMLShared.escapeXml(frag.elseYs[ei].condition) + ']</text>');
