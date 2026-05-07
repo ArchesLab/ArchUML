@@ -219,7 +219,8 @@
     var fill = (opts.fill || (colors && colors.text) || '#222');
     var stroke = (opts.stroke || (colors && colors.fill) || '#fff');
     var strokeWidth = opts.strokeWidth !== undefined ? opts.strokeWidth : 3;
-    svgParts.push('<polygon class="' + className + '" points="' + pts + '" fill="' + fill + '" ' +
+    var attrs = opts.attrs || '';
+    svgParts.push('<polygon class="' + className + '"' + attrs + ' points="' + pts + '" fill="' + fill + '" ' +
       'stroke="' + stroke + '" stroke-width="' + strokeWidth + '" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"/>');
     return triangle.rect;
   }
@@ -976,6 +977,114 @@
     return Math.sqrt(dx * dx + dy * dy);
   }
 
+  function routeLength(points) {
+    var total = 0;
+    if (!points) return total;
+    for (var i = 0; i < points.length - 1; i++) {
+      total += pointDistance(points[i], points[i + 1]);
+    }
+    return total;
+  }
+
+  function nearestPointOnRoute(points, point) {
+    if (!points || points.length < 2 || !point) return null;
+    var total = routeLength(points);
+    var walked = 0;
+    var best = null;
+    for (var i = 0; i < points.length - 1; i++) {
+      var a = points[i];
+      var b = points[i + 1];
+      var vx = b.x - a.x;
+      var vy = b.y - a.y;
+      var lenSq = vx * vx + vy * vy;
+      var t = lenSq > 0 ? ((point.x - a.x) * vx + (point.y - a.y) * vy) / lenSq : 0;
+      t = Math.max(0, Math.min(1, t));
+      var projected = { x: a.x + vx * t, y: a.y + vy * t };
+      var distance = pointDistance(point, projected);
+      var segLen = Math.sqrt(lenSq);
+      var fraction = total > 0 ? (walked + segLen * t) / total : 0;
+      if (!best || distance < best.distance) {
+        best = {
+          distance: distance,
+          fraction: fraction,
+          point: projected,
+          segmentIndex: i,
+          segmentT: t
+        };
+      }
+      walked += segLen;
+    }
+    return best;
+  }
+
+  function pointOnRouteAtFraction(points, fraction) {
+    if (!points || !points.length) return null;
+    if (points.length === 1) return { x: points[0].x, y: points[0].y };
+    var total = routeLength(points);
+    if (total <= 0) return { x: points[0].x, y: points[0].y };
+    var target = total * Math.max(0, Math.min(1, fraction || 0));
+    var walked = 0;
+    for (var i = 0; i < points.length - 1; i++) {
+      var a = points[i];
+      var b = points[i + 1];
+      var segLen = pointDistance(a, b);
+      if (walked + segLen >= target) {
+        var t = segLen > 0 ? (target - walked) / segLen : 0;
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      }
+      walked += segLen;
+    }
+    return { x: points[points.length - 1].x, y: points[points.length - 1].y };
+  }
+
+  function matchingPointOnRoute(points, projection) {
+    if (!projection || !points || points.length < 2) return null;
+    var idx = projection.segmentIndex;
+    if (idx >= 0 && idx < points.length - 1) {
+      var a = points[idx];
+      var b = points[idx + 1];
+      var t = Math.max(0, Math.min(1, projection.segmentT || 0));
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    return pointOnRouteAtFraction(points, projection.fraction);
+  }
+
+  function arrowPolygonPoints(x, y, ux, uy, size) {
+    var as = size || BASE_CFG.arrowSize;
+    var hw = as * 0.44;
+    var tipBack = as * 0.06;
+    var px = -uy, py = ux;
+    return [
+      { x: x, y: y },
+      { x: x + ux * (as + tipBack) + px * hw, y: y + uy * (as + tipBack) + py * hw },
+      { x: x + ux * (as * 0.18), y: y + uy * (as * 0.18) },
+      { x: x + ux * (as + tipBack) - px * hw, y: y + uy * (as + tipBack) - py * hw }
+    ];
+  }
+
+  function setArrowPolygonForRoute(el, points) {
+    if (!el || !points || points.length < 2) return false;
+    var last = points[points.length - 1];
+    var prev = points[points.length - 2];
+    var dx = last.x - prev.x;
+    var dy = last.y - prev.y;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (!len) return false;
+    var local = pointsFromSvgSpace(el, [
+      { x: last.x, y: last.y },
+      { x: prev.x, y: prev.y }
+    ]);
+    last = local[0];
+    prev = local[1];
+    dx = last.x - prev.x;
+    dy = last.y - prev.y;
+    len = Math.sqrt(dx * dx + dy * dy);
+    if (!len) return false;
+    var poly = arrowPolygonPoints(last.x, last.y, -dx / len, -dy / len);
+    el.setAttribute('points', poly.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+    return true;
+  }
+
   function translateSvgElement(el, dx, dy) {
     if (!el || (!dx && !dy)) return;
     if (el.classList && el.classList.contains('git-graph-label-g')) {
@@ -1000,9 +1109,46 @@
     };
     var wholeDelta = sameRouteDelta(oldPoints, newPoints);
     var oldBox = routeBox(oldPoints);
+    var routeId = routeAttribute(routeEl, 'data-layout-route-id');
+    var explicitlyMoved = [];
+
+    if (routeId) {
+      var routeOwned = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
+        if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+        return routeAttribute(el, 'data-layout-route-id') === routeId;
+      });
+      for (var ri = 0; ri < routeOwned.length; ri++) {
+        var owned = routeOwned[ri];
+        if (routeAttribute(owned, 'data-layout-kind') === 'edge-arrow' &&
+            owned.tagName && owned.tagName.toLowerCase() === 'polygon' &&
+            setArrowPolygonForRoute(owned, newPoints)) {
+          explicitlyMoved.push(owned);
+          continue;
+        }
+        var ob = boxToSvgSpace(owned, safeElementBBox(owned));
+        if (!ob) continue;
+        var oc = { x: ob.x + ob.width / 2, y: ob.y + ob.height / 2 };
+        if (pointDistance(oc, oldStart) <= 22) {
+          translateSvgElement(owned, startDelta.x, startDelta.y);
+          explicitlyMoved.push(owned);
+          continue;
+        }
+        if (pointDistance(oc, oldEnd) <= 22) {
+          translateSvgElement(owned, endDelta.x, endDelta.y);
+          explicitlyMoved.push(owned);
+          continue;
+        }
+        var projection = nearestPointOnRoute(oldPoints, oc);
+        var mapped = matchingPointOnRoute(newPoints, projection);
+        if (!projection || !mapped) continue;
+        translateSvgElement(owned, mapped.x - projection.point.x, mapped.y - projection.point.y);
+        explicitlyMoved.push(owned);
+      }
+    }
 
     var candidates = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
       if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+      if (explicitlyMoved.indexOf(el) >= 0) return false;
       var b = boxToSvgSpace(el, safeElementBBox(el));
       if (!b) return false;
       if (el.tagName.toLowerCase() !== 'text' && Math.max(b.width, b.height) > 34) return false;
@@ -3685,17 +3831,13 @@
     optimizeEndpointSlides: optimizeEndpointSlides,
 
     // ─── Drawing Utilities ───────────────────────────────────────
-    drawArrow: function(svg, x, y, ux, uy, color, size, sw) {
+    drawArrow: function(svg, x, y, ux, uy, color, size, sw, attrs) {
       var as = size || BASE_CFG.arrowSize;
       var strw = sw || BASE_CFG.strokeWidth;
-      var hw = as * 0.44;
-      var tipBack = as * 0.06;
-      var px = -uy, py = ux;
-      svg.push('<polygon points="' +
-        x + ',' + y + ' ' +
-        (x + ux * (as + tipBack) + px * hw) + ',' + (y + uy * (as + tipBack) + py * hw) + ' ' +
-        (x + ux * (as * 0.18)) + ',' + (y + uy * (as * 0.18)) + ' ' +
-        (x + ux * (as + tipBack) - px * hw) + ',' + (y + uy * (as + tipBack) - py * hw) +
+      var extraAttrs = attrs || '';
+      var points = arrowPolygonPoints(x, y, ux, uy, as);
+      svg.push('<polygon' + extraAttrs + ' points="' +
+        points.map(function(p) { return p.x + ',' + p.y; }).join(' ') +
         '" fill="' + color + '" stroke="' + color + '" stroke-width="' + (strw * 0.35) + '" stroke-linejoin="miter"/>');
     },
 
@@ -12156,6 +12298,12 @@
         ' data-layout-target="' + UMLShared.escapeXml(target || '') + '"';
     }
 
+    function stateRouteDecorationAttrs(id, kind) {
+      return ' data-layout-route-id="' + UMLShared.escapeXml(id) + '"' +
+        ' data-layout-kind="' + UMLShared.escapeXml(kind || 'edge-label') + '"' +
+        ' data-layout-route-decorative="true"';
+    }
+
     // ── Direction-aware routing setup ────────────────────────────────
     // Resolve the actual layout direction used by the engine (may differ
     // from parsed.direction when the engine rotates TB↔LR based on the
@@ -12495,7 +12643,8 @@
       // Self-transition — loop lives on the secondary-far face so it
       // never obstructs the primary flow of the diagram.
       if (tr.from === tr.to) {
-        var selfRouteAttrs = stateRouteAttrs('edge-' + ti, tr.from, tr.to);
+        var selfRouteId = 'edge-' + ti;
+        var selfRouteAttrs = stateRouteAttrs(selfRouteId, tr.from, tr.to);
         var lw = CFG.selfLoopW, lh = CFG.selfLoopH;
         var sPathStart, sPathCtrl1, sPathCtrl2, sPathEnd, sArrowTip, sArrowDir;
         var loopLabelX, loopLabelY, loopLabelAnchor;
@@ -12529,12 +12678,14 @@
           sPathCtrl2.x + ' ' + sPathCtrl2.y + ' ' +
           sPathEnd.x + ' ' + sPathEnd.y +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-        UMLShared.drawArrow(svg, sArrowTip.x, sArrowTip.y, sArrowTip.dx, sArrowTip.dy, colors.line);
+        UMLShared.drawArrow(svg, sArrowTip.x, sArrowTip.y, sArrowTip.dx, sArrowTip.dy,
+          colors.line, null, null, stateRouteDecorationAttrs(selfRouteId, 'edge-arrow'));
         if (tr.label || tr.labelDirection) {
           var labelW = UMLShared.labelDirectionTextWidth(tr.label, tr.labelDirection, CFG.fontSize);
           var loopTextW = UMLShared.textWidth(tr.label || '', false, CFG.fontSize);
           if (tr.label) {
-            labelSvg.push('<text x="' + loopLabelX + '" y="' + loopLabelY +
+            labelSvg.push('<text' + stateRouteDecorationAttrs(selfRouteId, 'edge-label') +
+              ' x="' + loopLabelX + '" y="' + loopLabelY +
               '" text-anchor="' + loopLabelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
               '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
           }
@@ -12555,7 +12706,12 @@
             { x: loopLabelX, y: loopLabelY, anchor: loopLabelAnchor },
             null,
             colors,
-            { fontSize: CFG.fontSize, textRect: loopTextRect, direction: isTB ? 'down' : 'right' }
+            {
+              fontSize: CFG.fontSize,
+              textRect: loopTextRect,
+              direction: isTB ? 'down' : 'right',
+              attrs: stateRouteDecorationAttrs(selfRouteId, 'edge-direction')
+            }
           );
           placedLabels.push(UMLShared.unionRects({
             left: lblLeft,
@@ -12794,7 +12950,8 @@
       var adx = pLast.x - pPrev.x, ady = pLast.y - pPrev.y;
       var alen = Math.sqrt(adx * adx + ady * ady);
       if (alen > 0) { adx /= alen; ady /= alen; }
-      UMLShared.drawArrow(svg, pLast.x, pLast.y, -adx, -ady, colors.line);
+      UMLShared.drawArrow(svg, pLast.x, pLast.y, -adx, -ady,
+        colors.line, null, null, stateRouteDecorationAttrs('edge-' + ti, 'edge-arrow'));
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
       for (var rsgi = 0; rsgi < routeSegments.length; rsgi++) routeSegments[rsgi].routeIndex = ti;
 
@@ -12952,8 +13109,10 @@
         });
         if (!labelPlacement) continue;
         var stateLabelRect = labelPlacement.rect;
+        var stateRouteId = 'edge-' + routeInfo.routeIndex;
         if (tr.label) {
-          labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
+          labelSvg.push('<text' + stateRouteDecorationAttrs(stateRouteId, 'edge-label') +
+            ' x="' + labelPlacement.x + '" y="' + labelPlacement.y +
             '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
             '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
             UMLShared.escapeXml(tr.label) + '</text>');
@@ -12965,7 +13124,7 @@
           labelPlacement,
           points,
           colors,
-          { fontSize: CFG.fontSize }
+          { fontSize: CFG.fontSize, attrs: stateRouteDecorationAttrs(stateRouteId, 'edge-direction') }
         );
         placedLabels.push(UMLShared.unionRects(stateLabelRect, stateDirectionRect));
       }
@@ -21964,12 +22123,16 @@
       var adx = pLast.x - pPrev.x, ady = pLast.y - pPrev.y;
       var alen = Math.sqrt(adx * adx + ady * ady);
       if (alen > 0) { adx /= alen; ady /= alen; }
-      UMLShared.drawArrow(svg, pLast.x, pLast.y, -adx, -ady, colors.line);
+      UMLShared.drawArrow(svg, pLast.x, pLast.y, -adx, -ady, colors.line, null, null,
+        ' data-layout-route-id="' + UMLShared.escapeXml(activityRouteId) + '"' +
+        ' data-layout-kind="edge-arrow" data-layout-route-decorative="true"');
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
       // Guard label
       var guardText = activityEdgeLabel(tr);
       if (guardText || tr.guardDirection) {
+        var activityRouteDecorationAttrs = ' data-layout-route-id="' + UMLShared.escapeXml(activityRouteId) + '"' +
+          ' data-layout-kind="edge-label" data-layout-route-decorative="true"';
         var guardPlacement = UMLShared.placeOrthogonalLabel(
           UMLShared.labelDirectionPlacementText(guardText, tr.guardDirection),
           points,
@@ -21991,7 +22154,8 @@
         if (guardPlacement) {
           var guardLabelRect = guardPlacement.rect;
           if (guardText) {
-            labelSvg.push('<text x="' + guardPlacement.x + '" y="' + guardPlacement.y +
+            labelSvg.push('<text' + activityRouteDecorationAttrs +
+              ' x="' + guardPlacement.x + '" y="' + guardPlacement.y +
               '" text-anchor="' + guardPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
               '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
               UMLShared.escapeXml(guardText) + '</text>');
@@ -22003,7 +22167,7 @@
             guardPlacement,
             points,
             colors,
-            { fontSize: CFG.fontSize }
+            { fontSize: CFG.fontSize, attrs: activityRouteDecorationAttrs }
           );
           placedLabels.push(UMLShared.unionRects(guardLabelRect, guardDirectionRect));
         }
