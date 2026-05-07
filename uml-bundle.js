@@ -13176,8 +13176,8 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
@@ -18712,6 +18712,14 @@
     var direction = 'TB';
     var layoutPreference = null;
 
+    function addNodeChild(nodeName, childLine) {
+      var child = String(childLine || '').trim();
+      var childMatch = child.match(/^(component|artifact)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?/i);
+      if (childMatch && nodeMap[nodeName]) {
+        nodeMap[nodeName].components.push(childMatch[4] || childMatch[2] || childMatch[3]);
+      }
+    }
+
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
@@ -18739,16 +18747,7 @@
           braceDepth = 0;
           continue;
         }
-        // Component inside node
-        var compMatch = line.match(/^component\s+(\S+)/);
-        if (compMatch) {
-          nodeMap[currentNode].components.push(compMatch[1]);
-        }
-        // Artifact inside node
-        var artMatch = line.match(/^artifact\s+(\S+)/);
-        if (artMatch) {
-          nodeMap[currentNode].components.push(artMatch[1]);
-        }
+        addNodeChild(currentNode, line);
         continue;
       }
 
@@ -18780,6 +18779,9 @@
         if (depLine.indexOf('{') !== -1) {
           braceDepth = 1;
           if (depLine.indexOf('}') !== -1 && depLine.indexOf('}') > depLine.indexOf('{')) {
+            var inlineBody = depLine.substring(depLine.indexOf('{') + 1, depLine.lastIndexOf('}'));
+            var pieces = inlineBody.split(/[;\n]/);
+            for (var depi = 0; depi < pieces.length; depi++) addNodeChild(nName, pieces[depi]);
             braceDepth = 0;
           } else {
             currentNode = nName;
@@ -19494,8 +19496,8 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
@@ -19564,6 +19566,8 @@
     sysPadX: 40,
     sysPadY: 40,
     sysTitlePadY: 24,
+    sysMinW: 240,
+    sysMinH: 150,
     sysRx: 8,
     gapX: 100,
     gapY: 60,
@@ -20350,6 +20354,15 @@
           width: boxW,
           height: sMaxY - sMinY + CFG.sysPadY * 2 + CFG.sysTitlePadY,
         });
+      } else {
+        var emptyTitleW = UMLShared.textWidth(sys.name, true, CFG.fontSizeBold);
+        systemBoxes.push({
+          name: sys.name,
+          x: si * (Math.max(CFG.sysMinW, emptyTitleW + CFG.sysPadX * 2) + CFG.gapX),
+          y: 0,
+          width: Math.max(CFG.sysMinW, emptyTitleW + CFG.sysPadX * 2),
+          height: CFG.sysMinH,
+        });
       }
     }
 
@@ -20422,6 +20435,8 @@
     // ── Draw system boundaries (behind everything) ──
     for (var sbi2 = 0; sbi2 < systemBoxes.length; sbi2++) {
       var sbox = systemBoxes[sbi2];
+      svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.name) +
+        '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.name) + '">');
       svg.push('<rect x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
         '" rx="' + CFG.sysRx + '" ry="' + CFG.sysRx +
         '" fill="' + colors.secondaryFill + '" fill-opacity="0.7" stroke="' + colors.secondaryLine + '" stroke-width="1.2"/>');
@@ -20429,6 +20444,7 @@
       svg.push('<text x="' + (sbox.x + sbox.width / 2) + '" y="' + (sbox.y + CFG.sysTitlePadY - 6) +
         '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(sbox.name) + '</text>');
+      svg.push('</g>');
     }
 
     // ── Group actor generalizations for tree-style rendering ──
@@ -20836,7 +20852,7 @@
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
-    if (parsed.actors.length === 0 && parsed.usecases.length === 0) {
+    if (parsed.actors.length === 0 && parsed.usecases.length === 0 && parsed.systems.length === 0) {
       container.innerHTML = '<div class="uml-empty-msg">No elements to display.</div>';
       return;
     }
@@ -20846,8 +20862,8 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
@@ -22175,7 +22191,15 @@
         else if (hasLeft) dir = 'backward';
         else dir = 'none';
 
-        edges.push({ from: from, to: to, style: style, direction: dir, label: edgeLabelInfo.text, labelDirection: edgeLabelInfo.hasDirection });
+        edges.push({
+          from: from,
+          to: to,
+          style: style,
+          direction: dir,
+          label: edgeLabelInfo.text,
+          labelDirection: edgeLabelInfo.hasDirection,
+          lineIdx: i
+        });
         continue;
       }
     }
@@ -22426,7 +22450,10 @@
         direction: tr.direction,
         label: tr.label || '',
         labelDirection: tr.labelDirection,
-        labelPlacement: null
+        labelPlacement: null,
+        routeId: tr.lineIdx != null ? ('rel:' + tr.lineIdx) : ('edge-' + ti),
+        source: tr.from,
+        target: tr.to
       };
 
       if (tr.label || tr.labelDirection) {
@@ -22487,7 +22514,10 @@
       var dashAttr = d.style === 'dashed' ? ' stroke-dasharray="5,4"' : '';
       var sw = d.style === 'thick' ? CFG.strokeWidth * 2.1 : CFG.strokeWidth;
       svg.push('<polyline points="' + pStr +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="' + sw + '"' + dashAttr + '/>');
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + sw + '"' + dashAttr +
+        ' data-layout-route-id="' + UMLShared.escapeXml(d.routeId || ('edge-' + di)) + '"' +
+        ' data-layout-source="' + UMLShared.escapeXml(d.source || '') + '"' +
+        ' data-layout-target="' + UMLShared.escapeXml(d.target || '') + '"/>');
 
       if (d.direction === 'forward' || d.direction === 'both') {
         var last = pts[pts.length - 1];
@@ -22507,7 +22537,10 @@
 
     // Nodes
     for (var en in entries) {
+      svg.push('<g data-layout-id="' + UMLShared.escapeXml(en) +
+        '" data-layout-bounds-id="' + UMLShared.escapeXml(en) + '">');
       drawShape(svg, entries[en], colors);
+      svg.push('</g>');
     }
 
     // Edge labels (on top of nodes, below notes)
@@ -22518,7 +22551,8 @@
       if (d2.label) {
         svg.push('<text x="' + p.x + '" y="' + p.y +
           '" text-anchor="' + p.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-          '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' +
+          '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke"' +
+          ' data-layout-kind="edge-label" data-layout-id="label:' + UMLShared.escapeXml(d2.routeId || ('edge-' + di2)) + '">' +
           UMLShared.escapeXml(d2.label) + '</text>');
       }
       UMLShared.pushLabelDirectionTriangle(
@@ -22561,8 +22595,8 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
+    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
