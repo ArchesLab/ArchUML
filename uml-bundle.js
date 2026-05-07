@@ -1005,7 +1005,9 @@
     if (!svg) return [];
     var obstacles = collectRouteObstacleBoxes(svg);
     var candidates = Array.prototype.slice.call(svg.querySelectorAll('line,polyline,path,rect')).filter(function(el) {
-      return !el.closest('defs') && !el.closest('.uml-pg-edit-layer');
+      return !el.closest('defs') &&
+        !el.closest('.uml-pg-edit-layer') &&
+        routeAttribute(el, 'data-layout-route-decorative') !== 'true';
     });
     var routes = [];
     for (var i = 0; i < candidates.length; i++) {
@@ -6097,6 +6099,7 @@
       // Try to parse relationship
       var rel = parseRelationship(line);
       if (rel) {
+        rel.sourceIndex = i;
         relationships.push(rel);
         continue;
       }
@@ -7317,6 +7320,21 @@
       var cleanTarget = String(targetName).replace(/^"|"$/g, '').trim();
       var dotIdx = cleanTarget.indexOf('.');
       return dotIdx === -1 ? cleanTarget : cleanTarget.substring(0, dotIdx).trim();
+    }
+
+    function classRelationRouteId(rel, fallbackIndex) {
+      if (rel && rel.sourceIndex !== undefined && rel.sourceIndex !== null) {
+        return 'rel:' + rel.sourceIndex;
+      }
+      return 'edge-' + fallbackIndex;
+    }
+
+    function classRelationRouteAttrs(rel, fallbackIndex) {
+      var routeId = classRelationRouteId(rel, fallbackIndex);
+      var attrs = ' data-layout-route-id="' + UMLShared.escapeXml(routeId) + '"';
+      if (rel && rel.from) attrs += ' data-layout-source="' + UMLShared.escapeXml(rel.from) + '"';
+      if (rel && rel.to) attrs += ' data-layout-target="' + UMLShared.escapeXml(rel.to) + '"';
+      return attrs;
     }
 
     var classNoteSidePressure = {};
@@ -8813,12 +8831,13 @@
       // stays outside the class box while the relationship remains connected.
       if (sourceDiamondTip) {
         svg.push('<line x1="' + p0.x + '" y1="' + p0.y + '" x2="' + sourceDiamondTip.x + '" y2="' + sourceDiamondTip.y +
-          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt"' + dAttr + '/>');
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt" data-layout-route-decorative="true"' + dAttr + '/>');
       }
 
       // Draw main polyline
+      var routeAttrs = classRelationRouteAttrs(orel, oi);
       svg.push('<polyline points="' + pointsStr +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + routeAttrs + dAttr + '/>');
       pushClassRouteCrossingBridges(svg, routeCrossingBridges, dAttr);
 
       // Determine direction at each end for decorations
