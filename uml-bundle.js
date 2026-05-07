@@ -2082,6 +2082,7 @@
     var single = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?(\S+)\s*:\s*(.+)$/i);
     if (single) {
       notesArray.push({
+        id: 'note:' + lineIdx,
         position: single[1].toLowerCase(),
         target: single[2].trim(),
         lines: [single[3].trim()],
@@ -2100,6 +2101,7 @@
         j++;
       }
       notesArray.push({
+        id: 'note:' + lineIdx,
         position: multi[1].toLowerCase(),
         target: multi[2].trim(),
         lines: noteLines.length > 0 ? noteLines : [''],
@@ -2429,11 +2431,14 @@
         if (!sameAsTarget) usableObstacles.push(obstacle);
       }
       var placed = placeNoteRect(target, size, note.position, usableObstacles, placedRects, options);
-      var rect = { x: placed.x, y: placed.y, w: size.width, h: size.height };
+      var manual = options && options.layout ? findLayoutPosition(options.layout, note.id) : null;
+      var noteX = manual && isFinite(Number(manual.x)) ? Number(manual.x) : placed.x;
+      var noteY = manual && isFinite(Number(manual.y)) ? Number(manual.y) : placed.y;
+      var rect = { x: noteX, y: noteY, w: size.width, h: size.height };
       notePositions.push({
         note: note,
-        x: placed.x,
-        y: placed.y,
+        x: noteX,
+        y: noteY,
         w: size.width,
         h: size.height,
         tx: target.x,
@@ -9067,6 +9072,7 @@
     for (var nmi = 0; nmi < noteMarkerObstacles.length; nmi++) noteObstacles.push(noteMarkerObstacles[nmi]);
 
     var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, noteObstacles, {
+      layout: parsed.layout,
       gap: 22,
       slideStep: 20,
       distanceLevels: 5,
@@ -12863,6 +12869,7 @@
     // Notes must avoid the finished transition drawing, not just state boxes.
     // Place them after routing, then size the SVG to include their final position.
     var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, noteObstacles, {
+      layout: parsed.layout,
       maxSlides: 14,
       distanceLevels: 12,
       distanceStep: 22,
@@ -15695,7 +15702,7 @@
     // Resolve note target — supports dotted paths to sub-elements
 
     // Pre-compute note positions for SVG bounds expansion
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries);
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, null, { layout: parsed.layout });
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
     for (var nbi = 0; nbi < notePositions.length; nbi++) {
       var npb = notePositions[nbi];
@@ -18806,7 +18813,7 @@
     // Resolve note target — supports dotted paths to sub-elements
 
     // Pre-compute note positions for SVG bounds expansion
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries);
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, null, { layout: parsed.layout });
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
     for (var nbi = 0; nbi < notePositions.length; nbi++) {
       var npb = notePositions[nbi];
@@ -21319,7 +21326,7 @@
     }
 
     // ── Compute note positions ──
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries);
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, null, { layout: parsed.layout });
 
     // ── Compute extra space for notes ──
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
@@ -22313,7 +22320,7 @@
 
     // Notes: feed edge label rects in as extra obstacles so the anchored
     // placer won't park a note on top of an edge label.
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, placedLabelRects);
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, placedLabelRects, { layout: parsed.layout });
 
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
     for (var nbi = 0; nbi < notePositions.length; nbi++) {
