@@ -12077,6 +12077,17 @@
     var entries = layout.entries;
     var transitions = parsed.transitions;
 
+    function stateLayoutAttrs(id) {
+      return ' data-layout-id="' + UMLShared.escapeXml(id) + '"' +
+        ' data-layout-bounds-id="' + UMLShared.escapeXml(id) + '"';
+    }
+
+    function stateRouteAttrs(id, source, target) {
+      return ' data-layout-route-id="' + UMLShared.escapeXml(id) + '"' +
+        ' data-layout-source="' + UMLShared.escapeXml(source || '') + '"' +
+        ' data-layout-target="' + UMLShared.escapeXml(target || '') + '"';
+    }
+
     // ── Direction-aware routing setup ────────────────────────────────
     // Resolve the actual layout direction used by the engine (may differ
     // from parsed.direction when the engine rotates TB↔LR based on the
@@ -12416,6 +12427,7 @@
       // Self-transition — loop lives on the secondary-far face so it
       // never obstructs the primary flow of the diagram.
       if (tr.from === tr.to) {
+        var selfRouteAttrs = stateRouteAttrs('edge-' + ti, tr.from, tr.to);
         var lw = CFG.selfLoopW, lh = CFG.selfLoopH;
         var sPathStart, sPathCtrl1, sPathCtrl2, sPathEnd, sArrowTip, sArrowDir;
         var loopLabelX, loopLabelY, loopLabelAnchor;
@@ -12444,7 +12456,7 @@
           loopLabelY = syh + lw + CFG.fontSize + 2;
           loopLabelAnchor = 'middle';
         }
-        svg.push('<path d="M ' + sPathStart.x + ' ' + sPathStart.y + ' C ' +
+        svg.push('<path' + selfRouteAttrs + ' d="M ' + sPathStart.x + ' ' + sPathStart.y + ' C ' +
           sPathCtrl1.x + ' ' + sPathCtrl1.y + ' ' +
           sPathCtrl2.x + ' ' + sPathCtrl2.y + ' ' +
           sPathEnd.x + ' ' + sPathEnd.y +
@@ -12705,7 +12717,7 @@
         if (pi > 0) pStr += ' ';
         pStr += points[pi].x + ',' + points[pi].y;
       }
-      svg.push('<polyline points="' + pStr +
+      svg.push('<polyline' + stateRouteAttrs('edge-' + ti, tr.from, tr.to) + ' points="' + pStr +
         '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
 
       // Arrowhead at target
@@ -12966,7 +12978,7 @@
       var cFills = UMLShared.highlightFills(colors, ce.state.highlight, ce.state.texture);
       svg.push('<g filter="url(#uml-node-shadow)">');
       // Large rounded rectangle
-      svg.push('<rect x="' + ce.x + '" y="' + ce.y + '" width="' + ce.box.width + '" height="' + ce.box.height +
+      svg.push('<rect' + stateLayoutAttrs(cen) + ' x="' + ce.x + '" y="' + ce.y + '" width="' + ce.box.width + '" height="' + ce.box.height +
         '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
         '" fill="' + cFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       if (cFills.textureUrl) {
@@ -12995,12 +13007,12 @@
       var cy = e.y + e.box.height / 2;
 
       if (s.type === 'initial') {
-        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.initialR +
+        svg.push('<circle' + stateLayoutAttrs(en) + ' cx="' + cx + '" cy="' + cy + '" r="' + CFG.initialR +
           '" fill="' + colors.line + '" stroke="none"/>');
       } else if (s.type === 'final') {
-        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalRingR +
+        svg.push('<circle' + stateLayoutAttrs(en) + ' cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalRingR +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-        svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
+        svg.push('<circle' + stateLayoutAttrs(en) + ' cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
           '" fill="' + colors.line + '" stroke="none"/>');
       } else if (s.type === 'choice') {
         var choiceFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
@@ -13008,7 +13020,7 @@
         var dh = e.box.width / 2;
         var choicePts = cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
           cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy;
-        svg.push('<polygon filter="url(#uml-node-shadow)" points="' + choicePts +
+        svg.push('<polygon' + stateLayoutAttrs(en) + ' filter="url(#uml-node-shadow)" points="' + choicePts +
           '" fill="' + choiceFills.headerFill + '" stroke="' + colors.stroke +
           '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (choiceFills.textureUrl) {
@@ -13017,7 +13029,7 @@
       } else {
         var stateFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
         // Regular state: rounded rectangle
-        svg.push('<rect filter="url(#uml-node-shadow)" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+        svg.push('<rect' + stateLayoutAttrs(en) + ' filter="url(#uml-node-shadow)" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + stateFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (stateFills.textureUrl) {
