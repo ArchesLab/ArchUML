@@ -6243,7 +6243,9 @@
   // Relationship patterns ordered by specificity
   var REL_PATTERNS = [
     { token: '--|>', type: 'generalization' },
+    { token: '<|--', type: 'generalization', reverse: true },
     { token: '..|>', type: 'realization' },
+    { token: '<|..', type: 'realization', reverse: true },
 
     // Composition / Aggregation (diamond at source by default)
     { token: '*<-->', type: 'composition', navigability: 'bidirectional' },
@@ -10230,7 +10232,7 @@
    */
   function renderFromData(container, parsed, options) {
     if (!parsed.classes || parsed.classes.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No classes to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No classes to display.</div>';
       return;
     }
 
@@ -10659,7 +10661,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.participants || parsed.participants.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No participants to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No participants to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'sequence');
@@ -13004,7 +13006,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.states || parsed.states.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No states to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No states to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'state');
@@ -18445,7 +18447,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.components || parsed.components.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No components to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No components to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'component');
@@ -19322,7 +19324,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No nodes to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No nodes to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'deployment');
@@ -19549,6 +19551,16 @@
         relationships.push({
           from: genMatch[1],
           to: genMatch[2],
+          type: 'generalization',
+          label: '',
+        });
+        continue;
+      }
+      var reverseGenMatch = line.match(/^(\S+)\s+<\|--\s+(\S+)\s*$/);
+      if (reverseGenMatch) {
+        relationships.push({
+          from: reverseGenMatch[2],
+          to: reverseGenMatch[1],
           type: 'generalization',
           label: '',
         });
@@ -20664,7 +20676,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (parsed.actors.length === 0 && parsed.usecases.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No elements to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No elements to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'usecase');
@@ -21830,7 +21842,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No activities to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No activities to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'activity');
@@ -22379,7 +22391,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.nodes || parsed.nodes.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No boxes to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No boxes to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'freeform');
@@ -22891,7 +22903,7 @@
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
     if (!parsed.rows || parsed.rows.length === 0) {
-      container.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">No folder tree to display.</div>';
+      container.innerHTML = '<div class="uml-empty-msg">No folder tree to display.</div>';
       return;
     }
     UMLShared.prepareDiagramContainer(container, 'folder-tree');
@@ -23828,11 +23840,11 @@
   function generateSVG(parsed, themeColors) {
     var n = parsed.sets.length;
     if (n === 0) {
-      return '<div style="padding:20px;color:#888;text-align:center;">' +
+      return '<div class="uml-empty-msg">' +
              'No sets declared. Use <code>set &lt;name&gt;</code> to add sets.</div>';
     }
     if (n > 5) {
-      return '<div style="padding:20px;color:#b00;text-align:center;">' +
+      return '<div class="uml-error-msg">' +
              'Venn diagrams support at most 5 sets (requested: ' + n + '). ' +
              'For 6+ sets use an UpSet plot instead.</div>';
     }
@@ -24772,7 +24784,7 @@
 
   function generateSVG(parsed, themeColors) {
     if (parsed.entities.length === 0 && parsed.relationships.length === 0) {
-      return '<div style="padding:20px;color:#888;text-align:center;">' +
+      return '<div class="uml-empty-msg">' +
              'No entities declared. Use <code>entity &lt;name&gt; { ... }</code> to add entities.</div>';
     }
 
