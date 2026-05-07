@@ -619,6 +619,70 @@
     return points.filter(function(p) { return isFinite(p.x) && isFinite(p.y); });
   }
 
+  function ownerSvg(el) {
+    return el && (el.ownerSVGElement || (el.tagName && el.tagName.toLowerCase() === 'svg' ? el : null));
+  }
+
+  function svgPointFor(svg, point) {
+    var pt = svg && svg.createSVGPoint ? svg.createSVGPoint() : null;
+    if (!pt) return { x: point.x, y: point.y };
+    pt.x = point.x;
+    pt.y = point.y;
+    return pt;
+  }
+
+  function elementToSvgMatrix(el) {
+    var svg = ownerSvg(el);
+    if (!svg || !el || !svg.getScreenCTM || !el.getScreenCTM) return null;
+    try {
+      var svgCtm = svg.getScreenCTM();
+      var elCtm = el.getScreenCTM();
+      if (!svgCtm || !elCtm) return null;
+      return svgCtm.inverse().multiply(elCtm);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function pointToSvgSpace(el, point) {
+    var svg = ownerSvg(el);
+    var matrix = elementToSvgMatrix(el);
+    if (!svg || !matrix) return { x: point.x, y: point.y };
+    var next = svgPointFor(svg, point).matrixTransform(matrix);
+    return { x: next.x, y: next.y };
+  }
+
+  function pointFromSvgSpace(el, point) {
+    var svg = ownerSvg(el);
+    var matrix = elementToSvgMatrix(el);
+    if (!svg || !matrix) return { x: point.x, y: point.y };
+    try {
+      var next = svgPointFor(svg, point).matrixTransform(matrix.inverse());
+      return { x: next.x, y: next.y };
+    } catch (e) {
+      return { x: point.x, y: point.y };
+    }
+  }
+
+  function pointsToSvgSpace(el, points) {
+    return (points || []).map(function(point) { return pointToSvgSpace(el, point); });
+  }
+
+  function pointsFromSvgSpace(el, points) {
+    return (points || []).map(function(point) { return pointFromSvgSpace(el, point); });
+  }
+
+  function boxToSvgSpace(el, box) {
+    if (!box) return null;
+    var points = pointsToSvgSpace(el, [
+      { x: box.x, y: box.y },
+      { x: box.x + box.width, y: box.y },
+      { x: box.x + box.width, y: box.y + box.height },
+      { x: box.x, y: box.y + box.height }
+    ]);
+    return routeBox(points);
+  }
+
   function routePointsForElement(el) {
     if (!el || !el.tagName) return null;
     var tag = el.tagName.toLowerCase();
@@ -721,29 +785,30 @@
 
   function setRoutePointsForElement(el, points) {
     if (!el || !points || points.length < 2) return el;
+    var localPoints = pointsFromSvgSpace(el, points);
     var tag = el.tagName.toLowerCase();
     if (tag === 'line') {
-      if (points.length > 2) return replaceLineWithPolyline(el, points);
-      el.setAttribute('x1', points[0].x);
-      el.setAttribute('y1', points[0].y);
-      el.setAttribute('x2', points[points.length - 1].x);
-      el.setAttribute('y2', points[points.length - 1].y);
+      if (localPoints.length > 2) return replaceLineWithPolyline(el, localPoints);
+      el.setAttribute('x1', localPoints[0].x);
+      el.setAttribute('y1', localPoints[0].y);
+      el.setAttribute('x2', localPoints[localPoints.length - 1].x);
+      el.setAttribute('y2', localPoints[localPoints.length - 1].y);
     } else if (tag === 'polyline') {
-      el.setAttribute('points', points.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+      el.setAttribute('points', localPoints.map(function(p) { return p.x + ',' + p.y; }).join(' '));
     } else if (tag === 'path') {
       if (isGitGraphRouteElement(el)) {
-        el.setAttribute('d', gitGraphRoutePathD(points));
-        updateGitGraphRouteHead(el, points);
+        el.setAttribute('d', gitGraphRoutePathD(localPoints));
+        updateGitGraphRouteHead(el, localPoints);
       } else {
-        el.setAttribute('d', points.map(function(p, i) {
+        el.setAttribute('d', localPoints.map(function(p, i) {
           return (i === 0 ? 'M ' : 'L ') + p.x + ' ' + p.y;
         }).join(' '));
       }
     } else if (tag === 'rect') {
       var width = Number(el.getAttribute('width') || 0);
-      var x = Math.min(points[0].x, points[points.length - 1].x) - width / 2;
-      var y = Math.min(points[0].y, points[points.length - 1].y);
-      var h = Math.abs(points[points.length - 1].y - points[0].y);
+      var x = Math.min(localPoints[0].x, localPoints[localPoints.length - 1].x) - width / 2;
+      var y = Math.min(localPoints[0].y, localPoints[localPoints.length - 1].y);
+      var h = Math.abs(localPoints[localPoints.length - 1].y - localPoints[0].y);
       el.setAttribute('x', x);
       el.setAttribute('y', y);
       el.setAttribute('height', h);
@@ -938,7 +1003,7 @@
 
     var candidates = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
       if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
-      var b = safeElementBBox(el);
+      var b = boxToSvgSpace(el, safeElementBBox(el));
       if (!b) return false;
       if (el.tagName.toLowerCase() !== 'text' && Math.max(b.width, b.height) > 34) return false;
       return true;
@@ -946,7 +1011,7 @@
 
     for (var i = 0; i < candidates.length; i++) {
       var el = candidates[i];
-      var b = safeElementBBox(el);
+      var b = boxToSvgSpace(el, safeElementBBox(el));
       if (!b) continue;
       var c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
       if (pointDistance(c, oldStart) <= 18) {
@@ -998,7 +1063,7 @@
       var b = safeElementBBox(el);
       if (!b || b.width < 24 || b.height < 16) return false;
       return tag !== 'rect' || !(b.height > 18 && b.width <= 18);
-    }).map(safeElementBBox).filter(Boolean);
+    }).map(function(el) { return boxToSvgSpace(el, safeElementBBox(el)); }).filter(Boolean);
   }
 
   function collectEditableRoutes(svg) {
@@ -1012,8 +1077,9 @@
     var routes = [];
     for (var i = 0; i < candidates.length; i++) {
       var el = candidates[i];
-      var points = routePointsForElement(el);
-      if (!points || points.length < 2) continue;
+      var localPoints = routePointsForElement(el);
+      if (!localPoints || localPoints.length < 2) continue;
+      var points = pointsToSvgSpace(el, localPoints);
       var rb = routeBox(points);
       if (Math.max(rb.width, rb.height) < 18) continue;
       var explicitRouteId = routeAttribute(el, 'data-layout-route-id');
@@ -1035,6 +1101,8 @@
         target: routeAttribute(el, 'data-layout-target') || null,
         style: routeAttribute(el, 'data-route-style') || null,
         points: points,
+        localPoints: localPoints,
+        svgSpace: true,
         box: rb
       });
     }
