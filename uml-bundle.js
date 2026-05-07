@@ -10533,7 +10533,7 @@
         var lostFrom = lostMatch[1];
         var lostLabelInfo = UMLShared.parseLabelDirectionCue(lostMatch[2] || '');
         ensureParticipant(lostFrom, participants, participantMap, autoParticipants);
-        messages.push({ type: 'lost', from: lostFrom, label: lostLabelInfo.text, labelDirection: lostLabelInfo.hasDirection });
+        messages.push({ type: 'lost', from: lostFrom, label: lostLabelInfo.text, labelDirection: lostLabelInfo.hasDirection, sourceIndex: i });
         continue;
       }
 
@@ -10543,7 +10543,7 @@
         var foundTo = foundMatch[1];
         var foundLabelInfo = UMLShared.parseLabelDirectionCue(foundMatch[2] || '');
         ensureParticipant(foundTo, participants, participantMap, autoParticipants);
-        messages.push({ type: 'found', to: foundTo, label: foundLabelInfo.text, labelDirection: foundLabelInfo.hasDirection });
+        messages.push({ type: 'found', to: foundTo, label: foundLabelInfo.text, labelDirection: foundLabelInfo.hasDirection, sourceIndex: i });
         continue;
       }
 
@@ -10577,6 +10577,7 @@
           labelDirection: msgLabelInfo.hasDirection,
           msgType: msgType,
           isDashed: isDashed,
+          sourceIndex: i,
         });
         continue;
       }
@@ -10652,6 +10653,20 @@
     else if (count >= 6) metrics.participantMinW = Math.max(92, CFG.participantMinW - 4);
 
     return metrics;
+  }
+
+  function sequenceMessageRouteId(message) {
+    return message && message.sourceIndex !== undefined && message.sourceIndex !== null
+      ? 'seqmsg:' + message.sourceIndex
+      : '';
+  }
+
+  function sequenceMessageRouteAttrs(message, sourceId, targetId) {
+    var routeId = sequenceMessageRouteId(message);
+    if (!routeId) return '';
+    return ' data-layout-route-id="' + UMLShared.escapeXml(routeId) + '"' +
+      ' data-layout-source="' + UMLShared.escapeXml(sourceId || '') + '"' +
+      ' data-layout-target="' + UMLShared.escapeXml(targetId || sourceId || '') + '"';
   }
 
   // ─── Layout & Render ──────────────────────────────────────────────
@@ -11233,6 +11248,7 @@
 
         // Self-message
         if (fromIdx === toIdx) {
+          var selfRouteAttrs = sequenceMessageRouteAttrs(m, m.from, m.to);
           var selfW = 40;
           var selfSendX = getEdgeX(fromIdx, my, 'right', 'source', m.msgType);
           var selfReceiveX = getEdgeX(fromIdx, my + selfMessageH, 'right', 'target', m.msgType);
@@ -11240,7 +11256,7 @@
           svg.push('<polyline points="' + selfSendX + ',' + my + ' ' + selfLoopX + ',' + my + ' ' +
             selfLoopX + ',' + (my + selfMessageH) + ' ' + selfReceiveX + ',' + (my + selfMessageH) +
             '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
-            '" stroke-linecap="butt" stroke-linejoin="miter"' + (m.isDashed ? ' stroke-dasharray="6,4"' : '') + '/>');
+            '" stroke-linecap="butt" stroke-linejoin="miter"' + selfRouteAttrs + (m.isDashed ? ' stroke-dasharray="6,4"' : '') + '/>');
           drawMsgArrow(svg, selfReceiveX, my + selfMessageH, 1, m.msgType, colors);
           if (m.label || m.labelDirection) {
             var selfLabelX = selfLoopX + 6;
@@ -11248,7 +11264,8 @@
             if (m.label) {
               svg.push('<text x="' + selfLabelX + '" y="' + selfLabelY +
                 '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' + UMLShared.escapeXml(m.label) + '</text>');
+                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
+                selfRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
             }
             UMLShared.pushLabelDirectionTriangle(
               svg,
@@ -11269,8 +11286,10 @@
         } else {
           // Line
           var dashAttr = m.isDashed ? ' stroke-dasharray="6,4"' : '';
+          var messageRouteAttrs = sequenceMessageRouteAttrs(m, m.from, m.to);
           svg.push('<line x1="' + x1 + '" y1="' + my + '" x2="' + x2 + '" y2="' + my +
-            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt"' + dashAttr + '/>');
+            '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '" stroke-linecap="butt"' +
+            messageRouteAttrs + dashAttr + '/>');
 
           // Arrowhead at target end
           var arrowDir = isLeft ? 1 : -1;
@@ -11287,8 +11306,8 @@
             if (m.label) {
               svg.push('<text x="' + labelX + '" y="' + labelY +
                 '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-                UMLShared.escapeXml(m.label) + '</text>');
+                '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
+                messageRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
             }
             UMLShared.pushLabelDirectionTriangle(
               svg,
@@ -11338,8 +11357,9 @@
         var lx1 = getEdgeX(lIdx, my, 'right');
         var lx2 = lx1 + lgap;
         var lr = CFG.lostFoundRadius;
+        var lostRouteAttrs = sequenceMessageRouteAttrs(m, m.from, m.from);
         svg.push('<line x1="' + lx1 + '" y1="' + my + '" x2="' + (lx2 - lr) + '" y2="' + my +
-          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + lostRouteAttrs + '/>');
         drawMsgArrow(svg, lx2 - lr, my, -1, 'sync', colors);
         svg.push('<circle cx="' + lx2 + '" cy="' + my + '" r="' + lr +
           '" fill="' + colors.line + '" stroke="' + colors.line + '"/>');
@@ -11349,8 +11369,8 @@
           if (m.label) {
             svg.push('<text x="' + llabelX + '" y="' + lostLabelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-              UMLShared.escapeXml(m.label) + '</text>');
+              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
+              lostRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
           }
           UMLShared.pushLabelDirectionTriangle(
             svg,
@@ -11371,10 +11391,11 @@
         var fx2 = getEdgeX(fIdx, my, 'left');
         var fx1 = fx2 - fgap;
         var fr = CFG.lostFoundRadius;
+        var foundRouteAttrs = sequenceMessageRouteAttrs(m, m.to, m.to);
         svg.push('<circle cx="' + fx1 + '" cy="' + my + '" r="' + fr +
           '" fill="' + colors.line + '" stroke="' + colors.line + '"/>');
         svg.push('<line x1="' + (fx1 + fr) + '" y1="' + my + '" x2="' + fx2 + '" y2="' + my +
-          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + foundRouteAttrs + '/>');
         drawMsgArrow(svg, fx2, my, -1, 'sync', colors);
         if (m.label || m.labelDirection) {
           var flabelX = (fx1 + fx2) / 2;
@@ -11382,8 +11403,8 @@
           if (m.label) {
             svg.push('<text x="' + flabelX + '" y="' + foundLabelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
-              UMLShared.escapeXml(m.label) + '</text>');
+              '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
+              foundRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
           }
           UMLShared.pushLabelDirectionTriangle(
             svg,
