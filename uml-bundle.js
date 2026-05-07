@@ -3648,6 +3648,7 @@
     collectEditableRoutes: collectEditableRoutes,
     routePointsForElement: routePointsForElement,
     setRoutePointsForElement: setRoutePointsForElement,
+    moveRouteDecorations: moveRouteDecorations,
     moveConnectedRoutes: moveConnectedRoutes,
     layoutRoutePointsToString: layoutRoutePointsToString,
     applyRenderedPositions: applyRenderedPositions,
@@ -12140,7 +12141,6 @@
 
   // ─── SVG Renderer ─────────────────────────────────────────────────
 
-
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var transitions = parsed.transitions;
@@ -13101,38 +13101,38 @@
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + stateFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (stateFills.textureUrl) {
-          svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
+          svg.push('<rect' + stateLayoutAttrs(en) + ' x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
             '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
             '" fill="' + stateFills.textureUrl + '" stroke="none"/>');
         }
 
         // State name (centered in top area)
         var nameY = e.y + CFG.padY + CFG.lineHeight * 0.75;
-        svg.push('<text x="' + cx + '" y="' + nameY +
+        svg.push('<text' + stateLayoutAttrs(en) + ' x="' + cx + '" y="' + nameY +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
           UMLShared.escapeXml(s.name) + '</text>');
 
         // Internal actions
         if (e.box.hasActions) {
           var divY = e.y + CFG.padY * 2 + CFG.lineHeight;
-          svg.push('<line x1="' + e.x + '" y1="' + divY + '" x2="' + (e.x + e.box.width) + '" y2="' + divY +
+          svg.push('<line' + stateLayoutAttrs(en) + ' x1="' + e.x + '" y1="' + divY + '" x2="' + (e.x + e.box.width) + '" y2="' + divY +
             '" stroke="' + colors.stroke + '" stroke-width="1"/>');
 
           var actionY = divY + 14;
           if (s.entryAction) {
-            svg.push('<text x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
+            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
               '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">entry / ' +
               UMLShared.escapeXml(s.entryAction) + '</text>');
             actionY += 16;
           }
           if (s.exitAction) {
-            svg.push('<text x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
+            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
               '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">exit / ' +
               UMLShared.escapeXml(s.exitAction) + '</text>');
             actionY += 16;
           }
           if (s.doActivity) {
-            svg.push('<text x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
+            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
               '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">do / ' +
               UMLShared.escapeXml(s.doActivity) + '</text>');
           }
@@ -13176,8 +13176,8 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
-    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
   }
@@ -20988,9 +20988,84 @@
       return n;
     }
 
-    function addEdge(fromId, toId, guard) {
+    function unescapeActivityToken(token) {
+      var raw = String(token || '').trim();
+      var quoted = raw.match(/^"((?:[^"\\]|\\.)*)"$/);
+      if (quoted) return quoted[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      return raw;
+    }
+
+    function splitActivityRelationLabel(rawLine) {
+      var raw = String(rawLine || '');
+      var inQuote = false;
+      var inBracket = false;
+      var escaped = false;
+      for (var si = 0; si < raw.length; si++) {
+        var ch = raw.charAt(si);
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\' && inQuote) {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inQuote = !inQuote;
+          continue;
+        }
+        if (!inQuote && ch === '[') {
+          inBracket = true;
+          continue;
+        }
+        if (!inQuote && ch === ']') {
+          inBracket = false;
+          continue;
+        }
+        if (!inQuote && !inBracket && ch === ':' && (si === 0 || /\s/.test(raw.charAt(si - 1)))) {
+          return {
+            head: raw.slice(0, si).trim(),
+            label: raw.slice(si + 1).trim(),
+            labelKind: 'plain'
+          };
+        }
+      }
+      return { head: raw.trim(), label: '', labelKind: 'guard' };
+    }
+
+    function ensureInitialNode() {
+      if (!nodes['__initial__']) {
+        ensureNode('__initial__', 'initial', '');
+        nodes['__initial__'].lane = currentLane;
+      }
+      return '__initial__';
+    }
+
+    function createFinalNode() {
+      finalCount++;
+      var id = '__final__' + finalCount;
+      ensureNode(id, 'final', '');
+      nodes[id].lane = currentLane;
+      return id;
+    }
+
+    function endpointNodeId(token, role) {
+      var raw = String(token || '').trim();
+      if (raw === '(*)') return role === 'source' ? ensureInitialNode() : createFinalNode();
+      var node = getOrCreateAction(unescapeActivityToken(raw));
+      return node.id;
+    }
+
+    function addEdge(fromId, toId, guard, labelKind, lineIdx) {
       var guardInfo = UMLShared.parseLabelDirectionCue(guard || '');
-      edges.push({ from: fromId, to: toId, guard: guardInfo.text, guardDirection: guardInfo.hasDirection });
+      edges.push({
+        from: fromId,
+        to: toId,
+        guard: guardInfo.text,
+        guardDirection: guardInfo.hasDirection,
+        labelKind: labelKind || 'guard',
+        routeId: lineIdx != null ? ('rel:' + lineIdx) : ''
+      });
     }
 
     // After endif, pending branch endpoints need to connect to the next
@@ -21181,6 +21256,50 @@
         continue;
       }
 
+      var relationParts = splitActivityRelationLabel(actLine);
+      var activityEndpointRe = '(\\(\\*\\)|"(?:[^"\\\\]|\\\\.)*"|\\S+)';
+
+      // Transition line: --> [guard] Target  (continuation from currentNode)
+      var genericContMatch = relationParts.head.match(new RegExp('^-->\\s*(?:\\[([^\\]]*)\\]\\s*)?' + activityEndpointRe + '$'));
+      if (genericContMatch) {
+        var genericContLabel = relationParts.label || (genericContMatch[1] || '');
+        var genericTargetId = endpointNodeId(genericContMatch[2], 'target');
+        var genericTargetNode = nodes[genericTargetId];
+        if (genericTargetNode && genericTargetNode.type === 'action') {
+          if (actHighlight) genericTargetNode.highlight = actHighlight;
+          if (actTexture) genericTargetNode.texture = actTexture;
+        }
+        if (currentNode) {
+          addEdge(currentNode, genericTargetId, genericContLabel, relationParts.labelKind, i);
+          flushPendingMergeEnds(genericTargetId);
+        }
+        var genericTopCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
+        if (genericTopCtx && genericTopCtx.type === 'fork') {
+          genericTopCtx.branches.push(genericTargetId);
+        } else {
+          currentNode = genericTargetId;
+        }
+        continue;
+      }
+
+      // Full transition: Source --> [guard] Target. Accept the editor's
+      // generic relation form (`A --> B : label`) as well as PlantUML-style
+      // quoted activity labels (`"A" --> [guard] "B"`).
+      var genericFullMatch = relationParts.head.match(new RegExp('^' + activityEndpointRe + '\\s*-->\\s*(?:\\[([^\\]]*)\\]\\s*)?' + activityEndpointRe + '$'));
+      if (genericFullMatch) {
+        var genericSourceId = endpointNodeId(genericFullMatch[1], 'source');
+        var genericFullTargetId = endpointNodeId(genericFullMatch[3], 'target');
+        var genericLabel = relationParts.label || (genericFullMatch[2] || '');
+        var genericFullTargetNode = nodes[genericFullTargetId];
+        if (genericFullTargetNode && genericFullTargetNode.type === 'action') {
+          if (actHighlight) genericFullTargetNode.highlight = actHighlight;
+          if (actTexture) genericFullTargetNode.texture = actTexture;
+        }
+        addEdge(genericSourceId, genericFullTargetId, genericLabel, relationParts.labelKind, i);
+        currentNode = genericFullTargetId;
+        continue;
+      }
+
       // Transition line: --> [guard] "Name"  (continuation from currentNode)
       var contMatch = actLine.match(/^-->\s*(?:\[([^\]]*)\]\s*)?"([^"]+)"$/);
       if (contMatch) {
@@ -21316,6 +21435,27 @@
     return { width: Math.ceil(width), height: Math.ceil(height) };
   }
 
+  function activityLayoutId(n) {
+    if (!n) return '';
+    return n.type === 'action' ? (n.label || n.id) : n.id;
+  }
+
+  function activityNodeAttrs(n, includeBounds) {
+    var id = activityLayoutId(n);
+    if (!id) return '';
+    var attrs = ' data-layout-id="' + UMLShared.escapeXml(id) + '"' +
+      ' data-layout-kind="activity-' + UMLShared.escapeXml(n.type || 'node') + '"';
+    if (includeBounds) {
+      attrs += ' data-layout-bounds-id="' + UMLShared.escapeXml(id) + '"';
+    }
+    return attrs;
+  }
+
+  function activityEdgeLabel(edge) {
+    if (!edge || !edge.guard) return '';
+    return edge.labelKind === 'plain' ? edge.guard : '[' + edge.guard + ']';
+  }
+
   function computeLayout(parsed) {
     var nodeList = parsed.nodes;
     var edgeList = parsed.edges;
@@ -21368,7 +21508,7 @@
     for (var aeri = 0; aeri < edgeList.length; aeri++) {
       var aed = edgeList[aeri];
       if (!aed || aed.from === aed.to) continue;
-      var alt = aed.guard ? '[' + aed.guard + ']' : '';
+      var alt = activityEdgeLabel(aed);
       var alw = alt ? UMLShared.textWidth(alt, false, CFG.fontSize) : 0;
       actEdgeSizes.push({
         source: aed.from, target: aed.to,
@@ -21811,8 +21951,12 @@
         if (pi > 0) pStr += ' ';
         pStr += points[pi].x + ',' + points[pi].y;
       }
+      var activityRouteId = tr.routeId || ('edge-' + ti);
       svg.push('<polyline points="' + pStr +
-        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
+        '" data-layout-route-id="' + UMLShared.escapeXml(activityRouteId) +
+        '" data-layout-source="' + UMLShared.escapeXml(activityLayoutId(fromE.node)) +
+        '" data-layout-target="' + UMLShared.escapeXml(activityLayoutId(toE.node)) + '"/>');
 
       // Arrowhead at target
       var pLast = points[points.length - 1];
@@ -21824,8 +21968,8 @@
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
       // Guard label
-      if (tr.guard || tr.guardDirection) {
-        var guardText = tr.guard ? '[' + tr.guard + ']' : '';
+      var guardText = activityEdgeLabel(tr);
+      if (guardText || tr.guardDirection) {
         var guardPlacement = UMLShared.placeOrthogonalLabel(
           UMLShared.labelDirectionPlacementText(guardText, tr.guardDirection),
           points,
@@ -21876,12 +22020,12 @@
 
       if (n.type === 'initial') {
         svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.initialR +
-          '" fill="' + colors.line + '" stroke="none"/>');
+          '" fill="' + colors.line + '" stroke="none"' + activityNodeAttrs(n, true) + '/>');
       } else if (n.type === 'final') {
         svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalRingR +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + activityNodeAttrs(n, true) + '/>');
         svg.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
-          '" fill="' + colors.line + '" stroke="none"/>');
+          '" fill="' + colors.line + '" stroke="none"' + activityNodeAttrs(n, false) + '/>');
       } else if (n.type === 'decision' || n.type === 'merge') {
         var decFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
         // Diamond shape
@@ -21891,34 +22035,34 @@
           cx + ',' + (cy + dh) + ' ' + (cx - dw) + ',' + cy;
         svg.push('<polygon filter="url(#uml-node-shadow)" points="' + decPts +
           '" fill="' + decFills.headerFill + '" stroke="' + colors.stroke +
-          '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" stroke-width="' + CFG.strokeWidth + '"' + activityNodeAttrs(n, true) + '/>');
         if (decFills.textureUrl) {
-          svg.push('<polygon points="' + decPts + '" fill="' + decFills.textureUrl + '" stroke="none"/>');
+          svg.push('<polygon points="' + decPts + '" fill="' + decFills.textureUrl + '" stroke="none"' + activityNodeAttrs(n, false) + '/>');
         }
         // Decision condition text inside diamond
         if (n.type === 'decision' && n.label) {
           svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
-            '" text-anchor="middle" font-size="' + (CFG.fontSize - 1) + '" fill="' + colors.text + '">' +
+            '" text-anchor="middle" font-size="' + (CFG.fontSize - 1) + '" fill="' + colors.text + '"' + activityNodeAttrs(n, false) + '>' +
             UMLShared.escapeXml(n.label) + '</text>');
         }
       } else if (n.type === 'fork' || n.type === 'join') {
         // Thick horizontal bar
         svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
-          '" rx="2" ry="2" fill="' + (n.highlight || colors.line) + '" stroke="none"/>');
+          '" rx="2" ry="2" fill="' + (n.highlight || colors.line) + '" stroke="none"' + activityNodeAttrs(n, true) + '/>');
       } else {
         var actFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
         // Action node: rounded rectangle
         svg.push('<rect filter="url(#uml-node-shadow)" x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
           '" rx="' + CFG.actionRx + '" ry="' + CFG.actionRx +
-          '" fill="' + actFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + actFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' + activityNodeAttrs(n, true) + '/>');
         if (actFills.textureUrl) {
           svg.push('<rect x="' + e.x + '" y="' + e.y + '" width="' + e.box.width + '" height="' + e.box.height +
             '" rx="' + CFG.actionRx + '" ry="' + CFG.actionRx +
-            '" fill="' + actFills.textureUrl + '" stroke="none"/>');
+            '" fill="' + actFills.textureUrl + '" stroke="none"' + activityNodeAttrs(n, false) + '/>');
         }
         // Action name centered
         svg.push('<text x="' + cx + '" y="' + (cy + CFG.fontSize * 0.35) +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + activityNodeAttrs(n, false) + '>' +
           UMLShared.escapeXml(n.label) + '</text>');
       }
     }
