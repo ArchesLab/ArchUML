@@ -305,7 +305,7 @@
 
   function addLayoutPosition(layout, id, x, y) {
     if (!layout || !id) return;
-    if (!layout.positions) layout.positions = {};
+    if (!layout.positions) layout.positions = Object.create(null);
     var px = parseLayoutNumber(x);
     var py = parseLayoutNumber(y);
     if (px === null && py === null) return;
@@ -331,7 +331,7 @@
     if (!layout || id === undefined || id === null) return;
     var points = Array.isArray(rawPoints) ? rawPoints : parseLayoutRoutePoints(rawPoints);
     if (!points || points.length < 2) return;
-    if (!layout.routes) layout.routes = {};
+    if (!layout.routes) layout.routes = Object.create(null);
     layout.routes[unquoteLayoutId(id)] = { points: points };
   }
 
@@ -366,7 +366,7 @@
   function extractLayoutMetadata(text) {
     var source = String(text || '');
     var lines = source.split('\n');
-    var layout = { schema: 1, positions: {}, routes: {} };
+    var layout = { schema: 1, positions: Object.create(null), routes: Object.create(null) };
     var out = [];
     var inLayout = false;
 
@@ -404,12 +404,13 @@
 
   function findLayoutPosition(layout, id) {
     if (!layout || !layout.positions || !id) return null;
-    if (layout.positions.hasOwnProperty(id)) return layout.positions[id];
+    var has = Object.prototype.hasOwnProperty;
+    if (has.call(layout.positions, id)) return layout.positions[id];
     var raw = String(id);
     var unquoted = unquoteLayoutId(raw);
-    if (layout.positions.hasOwnProperty(unquoted)) return layout.positions[unquoted];
+    if (has.call(layout.positions, unquoted)) return layout.positions[unquoted];
     var quoted = '"' + raw.replace(/"/g, '\\"') + '"';
-    if (layout.positions.hasOwnProperty(quoted)) return layout.positions[quoted];
+    if (has.call(layout.positions, quoted)) return layout.positions[quoted];
     return null;
   }
 
@@ -565,7 +566,7 @@
     }
 
     for (var posId in layoutMetadata.positions) {
-      if (!layoutMetadata.positions.hasOwnProperty(posId)) continue;
+      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.positions, posId)) continue;
       var portRef = findEntryPort(posId);
       if (portRef && applyPortPosition(portRef.entry, portRef.alias, layoutMetadata.positions[posId])) {
         changed = true;
@@ -870,7 +871,9 @@
 
   function layoutRenderedBox(svg, id, parts) {
     var bounds = layoutBoundsElementsById(svg, id);
-    return renderedElementsBox(svg, bounds.length ? bounds : parts);
+    if (bounds.length) return renderedElementsBox(svg, bounds);
+    var resolvedParts = parts || layoutElementsById(svg, id);
+    return resolvedParts.length ? renderedElementsBox(svg, resolvedParts) : null;
   }
 
   function applyRenderedPositions(container, layoutMetadata) {
@@ -880,7 +883,7 @@
 
     var deltas = {};
     for (var id in layoutMetadata.positions) {
-      if (!layoutMetadata.positions.hasOwnProperty(id)) continue;
+      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.positions, id)) continue;
       var pos = layoutMetadata.positions[id];
       if (!pos || pos.x === undefined || pos.y === undefined) continue;
       var parts = layoutElementsById(svg, id);
@@ -1255,6 +1258,89 @@
     return routes;
   }
 
+  function routePointsAreOrthogonal(points, tolerance) {
+    var tol = (typeof tolerance === 'number') ? tolerance : 1.5;
+    if (!points || points.length < 2) return false;
+    for (var i = 0; i < points.length - 1; i++) {
+      var a = points[i], b = points[i + 1];
+      if (Math.abs(a.y - b.y) > tol && Math.abs(a.x - b.x) > tol) return false;
+    }
+    return true;
+  }
+
+  function shiftRoutePoints(points, sourceDelta, targetDelta) {
+    var next = (points || []).map(function (p) { return { x: p.x, y: p.y }; });
+    if (next.length < 2) return next;
+    var ORTHO_TOL = 1.5;
+
+    // Both endpoints shift by exactly the same delta — translate the whole route
+    // so interior bends move with the endpoints (the route's shape is preserved).
+    if (sourceDelta && targetDelta &&
+        sourceDelta.x === targetDelta.x && sourceDelta.y === targetDelta.y) {
+      var sx = sourceDelta.x || 0, sy = sourceDelta.y || 0;
+      for (var k = 0; k < next.length; k++) {
+        next[k].x += sx;
+        next[k].y += sy;
+      }
+      return next;
+    }
+
+    // Move the endpoints to their target positions
+    if (sourceDelta) {
+      next[0].x += sourceDelta.x || 0;
+      next[0].y += sourceDelta.y || 0;
+    }
+    if (targetDelta) {
+      var endIdx = next.length - 1;
+      next[endIdx].x += targetDelta.x || 0;
+      next[endIdx].y += targetDelta.y || 0;
+    }
+
+    // 2-point routes: if the result is diagonal, insert a bend to keep ortho.
+    // The post-shift check is strict (sub-pixel) so any diagonal at all
+    // triggers a bend — callers inspect with tolerances as tight as 0.001.
+    if (next.length === 2) {
+      var sameY = Math.abs(next[0].y - next[1].y) <= 0.0001;
+      var sameX = Math.abs(next[0].x - next[1].x) <= 0.0001;
+      if (!sameY && !sameX) {
+        // Bend orientation follows original segment's dominant axis when possible.
+        var origHoriz = Math.abs(points[0].y - points[1].y) <= ORTHO_TOL;
+        var bend = origHoriz
+          ? { x: next[1].x, y: next[0].y }
+          : { x: next[0].x, y: next[1].y };
+        next = [next[0], bend, next[1]];
+      }
+      return next;
+    }
+
+    // For >= 3 point routes, propagate the source/target shifts inward so that
+    // segments originally orthogonal stay exactly orthogonal. Forward pass
+    // honors target-endpoint pinning when targetDelta is given; backward pass
+    // honors source-endpoint pinning when sourceDelta is given.
+    var i;
+    for (i = 0; i < next.length - 1; i++) {
+      if (i === next.length - 2 && targetDelta) break;
+      var origAf = points[i];
+      var origBf = points[i + 1];
+      if (Math.abs(origAf.y - origBf.y) <= ORTHO_TOL) {
+        next[i + 1].y = next[i].y;
+      } else if (Math.abs(origAf.x - origBf.x) <= ORTHO_TOL) {
+        next[i + 1].x = next[i].x;
+      }
+    }
+    for (i = next.length - 1; i > 0; i--) {
+      if (i === 1 && sourceDelta) break;
+      var origAb = points[i - 1];
+      var origBb = points[i];
+      if (Math.abs(origAb.y - origBb.y) <= ORTHO_TOL) {
+        next[i - 1].y = next[i].y;
+      } else if (Math.abs(origAb.x - origBb.x) <= ORTHO_TOL) {
+        next[i - 1].x = next[i].x;
+      }
+    }
+    return next;
+  }
+
   function moveConnectedRoutes(svg, deltas) {
     if (!svg || !deltas) return [];
     var routes = collectEditableRoutes(svg);
@@ -1292,7 +1378,7 @@
     if (!svg) return;
     var routes = collectEditableRoutes(svg);
     for (var id in layoutMetadata.routes) {
-      if (!layoutMetadata.routes.hasOwnProperty(id)) continue;
+      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.routes, id)) continue;
       var route = layoutMetadata.routes[id];
       if (!route || !route.points || route.points.length < 2) continue;
       var targetRoute = null;
@@ -3796,9 +3882,13 @@
     setRoutePointsForElement: setRoutePointsForElement,
     moveRouteDecorations: moveRouteDecorations,
     moveConnectedRoutes: moveConnectedRoutes,
+    shiftRoutePoints: shiftRoutePoints,
+    routePointsAreOrthogonal: routePointsAreOrthogonal,
     layoutRoutePointsToString: layoutRoutePointsToString,
     applyRenderedPositions: applyRenderedPositions,
     applyLayoutRoutes: applyLayoutRoutes,
+    renderedLayoutBox: layoutRenderedBox,
+    renderedSvgBox: renderedBox,
     parseHighlightColor: parseHighlightColor,
     highlightFills: highlightFills,
     darkenHexColor: darkenHexColor,
