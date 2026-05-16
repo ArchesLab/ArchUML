@@ -20,6 +20,14 @@
     labelBgPad: 4,
   };
 
+  function createStringMap() {
+    return Object.create(null);
+  }
+
+  function hasOwn(obj, key) {
+    return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
   // ─── Text Measurement ───────────────────────────────────────────
 
   var _ctx = null;
@@ -305,7 +313,7 @@
 
   function addLayoutPosition(layout, id, x, y) {
     if (!layout || !id) return;
-    if (!layout.positions) layout.positions = Object.create(null);
+    if (!layout.positions) layout.positions = createStringMap();
     var px = parseLayoutNumber(x);
     var py = parseLayoutNumber(y);
     if (px === null && py === null) return;
@@ -331,7 +339,7 @@
     if (!layout || id === undefined || id === null) return;
     var points = Array.isArray(rawPoints) ? rawPoints : parseLayoutRoutePoints(rawPoints);
     if (!points || points.length < 2) return;
-    if (!layout.routes) layout.routes = Object.create(null);
+    if (!layout.routes) layout.routes = createStringMap();
     layout.routes[unquoteLayoutId(id)] = { points: points };
   }
 
@@ -366,7 +374,7 @@
   function extractLayoutMetadata(text) {
     var source = String(text || '');
     var lines = source.split('\n');
-    var layout = { schema: 1, positions: Object.create(null), routes: Object.create(null) };
+    var layout = { schema: 1, positions: createStringMap(), routes: createStringMap() };
     var out = [];
     var inLayout = false;
 
@@ -404,13 +412,12 @@
 
   function findLayoutPosition(layout, id) {
     if (!layout || !layout.positions || !id) return null;
-    var has = Object.prototype.hasOwnProperty;
-    if (has.call(layout.positions, id)) return layout.positions[id];
+    if (hasOwn(layout.positions, id)) return layout.positions[id];
     var raw = String(id);
     var unquoted = unquoteLayoutId(raw);
-    if (has.call(layout.positions, unquoted)) return layout.positions[unquoted];
+    if (hasOwn(layout.positions, unquoted)) return layout.positions[unquoted];
     var quoted = '"' + raw.replace(/"/g, '\\"') + '"';
-    if (has.call(layout.positions, quoted)) return layout.positions[quoted];
+    if (hasOwn(layout.positions, quoted)) return layout.positions[quoted];
     return null;
   }
 
@@ -422,7 +429,7 @@
     function translateEntryPorts(entry, dx, dy) {
       if (!entry || !entry.portPositions) return;
       for (var alias in entry.portPositions) {
-        if (!entry.portPositions.hasOwnProperty(alias)) continue;
+        if (!hasOwn(entry.portPositions, alias)) continue;
         var port = entry.portPositions[alias];
         ['x', 'cx', 'connX'].forEach(function(key) {
           if (typeof port[key] === 'number') port[key] += dx;
@@ -523,7 +530,7 @@
     function findEntryPort(id) {
       var raw = String(id || '');
       for (var entryId in entries) {
-        if (!entries.hasOwnProperty(entryId)) continue;
+        if (!hasOwn(entries, entryId)) continue;
         var prefix = entryId + '.';
         if (raw.indexOf(prefix) !== 0) continue;
         var alias = raw.slice(prefix.length);
@@ -535,7 +542,7 @@
     }
 
     for (var key in entries) {
-      if (!entries.hasOwnProperty(key)) continue;
+      if (!hasOwn(entries, key)) continue;
       var entryForLookup = entries[key];
       var pos = findLayoutPosition(layoutMetadata, key);
       if (!pos && entryForLookup.node) {
@@ -566,7 +573,7 @@
     }
 
     for (var posId in layoutMetadata.positions) {
-      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.positions, posId)) continue;
+      if (!hasOwn(layoutMetadata.positions, posId)) continue;
       var portRef = findEntryPort(posId);
       if (portRef && applyPortPosition(portRef.entry, portRef.alias, layoutMetadata.positions[posId])) {
         changed = true;
@@ -577,7 +584,7 @@
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var id in entries) {
-      if (!entries.hasOwnProperty(id)) continue;
+      if (!hasOwn(entries, id)) continue;
       var entry = entries[id];
       var box = entry.box || { width: 0, height: 0 };
       minX = Math.min(minX, entry.x);
@@ -876,6 +883,11 @@
     return resolvedParts.length ? renderedElementsBox(svg, resolvedParts) : null;
   }
 
+  function renderedLayoutBox(svg, id) {
+    if (!svg || id === undefined || id === null) return null;
+    return layoutRenderedBox(svg, id, layoutElementsById(svg, id));
+  }
+
   function applyRenderedPositions(container, layoutMetadata) {
     if (!container || !layoutMetadata || !layoutMetadata.positions) return;
     var svg = container.querySelector('svg');
@@ -883,7 +895,7 @@
 
     var deltas = {};
     for (var id in layoutMetadata.positions) {
-      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.positions, id)) continue;
+      if (!hasOwn(layoutMetadata.positions, id)) continue;
       var pos = layoutMetadata.positions[id];
       if (!pos || pos.x === undefined || pos.y === undefined) continue;
       var parts = layoutElementsById(svg, id);
@@ -972,6 +984,103 @@
       if (Math.abs((newPoints[i].y - oldPoints[i].y) - dy) > 0.5) return null;
     }
     return { x: dx, y: dy };
+  }
+
+  function cloneRoutePoints(points) {
+    return (points || []).map(function(p) {
+      return { x: Number(p && p.x) || 0, y: Number(p && p.y) || 0 };
+    });
+  }
+
+  function routeSegmentIsHorizontal(a, b) {
+    if (!a || !b) return true;
+    return Math.abs(a.y - b.y) <= Math.abs(a.x - b.x);
+  }
+
+  function routeDeltasMatch(a, b) {
+    return !!a && !!b && Math.abs(a.x - b.x) < 0.001 && Math.abs(a.y - b.y) < 0.001;
+  }
+
+  function shiftRouteEndpointBend(points, atStart, delta) {
+    if (!delta || !points || points.length < 2) return;
+    var endpointIndex = atStart ? 0 : points.length - 1;
+    var bendIndex = atStart ? 1 : points.length - 2;
+    var endpoint = points[endpointIndex];
+    var bend = points[bendIndex];
+    if (!endpoint || !bend) return;
+    if (routeSegmentIsHorizontal(endpoint, bend)) {
+      points[bendIndex].y += delta.y;
+    } else {
+      points[bendIndex].x += delta.x;
+    }
+  }
+
+  function shiftedTwoPointRoute(points, sourceDelta, targetDelta) {
+    var start = {
+      x: points[0].x + (sourceDelta ? sourceDelta.x : 0),
+      y: points[0].y + (sourceDelta ? sourceDelta.y : 0)
+    };
+    var end = {
+      x: points[1].x + (targetDelta ? targetDelta.x : 0),
+      y: points[1].y + (targetDelta ? targetDelta.y : 0)
+    };
+    if (Math.abs(start.x - end.x) < 0.5 || Math.abs(start.y - end.y) < 0.5) {
+      return [start, end];
+    }
+    if (routeSegmentIsHorizontal(points[0], points[1])) {
+      return [start, { x: end.x, y: start.y }, end];
+    }
+    return [start, { x: start.x, y: end.y }, end];
+  }
+
+  /**
+   * Shift the endpoint(s) of an editable SVG route while preserving the
+   * orthogonal shape users see in the editor. Callers pass the route's original
+   * points and the visual delta of its source and/or target node. The function
+   * is pure: it returns a fresh point array and never mutates its input.
+   */
+  function shiftRoutePoints(points, sourceDelta, targetDelta) {
+    var next = cloneRoutePoints(points);
+    if (!next.length) return next;
+
+    if (routeDeltasMatch(sourceDelta, targetDelta)) {
+      for (var i = 0; i < next.length; i++) {
+        next[i].x += sourceDelta.x;
+        next[i].y += sourceDelta.y;
+      }
+      return next;
+    }
+
+    if (next.length === 2 && (sourceDelta || targetDelta)) {
+      return shiftedTwoPointRoute(next, sourceDelta, targetDelta);
+    }
+
+    if (sourceDelta && next[0]) {
+      shiftRouteEndpointBend(next, true, sourceDelta);
+      next[0].x += sourceDelta.x;
+      next[0].y += sourceDelta.y;
+    }
+    if (targetDelta && next[next.length - 1]) {
+      shiftRouteEndpointBend(next, false, targetDelta);
+      var end = next.length - 1;
+      next[end].x += targetDelta.x;
+      next[end].y += targetDelta.y;
+    }
+    return next;
+  }
+
+  function routePointsAreOrthogonal(points, tolerance) {
+    var tol = typeof tolerance === 'number' ? tolerance : 0.5;
+    var pts = points || [];
+    if (pts.length < 2) return false;
+    for (var i = 0; i < pts.length - 1; i++) {
+      var a = pts[i];
+      var b = pts[i + 1];
+      var horizontal = Math.abs(a.y - b.y) <= tol;
+      var vertical = Math.abs(a.x - b.x) <= tol;
+      if (!horizontal && !vertical) return false;
+    }
+    return true;
   }
 
   function pointDistance(a, b) {
@@ -1350,16 +1459,7 @@
       var sourceDelta = route.source ? deltas[route.source] : null;
       var targetDelta = route.target ? deltas[route.target] : null;
       if (!sourceDelta && !targetDelta) continue;
-      var points = route.points.map(function(p) { return { x: p.x, y: p.y }; });
-      if (sourceDelta) {
-        points[0].x += sourceDelta.x;
-        points[0].y += sourceDelta.y;
-      }
-      if (targetDelta) {
-        var end = points.length - 1;
-        points[end].x += targetDelta.x;
-        points[end].y += targetDelta.y;
-      }
+      var points = shiftRoutePoints(route.points, sourceDelta, targetDelta);
       route.element = setRoutePointsForElement(route.element, points) || route.element;
       changed.push({
         id: route.id,
@@ -1378,7 +1478,7 @@
     if (!svg) return;
     var routes = collectEditableRoutes(svg);
     for (var id in layoutMetadata.routes) {
-      if (!Object.prototype.hasOwnProperty.call(layoutMetadata.routes, id)) continue;
+      if (!hasOwn(layoutMetadata.routes, id)) continue;
       var route = layoutMetadata.routes[id];
       if (!route || !route.points || route.points.length < 2) continue;
       var targetRoute = null;
@@ -3880,14 +3980,16 @@
     collectEditableRoutes: collectEditableRoutes,
     routePointsForElement: routePointsForElement,
     setRoutePointsForElement: setRoutePointsForElement,
-    moveRouteDecorations: moveRouteDecorations,
-    moveConnectedRoutes: moveConnectedRoutes,
+    cloneRoutePoints: cloneRoutePoints,
+    routeSegmentIsHorizontal: routeSegmentIsHorizontal,
     shiftRoutePoints: shiftRoutePoints,
     routePointsAreOrthogonal: routePointsAreOrthogonal,
+    moveRouteDecorations: moveRouteDecorations,
+    moveConnectedRoutes: moveConnectedRoutes,
     layoutRoutePointsToString: layoutRoutePointsToString,
     applyRenderedPositions: applyRenderedPositions,
     applyLayoutRoutes: applyLayoutRoutes,
-    renderedLayoutBox: layoutRenderedBox,
+    renderedLayoutBox: renderedLayoutBox,
     renderedSvgBox: renderedBox,
     parseHighlightColor: parseHighlightColor,
     highlightFills: highlightFills,
@@ -4914,7 +5016,7 @@
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     var hasNode = false;
     for (var id in result.nodes) {
-      if (!result.nodes.hasOwnProperty(id)) continue;
+      if (!Object.prototype.hasOwnProperty.call(result.nodes, id)) continue;
       var node = result.nodes[id];
       hasNode = true;
       minX = Math.min(minX, node.x);
@@ -10760,7 +10862,7 @@
           id = partDecl;
           label = partDecl;
         }
-        if (!participantMap.hasOwnProperty(id)) {
+        if (!Object.prototype.hasOwnProperty.call(participantMap, id)) {
           participantMap[id] = participants.length;
           participants.push({ id: id, label: label, highlight: seqHighlight, texture: seqTexture });
         } else {
@@ -10789,7 +10891,7 @@
           actorId = actorDecl;
           actorLabel = actorDecl;
         }
-        if (!participantMap.hasOwnProperty(actorId)) {
+        if (!Object.prototype.hasOwnProperty.call(participantMap, actorId)) {
           participantMap[actorId] = participants.length;
           participants.push({ id: actorId, label: actorLabel, isActor: true, highlight: seqHighlight, texture: seqTexture });
         } else {
@@ -10932,7 +11034,7 @@
   }
 
   function ensureParticipant(id, participants, participantMap, auto) {
-    if (!participantMap.hasOwnProperty(id)) {
+    if (!Object.prototype.hasOwnProperty.call(participantMap, id)) {
       participantMap[id] = participants.length;
       participants.push({ id: id, label: id });
       auto[id] = true;
@@ -11451,7 +11553,7 @@
     }
 
     for (var pbi = 0; pbi < participants.length; pbi++) {
-      if (createYs && createYs.hasOwnProperty(participants[pbi].id)) continue;
+      if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[pbi].id)) continue;
       pushSequenceRectObstacle(partX[pbi] - partWidths[pbi] / 2, CFG.svgPad, partWidths[pbi], partH);
     }
     for (var abo = 0; abo < activationBars.length; abo++) {
@@ -11480,8 +11582,8 @@
     var lifelineBot = totalH - 10;
     for (var li = 0; li < participants.length; li++) {
       var pid = participants[li].id;
-      var llTop = createYs.hasOwnProperty(pid) ? createYs[pid] + partH : lifelineTop;
-      var llBot = destroyYs.hasOwnProperty(pid) ? destroyYs[pid] : lifelineBot;
+      var llTop = Object.prototype.hasOwnProperty.call(createYs, pid) ? createYs[pid] + partH : lifelineTop;
+      var llBot = Object.prototype.hasOwnProperty.call(destroyYs, pid) ? destroyYs[pid] : lifelineBot;
       svg.push('<line class="uml-sequence-lifeline" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
     }
@@ -11598,7 +11700,7 @@
         var x1 = getEdgeX(fromIdx, my, isLeft ? 'left' : 'right', 'source', m.msgType);
         var x2;
         // Create messages: arrow points to the participant box edge (UML 2.0 G179)
-        if (createYs.hasOwnProperty(m.to) && my <= createYs[m.to] + partH) {
+        if (Object.prototype.hasOwnProperty.call(createYs, m.to) && my <= createYs[m.to] + partH) {
           x2 = isLeft
             ? partX[toIdx] + partWidths[toIdx] / 2   // right edge of box
             : partX[toIdx] - partWidths[toIdx] / 2;  // left edge of box
@@ -11860,7 +11962,7 @@
   function drawParticipantBoxes(svg, participants, partX, partWidths, partH, y, colors, createYs) {
     for (var i = 0; i < participants.length; i++) {
       // Skip participants that are created mid-diagram (drawn inline)
-      if (createYs && createYs.hasOwnProperty(participants[i].id)) continue;
+      if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[i].id)) continue;
       var px = partX[i] - partWidths[i] / 2;
       var part = participants[i];
       var disp = participantDisplay(part);
@@ -13598,11 +13700,11 @@
         var hiddenFrom = hiddenMatch[1] || hiddenMatch[2];
         var hiddenTo = hiddenMatch[3] || hiddenMatch[4];
         if (hiddenFrom && hiddenTo && hiddenFrom !== hiddenTo) {
-          if (!componentMap.hasOwnProperty(hiddenFrom)) {
+          if (!Object.prototype.hasOwnProperty.call(componentMap, hiddenFrom)) {
             componentMap[hiddenFrom] = components.length;
             components.push({ name: hiddenFrom, ports: [] });
           }
-          if (!componentMap.hasOwnProperty(hiddenTo)) {
+          if (!Object.prototype.hasOwnProperty.call(componentMap, hiddenTo)) {
             componentMap[hiddenTo] = components.length;
             components.push({ name: hiddenTo, ports: [] });
           }
@@ -13710,7 +13812,7 @@
           }
         }
 
-        if (!componentMap.hasOwnProperty(cName)) {
+        if (!Object.prototype.hasOwnProperty.call(componentMap, cName)) {
           componentMap[cName] = components.length;
           components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
         } else {
@@ -13730,7 +13832,7 @@
         var bAlias = bracketMatch[2];
         var bName = bAlias || bLabel;
         if (bLabel !== bName) displayNameMap[bName] = bLabel;
-        if (!componentMap.hasOwnProperty(bName)) {
+        if (!Object.prototype.hasOwnProperty.call(componentMap, bName)) {
           componentMap[bName] = components.length;
           components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
         } else {
@@ -13751,7 +13853,7 @@
           name: standalonePort.name,
           kind: standalonePort.kind || null
         };
-        if (!componentMap.hasOwnProperty(spName)) {
+        if (!Object.prototype.hasOwnProperty.call(componentMap, spName)) {
           componentMap[spName] = components.length;
           components.push({
             name: spName,
@@ -13791,7 +13893,7 @@
 
         // Resolve from: alias map → dot notation → bare component
         var from, fromPort = null;
-        if (portAliasMap.hasOwnProperty(fromToken)) {
+        if (Object.prototype.hasOwnProperty.call(portAliasMap, fromToken)) {
           from = portAliasMap[fromToken].comp;
           fromPort = fromToken;
         } else {
@@ -13802,7 +13904,7 @@
 
         // Resolve to: alias map → dot notation → bare component
         var to, toPort = null;
-        if (portAliasMap.hasOwnProperty(toToken)) {
+        if (Object.prototype.hasOwnProperty.call(portAliasMap, toToken)) {
           to = portAliasMap[toToken].comp;
           toPort = toToken;
         } else {
@@ -13811,11 +13913,11 @@
           toPort = toParts[1] || null;
         }
 
-        if (!componentMap.hasOwnProperty(from)) {
+        if (!Object.prototype.hasOwnProperty.call(componentMap, from)) {
           componentMap[from] = components.length;
           components.push({ name: from, ports: [] });
         }
-        if (!componentMap.hasOwnProperty(to)) {
+        if (!Object.prototype.hasOwnProperty.call(componentMap, to)) {
           componentMap[to] = components.length;
           components.push({ name: to, ports: [] });
         }
@@ -14619,17 +14721,17 @@
         var score = 0;
         for (var i = 0; i < candidate.length; i++) {
           var alias = candidate[i];
-          if (desiredYMap.hasOwnProperty(alias)) {
+          if (Object.prototype.hasOwnProperty.call(desiredYMap, alias)) {
             score += Math.abs(candidateCenters[alias] - desiredYMap[alias]);
           }
           score += ((entry.portOrderIndex[alias] || 0) * 0.001);
         }
         for (var ai = 0; ai < candidate.length - 1; ai++) {
           var aAlias = candidate[ai];
-          if (!desiredYMap.hasOwnProperty(aAlias)) continue;
+          if (!Object.prototype.hasOwnProperty.call(desiredYMap, aAlias)) continue;
           for (var bi = ai + 1; bi < candidate.length; bi++) {
             var bAlias = candidate[bi];
-            if (!desiredYMap.hasOwnProperty(bAlias)) continue;
+            if (!Object.prototype.hasOwnProperty.call(desiredYMap, bAlias)) continue;
             if (desiredYMap[aAlias] > desiredYMap[bAlias] + stableTieThreshold) {
               score += 500;
             }
@@ -14683,8 +14785,8 @@
 
         var bestOrder = currentPorts.slice();
         bestOrder.sort(function(a, b) {
-          var ay = desiredYMap.hasOwnProperty(a) ? desiredYMap[a] : Number.POSITIVE_INFINITY;
-          var by = desiredYMap.hasOwnProperty(b) ? desiredYMap[b] : Number.POSITIVE_INFINITY;
+          var ay = Object.prototype.hasOwnProperty.call(desiredYMap, a) ? desiredYMap[a] : Number.POSITIVE_INFINITY;
+          var by = Object.prototype.hasOwnProperty.call(desiredYMap, b) ? desiredYMap[b] : Number.POSITIVE_INFINITY;
           if (Math.abs(ay - by) > stableTieThreshold) return ay - by;
           return (entry.portOrderIndex[a] || 0) - (entry.portOrderIndex[b] || 0);
         });
