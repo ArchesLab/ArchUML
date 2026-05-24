@@ -15,7 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 
-const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'venn', 'er'];
+const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
 
 function usage() {
@@ -58,6 +58,7 @@ async function main() {
       activity:   window.UMLActivityDiagram,
       freeform:   window.UMLFreeformDiagram,
       gitgraph:   window.UMLGitGraphDiagram,
+      'folder-tree': window.UMLFolderTreeDiagram,
       venn:       window.UMLVennDiagram,
       er:         window.UMLERDiagram,
     };
