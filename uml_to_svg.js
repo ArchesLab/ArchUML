@@ -5,6 +5,7 @@ const crypto = require('crypto');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
+const GIT_GRAPH_PATH = path.join(REPO_ROOT, 'js', 'git-graph.js');
 const CACHE_DIR = path.join(REPO_ROOT, '.uml_cache');
 const BUNDLE_HASH = crypto.createHash('md5').update(fs.readFileSync(BUNDLE_PATH, 'utf8')).digest('hex');
 
@@ -24,6 +25,7 @@ async function renderUML(type, text) {
     const page = await browser.newPage();
     
     // Create a minimal HTML with the bundle
+    const gitGraphJs = fs.existsSync(GIT_GRAPH_PATH) ? fs.readFileSync(GIT_GRAPH_PATH, 'utf8') : '';
     const bundleJs = fs.readFileSync(BUNDLE_PATH, 'utf8');
     const html = `
         <html>
@@ -31,6 +33,7 @@ async function renderUML(type, text) {
             <style>
                 .uml-class-diagram-container { display: block; }
             </style>
+            <script>${gitGraphJs}</script>
             <script>${bundleJs}</script>
         </head>
         <body>
@@ -79,8 +82,9 @@ if (require.main === module) {
     (async () => {
         const browser = await chromium.launch();
         const page = await browser.newPage();
+        const gitGraphJs = fs.existsSync(GIT_GRAPH_PATH) ? fs.readFileSync(GIT_GRAPH_PATH, 'utf8') : '';
         const bundleJs = fs.readFileSync(BUNDLE_PATH, 'utf8');
-        await page.setContent(`<html><head><script>${bundleJs}</script></head><body><div id="container"></div></body></html>`);
+        await page.setContent(`<html><head><script>${gitGraphJs}</script><script>${bundleJs}</script></head><body><div id="container"></div></body></html>`);
 
         const results = {};
         for (const [id, diagram] of Object.entries(input)) {

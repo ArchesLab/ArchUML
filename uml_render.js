@@ -17,6 +17,8 @@ const { chromium } = require('playwright');
 
 const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const GIT_GRAPH_PATH = path.join(REPO_ROOT, 'js', 'git-graph.js');
 
 function usage() {
   console.error(`Usage: <spec on stdin> | node uml_render.js <type> <output.svg>
@@ -41,7 +43,8 @@ async function main() {
   }
 
   const bundleJs = fs.readFileSync(BUNDLE_PATH, 'utf8');
-  const html = `<html><head><script>${bundleJs}</script></head><body><div id="c"></div></body></html>`;
+  const gitGraphJs = fs.existsSync(GIT_GRAPH_PATH) ? fs.readFileSync(GIT_GRAPH_PATH, 'utf8') : '';
+  const html = `<html><head><script>${gitGraphJs}</script><script>${bundleJs}</script></head><body><div id="c"></div></body></html>`;
 
   const browser = await chromium.launch();
   const page    = await browser.newPage(); page.on("console", msg => console.log(msg.text()));
