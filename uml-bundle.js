@@ -10929,14 +10929,17 @@
       }
 
       // Activate / deactivate
+      // Carry the source line index so the editor can map a rendered
+      // activation bar back to the exact `activate` / `deactivate` lines it
+      // came from (same basis as message `sourceIndex` → `seqmsg:<i>`).
       var activateMatch = line.match(/^activate\s+(\S+)$/i);
       if (activateMatch) {
-        messages.push({ type: 'activate', target: activateMatch[1].trim() });
+        messages.push({ type: 'activate', target: activateMatch[1].trim(), sourceIndex: i });
         continue;
       }
       var deactivateMatch = line.match(/^deactivate\s+(\S+)$/i);
       if (deactivateMatch) {
-        messages.push({ type: 'deactivate', target: deactivateMatch[1].trim() });
+        messages.push({ type: 'deactivate', target: deactivateMatch[1].trim(), sourceIndex: i });
         continue;
       }
 
@@ -11483,13 +11486,20 @@
       return d;
     }
 
-    function pushFrame(pIdx, startY) {
-      activationStack.push({ pIdx: pIdx, startY: startY, depth: depthOnLifeline(pIdx) });
+    function pushFrame(pIdx, startY, startLine) {
+      activationStack.push({ pIdx: pIdx, startY: startY, depth: depthOnLifeline(pIdx), startLine: startLine });
     }
 
-    function popAndRecord(idxInStack, endY) {
+    function popAndRecord(idxInStack, endY, endLine) {
       var frame = activationStack.splice(idxInStack, 1)[0];
-      activationBars.push({ pIdx: frame.pIdx, startY: frame.startY, endY: endY, depth: frame.depth });
+      activationBars.push({
+        pIdx: frame.pIdx, startY: frame.startY, endY: endY, depth: frame.depth,
+        // Source line of the `activate` directive that opened this bar and the
+        // `deactivate` that closed it. endLine is null for bars auto-closed at
+        // the bottom (an `activate` with no matching `deactivate`). These let
+        // the editor map the rendered bar back to the exact lines to move.
+        startLine: frame.startLine, endLine: endLine
+      });
     }
 
     for (var ai = 0; ai < messages.length; ai++) {
@@ -11497,13 +11507,13 @@
       var amy = msgYs[ai];
 
       if (am.type === 'activate') {
-        pushFrame(findPIdx(am.target), amy);
+        pushFrame(findPIdx(am.target), amy, am.sourceIndex);
 
       } else if (am.type === 'deactivate') {
         // Explicit deactivate: close the topmost open frame on this lifeline.
         for (var csi = activationStack.length - 1; csi >= 0; csi--) {
           if (activationStack[csi].pIdx === findPIdx(am.target)) {
-            popAndRecord(csi, amy);
+            popAndRecord(csi, amy, am.sourceIndex);
             break;
           }
         }
@@ -11512,7 +11522,7 @@
 
     // Gracefully close unmatched explicit activations at the bottom.
     while (activationStack.length > 0) {
-      popAndRecord(activationStack.length - 1, totalH - 20);
+      popAndRecord(activationStack.length - 1, totalH - 20, null);
     }
     // Helper to find the visible connection anchor.
     // Bare lifelines attach on the centerline; activation boxes attach on their painted border.
@@ -11595,7 +11605,19 @@
       var ab = activationBars[abi];
       var abx = partX[ab.pIdx] - CFG.activationW / 2 + (ab.depth || 0) * CFG.activationOffset;
       var abH = Math.max(2, ab.endY - ab.startY);
-      svg.push('<rect filter="url(#uml-node-shadow)" x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
+      // Tag the bar so the visual editor can hit-test it, show resize handles,
+      // and map it back to its source `activate` / `deactivate` lines. The id
+      // keys off the opening `activate` line (unique per bar). endLine is empty
+      // for a bar auto-closed at the bottom.
+      var abEditAttrs = '';
+      if (ab.startLine != null) {
+        abEditAttrs = ' data-layout-id="actbar:' + ab.startLine + '"' +
+          ' data-layout-kind="activation"' +
+          ' data-activation-start-line="' + ab.startLine + '"' +
+          ' data-activation-end-line="' + (ab.endLine != null ? ab.endLine : '') + '"' +
+          ' data-activation-pidx="' + ab.pIdx + '"';
+      }
+      svg.push('<rect filter="url(#uml-node-shadow)"' + abEditAttrs + ' x="' + abx + '" y="' + ab.startY + '" width="' + CFG.activationW +
         '" height="' + abH +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     }
