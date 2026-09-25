@@ -18931,9 +18931,8 @@
         var targetRouteId = 'edge-' + renderedRouteCount++;
         routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false }, sourceRouteId);
         routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true }, targetRouteId);
-        // Prefer the longest horizontal segment that has room for the full
-        // symbol. A clear shaft can still run too close to a component to hold
-        // its socket; consider clear positions on the other segments as well.
+        // Keep the joined symbol beside one of its component interfaces.
+        // Search every clear shaft because labels can occupy the nearest one.
         var ballR = CFG.ifaceRadius;
         var socketR = CFG.ifaceSocketRadius;
         var bsPad = Math.max(ballR, socketR) + CFG.strokeWidth / 2 + 2;
@@ -18944,21 +18943,23 @@
         }).concat(placedLabels.map(function(rect) {
           return { x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom };
         }));
-        var bsSi = 0, bsSLen = 0, bsFoundH = false;
+        var bsSi = 0, bsFallbackLength = 0, bsFallbackHorizontal = false;
         var bsPlacement = null;
+        var bsRouteLength = UMLShared.measureOrthogonalRoute(points);
+        var bsDistanceFromStart = 0;
         for (var bsi = 0; bsi < points.length - 1; bsi++) {
           var bsSegIsH = Math.abs(points[bsi+1].y - points[bsi].y) < 1;
           var bsl = Math.abs(points[bsi+1].x - points[bsi].x) + Math.abs(points[bsi+1].y - points[bsi].y);
-          if (bsSegIsH && (!bsFoundH || bsl > bsSLen)) {
-            bsSi = bsi; bsSLen = bsl; bsFoundH = true;
-          } else if (!bsFoundH && bsl > bsSLen) {
-            bsSi = bsi; bsSLen = bsl;
+          if ((bsSegIsH && !bsFallbackHorizontal) ||
+              (bsSegIsH === bsFallbackHorizontal && bsl > bsFallbackLength)) {
+            bsSi = bsi;
+            bsFallbackLength = bsl;
+            bsFallbackHorizontal = bsSegIsH;
           }
           var bsAxis = bsSegIsH ? 'x' : 'y';
           var bsFixed = bsSegIsH ? points[bsi].y : points[bsi].x;
           var bsLow = Math.min(points[bsi][bsAxis], points[bsi+1][bsAxis]) + bsPad;
           var bsHigh = Math.max(points[bsi][bsAxis], points[bsi+1][bsAxis]) - bsPad;
-          var bsMid = (points[bsi][bsAxis] + points[bsi+1][bsAxis]) / 2;
           var bsIntervals = bsLow <= bsHigh ? [[bsLow, bsHigh]] : [];
           bsObstacles.forEach(function(rect) {
             var acrossLow = (bsSegIsH ? rect.y1 : rect.x1) - bsPad;
@@ -18977,15 +18978,17 @@
             bsIntervals = remaining;
           });
           bsIntervals.forEach(function(interval) {
-            var position = Math.max(interval[0], Math.min(interval[1], bsMid));
-            var displacement = Math.abs(position - bsMid);
-            if (!bsPlacement || (bsSegIsH && !bsPlacement.isH) ||
-                (bsSegIsH === bsPlacement.isH && (bsl > bsPlacement.length ||
-                  (bsl === bsPlacement.length && displacement < bsPlacement.displacement)))) {
-              bsPlacement = { index: bsi, isH: bsSegIsH, length: bsl, displacement: displacement,
-                x: bsSegIsH ? position : bsFixed, y: bsSegIsH ? bsFixed : position };
-            }
+            [interval[0], interval[1]].forEach(function(position) {
+              var distanceAlongRoute = bsDistanceFromStart + Math.abs(position - points[bsi][bsAxis]);
+              var interfaceDistance = Math.min(distanceAlongRoute, bsRouteLength - distanceAlongRoute);
+              var placementScore = interfaceDistance + (bsSegIsH ? 0 : 4);
+              if (!bsPlacement || placementScore < bsPlacement.score) {
+                bsPlacement = { index: bsi, score: placementScore,
+                  x: bsSegIsH ? position : bsFixed, y: bsSegIsH ? bsFixed : position };
+              }
+            });
           });
+          bsDistanceFromStart += bsl;
         }
         if (bsPlacement) bsSi = bsPlacement.index;
         var bsSeg0 = points[bsSi], bsSeg1 = points[bsSi + 1];
