@@ -1510,7 +1510,7 @@
       fill: get('--uml-fill', '#fdfcf8'),
       headerFill: get('--uml-header-fill', '#dbe8f8'),
       line: get('--uml-line', '#444'),
-      secondaryLine: get('--uml-secondary-line', '#6c7c8d'),
+      secondaryLine: get('--uml-secondary-line', '#657484'),
       secondaryFill: get('--uml-secondary-fill', '#eef4fa'),
       labelBg: get('--uml-label-fill', 'rgba(255,255,255,0.94)'),
       labelStroke: get('--uml-label-stroke', 'rgba(64,96,160,0.18)'),
@@ -1929,6 +1929,49 @@
     return ARCHUML_FALLBACK_CAPTIONS[normalized] || 'ArchUML diagram';
   }
 
+  function hideNestedSvgFromAccessibility(container) {
+    if (!container || !container.querySelector ||
+        !container.getAttribute || container.getAttribute('role') !== 'img') return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    svg.removeAttribute('role');
+    svg.removeAttribute('aria-label');
+    svg.removeAttribute('aria-labelledby');
+    svg.removeAttribute('aria-describedby');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+  }
+
+  function applySvgAccessibility(container, type, _text, explicitName) {
+    if (!container || !container.querySelector) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    var label = String(explicitName || fallbackArchUmlCaption(type)).trim();
+    if (container.getAttribute && container.getAttribute('role') === 'img') {
+      container.setAttribute('aria-label', label);
+      hideNestedSvgFromAccessibility(container);
+    } else {
+      svg.removeAttribute('aria-hidden');
+      svg.removeAttribute('focusable');
+      svg.setAttribute('role', 'img');
+      svg.setAttribute('aria-label', label);
+    }
+
+    var title = null;
+    for (var i = 0; i < svg.childNodes.length; i++) {
+      var child = svg.childNodes[i];
+      if (child.nodeType === 1 && child.tagName && child.tagName.toLowerCase() === 'title') {
+        title = child;
+        break;
+      }
+    }
+    if (!title) {
+      title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      svg.insertBefore(title, svg.firstChild);
+    }
+    title.textContent = label;
+  }
+
   function extractArchUmlCaption(text, type) {
     var lines = String(text || '').split('\n');
     var caption = '';
@@ -2074,6 +2117,7 @@
         var wrapped = createArchUmlFigure(opts && opts.type, text);
         pre.parentElement.replaceChild(wrapped.figure, pre);
         renderFn(wrapped.container, wrapped.text);
+        hideNestedSvgFromAccessibility(wrapped.container);
         diagrams.push({ container: wrapped.container, text: wrapped.text });
         if (visibilityObserver) visibilityObserver.observe(wrapped.container);
       }
@@ -2105,6 +2149,7 @@
             setTimeout(function () {
               for (var d = 0; d < diagrams.length; d++) {
                 renderFn(diagrams[d].container, diagrams[d].text);
+                hideNestedSvgFromAccessibility(diagrams[d].container);
                 if (visibilityObserver) visibilityObserver.observe(diagrams[d].container);
               }
               queueRefitAll();
@@ -3996,6 +4041,7 @@
     darkenHexColor: darkenHexColor,
     getThemeColors: getThemeColors,
     prepareDiagramContainer: prepareDiagramContainer,
+    applySvgAccessibility: applySvgAccessibility,
     svgOpen: svgOpen,
     svgClose: svgClose,
     createAutoInit: createAutoInit,
@@ -4134,6 +4180,7 @@
             el.parentElement.replaceChild(wrapped.figure, el);
           }
           R.render(wrapped.container, wrapped.text);
+          hideNestedSvgFromAccessibility(wrapped.container);
           wrapped.container.dataset.umlRendered = 'true';
           wrapped.container.style.setProperty('display', 'block', 'important');
         }
@@ -4171,6 +4218,7 @@
             var wrappedBlock = createArchUmlFigure(key, text);
             pre.parentElement.replaceChild(wrappedBlock.figure, pre);
             R2.render(wrappedBlock.container, wrappedBlock.text);
+            hideNestedSvgFromAccessibility(wrappedBlock.container);
             wrappedBlock.container.dataset.umlRendered = 'true';
           }
         }

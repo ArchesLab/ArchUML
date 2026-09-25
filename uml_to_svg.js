@@ -14,7 +14,20 @@ const CACHE_DIR = path.join(REPO_ROOT, '.uml_cache');
 // so that a renderer change invalidates stale SVGs automatically.
 const BUNDLE_JS = fs.readFileSync(BUNDLE_PATH, 'utf8');
 const GIT_GRAPH_JS = fs.existsSync(GIT_GRAPH_PATH) ? fs.readFileSync(GIT_GRAPH_PATH, 'utf8') : '';
-const BUNDLE_HASH = crypto.createHash('md5').update(BUNDLE_JS + GIT_GRAPH_JS).digest('hex');
+
+function rendererFingerprint(sources) {
+    const digest = crypto.createHash('sha256');
+    for (const name of Object.keys(sources).sort()) {
+        digest.update(name).update('\0').update(sources[name]).update('\0');
+    }
+    return digest.digest('hex');
+}
+
+const RENDERER_HASH = rendererFingerprint({
+    bundle: BUNDLE_JS,
+    driver: fs.readFileSync(__filename, 'utf8'),
+    gitGraph: GIT_GRAPH_JS,
+});
 
 // Built once and reused for every render. GitGraph is loaded before the bundle
 // so window.GitGraph exists when the gitgraph renderer initializes.
@@ -38,7 +51,7 @@ if (!fs.existsSync(CACHE_DIR)) {
 }
 
 function cachePathFor(type, text) {
-    const hash = crypto.createHash('md5').update(BUNDLE_HASH + '|' + type + '|' + text).digest('hex');
+    const hash = crypto.createHash('md5').update(RENDERER_HASH + '|' + type + '|' + text).digest('hex');
     return path.join(CACHE_DIR, hash + '.svg');
 }
 
@@ -99,7 +112,7 @@ async function renderUML(type, text) {
     }
 }
 
-module.exports = { renderUML };
+module.exports = { renderUML, rendererFingerprint };
 
 // Batch mode: read `{ id: { type, text } }` from stdin, write `{ id: svg }` to
 // stdout. SVG values start with '<svg'; failures are 'Error: ...' strings that
