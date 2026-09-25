@@ -1127,6 +1127,8 @@ exit / action_text        ← executes on state exit
 do / activity_text        ← ongoing activity while in state
 ```
 
+The equivalent named-row form attaches an action to a state without opening its block: `Connecting : entry / showSpinner()`. Use `exit` or `do` in the same form for exit actions or ongoing activities. Inside a composite state block, a named row can attach an activity to one of its child states.
+
 **Example:**
 
 ```
