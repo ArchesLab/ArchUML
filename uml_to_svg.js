@@ -92,13 +92,20 @@ function renderInPage(page, type, text) {
     }, { type, text });
 }
 
+// PLAYWRIGHT_CHROME_EXECUTABLE names an installed Chrome for machines where
+// Playwright's bundled browser is not installed.
+function launchBrowser() {
+    const executablePath = process.env.PLAYWRIGHT_CHROME_EXECUTABLE;
+    return chromium.launch(executablePath ? { executablePath } : {});
+}
+
 async function renderUML(type, text) {
     const cachePath = cachePathFor(type, text);
     if (fs.existsSync(cachePath)) {
         return fs.readFileSync(cachePath, 'utf8');
     }
 
-    const browser = await chromium.launch();
+    const browser = await launchBrowser();
     try {
         const page = await browser.newPage();
         await page.setContent(PAGE_HTML);
@@ -128,7 +135,7 @@ if (require.main === module) {
             return;
         }
 
-        const browser = await chromium.launch();
+        const browser = await launchBrowser();
         const results = {};
         try {
             const page = await browser.newPage();

@@ -2025,6 +2025,105 @@
     };
   }
 
+  // ─── Auto-Fit Scheduling ───────────────────────────────────────
+
+  // Diagrams rendered while hidden keep a placeholder size until they can be
+  // measured. Every refit pass covers all containers, so one scheduler serves
+  // all diagram types instead of each type repeating the same document scans.
+  var DIAGRAM_CONTAINER_SELECTOR =
+    '.uml-class-diagram-container,' +
+    '.uml-sequence-diagram-container,' +
+    '.uml-state-diagram-container,' +
+    '.uml-component-diagram-container,' +
+    '.uml-deployment-diagram-container,' +
+    '.uml-usecase-diagram-container,' +
+    '.uml-activity-diagram-container,' +
+    '.uml-freeform-diagram-container,' +
+    '.uml-gitgraph-diagram-container,' +
+    '.uml-folder-tree-diagram-container';
+  var refitQueued = false;
+  var settleTimer = null;
+  var settlePasses = 0;
+  var visibilityMutationObserver = null;
+  var visibilityObserver = typeof IntersectionObserver === 'function'
+    ? new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          if (!entries[i].isIntersecting) continue;
+          autoFitSVG(entries[i].target);
+          var svg = entries[i].target.querySelector('svg');
+          if (!isPlaceholderAutoFit(svg)) visibilityObserver.unobserve(entries[i].target);
+        }
+      }, { rootMargin: '200px 0px' })
+    : null;
+
+  function getDiagramContainers() {
+    return document.querySelectorAll(DIAGRAM_CONTAINER_SELECTOR);
+  }
+
+  function startSettleLoop() {
+    if (settleTimer) return;
+    settlePasses = 0;
+    settleTimer = setInterval(function () {
+      settlePasses++;
+      var remaining = 0;
+      var containers = getDiagramContainers();
+      for (var d = 0; d < containers.length; d++) {
+        var container = containers[d];
+        if (!container || !container.isConnected) continue;
+        autoFitSVG(container);
+        var svg = container.querySelector('svg');
+        if (isPlaceholderAutoFit(svg)) remaining++;
+      }
+      if (remaining === 0 || settlePasses >= 8) {
+        clearInterval(settleTimer);
+        settleTimer = null;
+      }
+    }, 400);
+  }
+
+  function refitAll() {
+    refitQueued = false;
+    var containers = getDiagramContainers();
+    for (var d = 0; d < containers.length; d++) {
+      if (containers[d] && containers[d].isConnected) {
+        autoFitSVG(containers[d]);
+      }
+    }
+  }
+
+  function queueRefitAll() {
+    if (refitQueued || typeof window === 'undefined') return;
+    refitQueued = true;
+    var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
+    raf(function () {
+      raf(refitAll);
+    });
+  }
+
+  // Only an attribute change on a diagram or one of its ancestors can reveal
+  // it. Animations and widgets elsewhere must not trigger document-wide scans.
+  function mayRevealDiagram(mutation) {
+    var target = mutation.target;
+    return !!target.matches && (target.matches(DIAGRAM_CONTAINER_SELECTOR) ||
+      !!target.querySelector(DIAGRAM_CONTAINER_SELECTOR));
+  }
+
+  function watchDiagramVisibility() {
+    if (visibilityMutationObserver || !document.body) return;
+    visibilityMutationObserver = new MutationObserver(function (mutations) {
+      if (!mutations.some(mayRevealDiagram)) return;
+      setTimeout(function () {
+        queueRefitAll();
+        startSettleLoop();
+      }, 60);
+    });
+    visibilityMutationObserver.observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'open', 'hidden']
+    });
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -2038,75 +2137,6 @@
   function createAutoInit(selector, renderFn, opts) {
     var diagrams = [];
     var extractText = (opts && opts.extractText) || function (el) { return el.textContent; };
-    var refitQueued = false;
-    var settleTimer = null;
-    var settlePasses = 0;
-    var visibilityMutationObserver = null;
-    var visibilityObserver = typeof IntersectionObserver === 'function'
-      ? new IntersectionObserver(function (entries) {
-          for (var i = 0; i < entries.length; i++) {
-            if (!entries[i].isIntersecting) continue;
-            autoFitSVG(entries[i].target);
-            var svg = entries[i].target.querySelector('svg');
-            if (!isPlaceholderAutoFit(svg)) visibilityObserver.unobserve(entries[i].target);
-          }
-        }, { rootMargin: '200px 0px' })
-      : null;
-
-    function getDiagramContainers() {
-      return document.querySelectorAll(
-        '.uml-class-diagram-container,' +
-        '.uml-sequence-diagram-container,' +
-        '.uml-state-diagram-container,' +
-        '.uml-component-diagram-container,' +
-        '.uml-deployment-diagram-container,' +
-        '.uml-usecase-diagram-container,' +
-        '.uml-activity-diagram-container,' +
-        '.uml-freeform-diagram-container,' +
-        '.uml-gitgraph-diagram-container,' +
-        '.uml-folder-tree-diagram-container'
-      );
-    }
-
-    function startSettleLoop() {
-      if (settleTimer) return;
-      settlePasses = 0;
-      settleTimer = setInterval(function () {
-        settlePasses++;
-        var remaining = 0;
-        var containers = getDiagramContainers();
-        for (var d = 0; d < containers.length; d++) {
-          var container = containers[d];
-          if (!container || !container.isConnected) continue;
-          autoFitSVG(container);
-          var svg = container.querySelector('svg');
-          if (isPlaceholderAutoFit(svg)) remaining++;
-        }
-        if (remaining === 0 || settlePasses >= 8) {
-          clearInterval(settleTimer);
-          settleTimer = null;
-        }
-      }, 400);
-    }
-
-    function refitAll() {
-      refitQueued = false;
-      var containers = getDiagramContainers();
-      for (var d = 0; d < containers.length; d++) {
-        if (containers[d] && containers[d].isConnected) {
-          autoFitSVG(containers[d]);
-        }
-      }
-    }
-
-    function queueRefitAll() {
-      if (refitQueued || typeof window === 'undefined') return;
-      refitQueued = true;
-      var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
-      raf(function () {
-        raf(refitAll);
-      });
-    }
 
     function init() {
       var blocks = document.querySelectorAll(selector);
@@ -2128,20 +2158,7 @@
         document.fonts.ready.then(queueRefitAll).catch(function () {});
       }
       window.addEventListener('load', queueRefitAll, { once: true });
-
-      if (!visibilityMutationObserver && document.body) {
-        visibilityMutationObserver = new MutationObserver(function () {
-          setTimeout(function () {
-            queueRefitAll();
-            startSettleLoop();
-          }, 60);
-        });
-        visibilityMutationObserver.observe(document.body, {
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['class', 'style', 'open', 'hidden']
-        });
-      }
+      watchDiagramVisibility();
 
       var observer = new MutationObserver(function (mutations) {
         for (var m = 0; m < mutations.length; m++) {
