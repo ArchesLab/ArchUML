@@ -12,17 +12,18 @@ Each section shows the syntax as a code block followed by an HTML rendering div 
 2. [Global Directives](#global-directives)
 3. [Element Highlighting](#element-highlighting)
 4. [Class Diagrams](#class-diagrams)
-5. [Sequence Diagrams](#sequence-diagrams)
-6. [State Machine Diagrams](#state-machine-diagrams)
-7. [Component Diagrams](#component-diagrams)
-8. [Deployment Diagrams](#deployment-diagrams)
-9. [Use Case Diagrams](#use-case-diagrams)
-10. [Activity Diagrams](#activity-diagrams)
-11. [Freeform Diagrams](#freeform-diagrams)
-12. [Git Commit Graphs](#git-commit-graphs)
-13. [Notes & Annotations](#notes--annotations)
-14. [CSS Theming](#css-theming)
-15. [CLI / Node.js API](#cli--nodejs-api)
+5. [CRC Cards](#crc-cards)
+6. [Sequence Diagrams](#sequence-diagrams)
+7. [State Machine Diagrams](#state-machine-diagrams)
+8. [Component Diagrams](#component-diagrams)
+9. [Deployment Diagrams](#deployment-diagrams)
+10. [Use Case Diagrams](#use-case-diagrams)
+11. [Activity Diagrams](#activity-diagrams)
+12. [Freeform Diagrams](#freeform-diagrams)
+13. [Git Commit Graphs](#git-commit-graphs)
+14. [Notes & Annotations](#notes--annotations)
+15. [CSS Theming](#css-theming)
+16. [CLI / Node.js API](#cli--nodejs-api)
 
 ---
 
@@ -53,14 +54,15 @@ Available class names:
 | `language-uml-activity` | Activity diagram |
 | `diagram-freeform` | Freeform box-and-line (non-UML) |
 | `diagram-gitgraph` | Git commit graph (non-UML) |
+| `diagram-crc` | Class, Responsibility, Collaborator cards (non-UML) |
 
-The `@startuml` / `@enduml` markers are optional but recommended for clarity. The last two types intentionally drop the `uml-` prefix since they are not UML — they cover visualisations that no formal UML diagram captures cleanly.
+The `@startuml` / `@enduml` markers are optional but recommended for clarity. Non-UML types use the `diagram-` prefix. In SEBook Markdown, a fenced `crc` block also renders CRC cards; an embedding container uses `data-uml-type="crc"`.
 
 ---
 
 ## Global Directives
 
-These directives work in any diagram type.
+These directives are shared across diagram types; individual type sections note any limitations.
 
 ### Layout Direction
 
@@ -121,7 +123,7 @@ B --> C
 
 ## Element Highlighting
 
-Any element declaration may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill, optionally with a texture keyword to overlay a pattern. The suffix is recognized across all diagram types and pairs with any stereotype or block body.
+Element declarations in the UML, freeform, Git graph, Venn, and ER renderers may be followed by a `#color` suffix (PlantUML-compatible) to tint that element with a different fill, optionally with a texture keyword to overlay a pattern. CRC cards do not support highlighting suffixes.
 
 ```
 class Alice #lightblue
@@ -662,6 +664,54 @@ note bottom of ConcreteObserver.update
 end note
 @enduml
 </code></pre>
+
+---
+
+## CRC Cards
+
+CRC stands for **Class, Responsibility, Collaborator**. Use cards to explore what each object's role requires it to know or do, and which other objects it collaborates with. Write responsibilities as short active phrases. This representation follows the card structure introduced by [Beck and Cunningham in *A Laboratory for Teaching Object-Oriented Thinking*](https://c2.com/doc/oopsla89/paper.html).
+
+A card contains a class name and independent **Responsibilities** and **Collaborators** lists. Entries at the same vertical position are not paired. Listing a collaborator does not create another card or draw an arrow; declare its card separately when it belongs in the sketch.
+
+### Syntax
+
+Declare `card Identifier { ... }`, or use `card "Display name" as Identifier { ... }` for a longer title. Inside a card, put each `responsibility: text` or `collaborator: text` entry on its own line. Either list may be empty; omit entries for it. An entry with a prefix still needs nonempty text. Card identifiers must be unique.
+
+```
+@startuml
+layout auto
+card "Shopping cart" as Cart {
+  responsibility: Know selected products and quantities
+  responsibility: Add a product to the selection
+  collaborator: Catalog
+}
+card Catalog {
+  responsibility: Find products available for selection
+}
+@enduml
+```
+
+<pre><code class="diagram-crc">
+@startuml
+layout auto
+card "Shopping cart" as Cart {
+  responsibility: Know selected products and quantities
+  responsibility: Add a product to the selection
+  collaborator: Catalog
+}
+card Catalog {
+  responsibility: Find products available for selection
+}
+@enduml
+</code></pre>
+
+Catalog's empty collaborators compartment means that this sketch records no collaborators for it. A card can also start empty while the design is being explored.
+
+### Rendering and editing
+
+In SEBook, select **CRC cards** in the diagram editor, use a fenced `crc` block in Markdown, or embed `<pre><code class="diagram-crc">...</code></pre>`. The browser API is `UMLCRCDiagram.render(container, source)`; `UMLCRCDiagram.parse(source)` returns the parsed cards. CRC is an ArchUML-specific notation, not a UML diagram type or a claim of PlantUML compatibility.
+
+Layout supports `horizontal`, `vertical`, `square`, `landscape`, `portrait`, `compact`, and `auto`, plus `layout shadows on` / `off`. Card positions can use the editor's shared position metadata. CRC does not support relationship arrows, notes, or element highlighting.
 
 ---
 
@@ -2721,6 +2771,7 @@ window.UMLComponentDiagram.render(containerEl, specText);
 window.UMLDeploymentDiagram.render(containerEl, specText);
 window.UMLUseCaseDiagram.render(containerEl, specText);
 window.UMLActivityDiagram.render(containerEl, specText);
+window.UMLCRCDiagram.render(containerEl, specText);
 
 // Parse only (returns AST)
 window.UMLClassDiagram.parse(specText);
@@ -2738,7 +2789,7 @@ Requires [Playwright](https://playwright.dev/). Reads spec from stdin, writes SV
 echo "<spec>" | node uml_render.js <type> output.svg
 cat diagram.uml | node uml_render.js class diagram.svg
 
-# Types: class, sequence, state, component, deployment, usecase, activity
+# Types: class, sequence, state, component, deployment, usecase, activity, crc
 ```
 
 **Example:**

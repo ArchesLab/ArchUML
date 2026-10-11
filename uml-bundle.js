@@ -293,6 +293,9 @@
     var clean = String(line || '').trim();
     if (!clean) return null;
 
+    var cardAliasMatch = clean.match(/^card\s+(?:"(?:[^"\\]|\\.)*"|\S+)\s+as\s+("(?:[^"\\]|\\.)*")\s*\{?\s*$/i);
+    if (cardAliasMatch) return unquoteLayoutId(cardAliasMatch[1]);
+
     var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
     if (aliasMatch) return aliasMatch[1];
 
@@ -302,7 +305,7 @@
     var participantMatch = clean.match(/^(?:participant|actor)\s+(\S+)/i);
     if (participantMatch) return participantMatch[1];
 
-    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
+    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
     if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
 
     var bareMatch = clean.match(/^([A-Za-z0-9_.:-]+)(?:\s+merge\s+\S+|\s+"(?:[^"\\]|\\.)*"|\s*)$/);
@@ -396,7 +399,8 @@
         continue;
       }
 
-      var inlinePos = raw.match(/\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/i);
+      var inlinePos = /^(?:responsibility|collaborator)\s*:/i.test(trimmed) ? null :
+        raw.match(/\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/i);
       if (inlinePos) {
         var before = raw.slice(0, inlinePos.index);
         var after = raw.slice(inlinePos.index + inlinePos[0].length);
@@ -1884,7 +1888,8 @@
     gitgraph: 'uml-gitgraph-diagram-container',
     'folder-tree': 'uml-folder-tree-diagram-container',
     venn: 'uml-venn-diagram-container',
-    er: 'uml-er-diagram-container'
+    er: 'uml-er-diagram-container',
+    crc: 'uml-crc-diagram-container'
   };
 
   function prepareDiagramContainer(container, type) {
@@ -1913,7 +1918,8 @@
     gitgraph: 'Git graph diagram',
     'folder-tree': 'Folder tree diagram',
     venn: 'Venn diagram',
-    er: 'Entity-relationship diagram'
+    er: 'Entity-relationship diagram',
+    crc: 'Class-responsibility-collaborator cards'
   };
 
   function normalizeDiagramType(type) {
@@ -2040,7 +2046,8 @@
     '.uml-activity-diagram-container,' +
     '.uml-freeform-diagram-container,' +
     '.uml-gitgraph-diagram-container,' +
-    '.uml-folder-tree-diagram-container';
+    '.uml-folder-tree-diagram-container,' +
+    '.uml-crc-diagram-container';
   var refitQueued = false;
   var settleTimer = null;
   var settlePasses = 0;
@@ -4261,6 +4268,7 @@
         'folder-tree': function () { return window.UMLFolderTreeDiagram; },
         venn:       function () { return window.UMLVennDiagram; },
         er:         function () { return window.UMLERDiagram; },
+        crc:        function () { return window.UMLCRCDiagram; },
       };
 
       // 1. Process data-uml-type attributes
@@ -4302,6 +4310,7 @@
         'folder-tree': 'pre > code.diagram-folder-tree, pre > code.language-folder-tree',
         venn:       'pre > code.diagram-venn, pre > code.language-venn',
         er:         'pre > code.diagram-er, pre > code.language-er',
+        crc:        'pre > code.diagram-crc, pre > code.language-crc',
       };
       for (var key in RENDERERS) {
         var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
@@ -26485,6 +26494,197 @@
 
   UMLShared.createAutoInit('pre > code.diagram-er, pre > code.language-er', render, { type: 'er' });
   window.UMLERDiagram = { render: render, parse: parse };
+})();
+/**
+ * CRC Card Renderer
+ *
+ * card "Shopping cart" as Cart {
+ *   responsibility: Know selected products
+ *   collaborator: Catalog
+ * }
+ *
+ * Each entry occupies one source line. Responsibilities and collaborators are
+ * independent lists, not matched rows or UML associations. parse() returns
+ * zero-based startLine/endLine ranges in the original source for visual edits.
+ */
+(function () {
+  'use strict';
+
+  const CFG = { width: 560, split: 320, pad: 18, fontSize: 20, titleSize: 22, lineHeight: 28, gap: 32 };
+
+  function syntaxError(line, message) {
+    return new Error('CRC line ' + (line + 1) + ': ' + message);
+  }
+
+  function parseCardDeclaration(line, index) {
+    const declaration = line.replace(/\s+@pos\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)/i, '');
+    const match = declaration.match(/^card\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z_][\w.:-]*))(?:\s+as\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z_][\w.:-]*)))?\s*\{\s*$/i);
+    if (!match) throw syntaxError(index, 'Use card Name { or card "Display name" as Id {.');
+    const name = match[1] !== undefined ? match[1].replace(/\\(["\\])/g, '$1') : match[2];
+    if (!name.trim()) throw syntaxError(index, 'A card needs a nonempty name.');
+    const id = match[3] !== undefined ? match[3].replace(/\\(["\\])/g, '$1') : match[4] || name;
+    if (!id.trim()) throw syntaxError(index, 'A card needs a nonempty identifier.');
+    return { id: id, name: name, responsibilities: [], collaborators: [], startLine: index, endLine: null };
+  }
+
+  /** Parse CRC source, rejecting malformed or duplicate cards with line numbers. */
+  function parse(text) {
+    const lines = String(text || '').split('\n');
+    const result = { cards: [], direction: null, layoutPreference: 'auto', shadowEnabled: null, layout: UMLShared.extractLayoutMetadata(text).layout };
+    const identifiers = new Set();
+    let current = null;
+    let inLayout = false;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index].trim();
+      if (!line || /^(?:\/\/|#|')/.test(line)) continue;
+      if (current) {
+        if (line === '}') { current.endLine = index; current = null; continue; }
+        if (/^@enduml$/i.test(line)) throw syntaxError(current.startLine, 'Close the card with } before @enduml.');
+        const entry = line.match(/^(responsibility|collaborator)\s*:\s*(.*)$/i);
+        if (!entry) throw syntaxError(index, 'Use responsibility: text or collaborator: text inside a card.');
+        if (!entry[2].trim()) throw syntaxError(index, 'An entry needs text after the colon.');
+        current[entry[1].toLowerCase() === 'responsibility' ? 'responsibilities' : 'collaborators'].push(entry[2].trim());
+        continue;
+      }
+      if (/^@layout\b/i.test(line)) { inLayout = true; continue; }
+      if (/^@endlayout\b/i.test(line)) { inLayout = false; continue; }
+      if (inLayout || /^@(?:start|end)uml$/i.test(line) || /^caption\s*:/i.test(line)) continue;
+      const directive = UMLShared.parseLayoutDirective(line);
+      if (directive) {
+        if (directive.direction) { result.direction = directive.direction; result.layoutPreference = 'auto'; }
+        if (directive.layoutPreference !== null) { result.layoutPreference = directive.layoutPreference; result.direction = null; }
+        if (directive.shadowEnabled !== null) result.shadowEnabled = directive.shadowEnabled;
+        continue;
+      }
+      current = parseCardDeclaration(line, index);
+      if (identifiers.has(current.id)) throw syntaxError(index, 'Duplicate card identifier "' + current.id + '". Choose a unique identifier.');
+      identifiers.add(current.id);
+      result.cards.push(current);
+    }
+    if (current) throw syntaxError(current.startLine, 'Close the card with }.');
+    if (inLayout) throw syntaxError(lines.length - 1, 'Close the layout block with @endlayout.');
+    return result;
+  }
+
+  function wrapText(text, width, bold, fontSize) {
+    const lines = [];
+    let line = '';
+    for (const word of text.split(/\s+/)) {
+      const candidate = line ? line + ' ' + word : word;
+      if (UMLShared.textWidth(candidate, bold, fontSize) <= width) { line = candidate; continue; }
+      if (line) { lines.push(line); line = ''; }
+      for (const character of word) {
+        if (line && UMLShared.textWidth(line + character, bold, fontSize) > width) {
+          lines.push(line);
+          line = '';
+        }
+        line += character;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function measureEntries(entries, width) {
+    const rows = entries.length ? entries : ['—'];
+    return rows.map((entry) => wrapText(entry, width - CFG.pad * 2 - 16, false, CFG.fontSize));
+  }
+
+  function entriesHeight(entries) {
+    return entries.reduce((height, lines) => height + lines.length * CFG.lineHeight + 8, 0);
+  }
+
+  function measureCard(card) {
+    const title = wrapText(card.name, CFG.width - CFG.pad * 2, true, CFG.titleSize);
+    const responsibilities = measureEntries(card.responsibilities, CFG.split);
+    const collaborators = measureEntries(card.collaborators, CFG.width - CFG.split);
+    const headerHeight = title.length * CFG.lineHeight + CFG.pad * 2;
+    return { card, title, responsibilities, collaborators, headerHeight,
+      height: headerHeight + 48 + Math.max(entriesHeight(responsibilities), entriesHeight(collaborators)) + CFG.pad };
+  }
+
+  function columnCount(parsed, availableWidth) {
+    const count = parsed.cards.length;
+    if (parsed.direction === 'LR') return count;
+    if (parsed.direction === 'TB') return 1;
+    if (parsed.layoutPreference === 'landscape') return Math.min(count, Math.max(2, Math.ceil(Math.sqrt(count * 1.6))));
+    if (parsed.layoutPreference === 'portrait') return Math.max(1, Math.floor(Math.sqrt(count * 0.6)));
+    if (parsed.layoutPreference !== 'auto') return Math.ceil(Math.sqrt(count));
+    return Math.max(1, Math.min(count, Math.floor((availableWidth + CFG.gap) / (CFG.width + CFG.gap))));
+  }
+
+  function placeCards(parsed, availableWidth) {
+    const columns = columnCount(parsed, availableWidth);
+    const cards = parsed.cards.map(measureCard);
+    let y = 0;
+    for (let start = 0; start < cards.length; start += columns) {
+      const row = cards.slice(start, start + columns);
+      row.forEach((card, index) => { card.x = index * (CFG.width + CFG.gap); card.y = y; });
+      y += Math.max(...row.map((card) => card.height)) + CFG.gap;
+    }
+    return { cards, width: columns * (CFG.width + CFG.gap) - CFG.gap, height: y - CFG.gap };
+  }
+
+  function textElement(text, x, y, colors, options = {}) {
+    return '<text x="' + x + '" y="' + y + '" font-size="' + (options.size || CFG.fontSize) +
+      '" fill="' + colors.text + '"' + (options.bold ? ' font-weight="bold"' : '') +
+      (options.centered ? ' text-anchor="middle"' : '') + '>' + UMLShared.escapeXml(text) + '</text>';
+  }
+
+  function drawEntries(entries, x, y, colors, empty) {
+    const svg = [];
+    for (const lines of entries) {
+      lines.forEach((line, index) => {
+        if (!empty && index === 0) svg.push(textElement('•', x, y, colors));
+        svg.push(textElement(line, x + 16, y, colors));
+        y += CFG.lineHeight;
+      });
+      y += 8;
+    }
+    return svg.join('');
+  }
+
+  function drawCard(measured, colors) {
+    const { card, headerHeight, height } = measured;
+    const id = UMLShared.escapeXml(card.id);
+    const svg = ['<g data-layout-id="' + id + '" data-layout-bounds-id="' + id + '" transform="translate(' + measured.x + ',' + measured.y + ')">'];
+    svg.push('<rect width="' + CFG.width + '" height="' + height + '" rx="6" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1.5" filter="url(#uml-node-shadow)"/>');
+    svg.push('<path d="M6 0 H' + (CFG.width - 6) + ' Q' + CFG.width + ' 0 ' + CFG.width + ' 6 V' + headerHeight + ' H0 V6 Q0 0 6 0 Z" fill="' + colors.headerFill + '"/>');
+    svg.push('<path d="M0 ' + headerHeight + ' H' + CFG.width + ' M' + CFG.split + ' ' + headerHeight + ' V' + height + '" fill="none" stroke="' + colors.stroke + '" stroke-width="1.5"/>');
+    measured.title.forEach((line, index) => svg.push(textElement(line, CFG.width / 2, CFG.pad + CFG.titleSize + index * CFG.lineHeight, colors, { bold: true, centered: true, size: CFG.titleSize })));
+    svg.push(textElement('Responsibilities', CFG.pad, headerHeight + 30, colors, { bold: true }));
+    svg.push(textElement('Collaborators', CFG.split + CFG.pad, headerHeight + 30, colors, { bold: true }));
+    svg.push(drawEntries(measured.responsibilities, CFG.pad, headerHeight + 62, colors, !card.responsibilities.length));
+    svg.push(drawEntries(measured.collaborators, CFG.split + CFG.pad, headerHeight + 62, colors, !card.collaborators.length));
+    svg.push('</g>');
+    return svg.join('');
+  }
+
+  function describeCards(cards) {
+    return 'Class-responsibility-collaborator cards. ' + cards.map((card) => card.name + '. Responsibilities: ' +
+      (card.responsibilities.join('; ') || 'none listed') + '. Collaborators: ' +
+      (card.collaborators.join('; ') || 'none listed') + '.').join(' ');
+  }
+
+  function render(container, text) {
+    const parsed = parse(text);
+    UMLShared.prepareDiagramContainer(container, 'crc');
+    container.setAttribute('tabindex', '0');
+    if (!parsed.cards.length) {
+      container.innerHTML = '<div class="uml-empty-msg">No CRC cards to display.</div>';
+      return;
+    }
+    const layout = placeCards(parsed, container.clientWidth || CFG.width);
+    const colors = UMLShared.getThemeColors(container);
+    container.innerHTML = UMLShared.svgOpen(layout.width + 60, layout.height + 60, 30, 30, null, { shadowEnabled: parsed.shadowEnabled }) +
+      layout.cards.map((card) => drawCard(card, colors)).join('') + UMLShared.svgClose();
+    UMLShared.applyRenderedPositions(container, parsed.layout);
+    UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'crc', text, describeCards(parsed.cards));
+  }
+
+  UMLShared.createAutoInit('pre > code.diagram-crc, pre > code.language-crc', render, { type: 'crc' });
+  window.UMLCRCDiagram = { render, parse };
 })();
 /**
  * UML Notation Symbol Renderer

@@ -74,6 +74,7 @@ function renderInPage(page, type, text) {
             'folder-tree': window.UMLFolderTreeDiagram,
             venn:          window.UMLVennDiagram,
             er:            window.UMLERDiagram,
+            crc:           window.UMLCRCDiagram,
         };
         const R = RENDERERS[type];
         if (!R || typeof R.render !== 'function') {

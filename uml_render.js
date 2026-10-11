@@ -15,7 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 
-const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er'];
+const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er', 'crc'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const GIT_GRAPH_PATH = path.join(REPO_ROOT, 'js', 'git-graph.js');
@@ -64,6 +64,7 @@ async function main() {
       'folder-tree': window.UMLFolderTreeDiagram,
       venn:       window.UMLVennDiagram,
       er:         window.UMLERDiagram,
+      crc:        window.UMLCRCDiagram,
     };
     const R = RENDERERS[type];
     if (!R) return { error: 'Unknown renderer: ' + type };
