@@ -328,14 +328,7 @@
 
   function parseLayoutRoutePoints(raw) {
     var body = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
-    if (!body) return [];
-    var points = [];
-    body.split(/\s+/).forEach(function(part) {
-      var m = part.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
-      if (!m) return;
-      points.push({ x: Number(m[1]), y: Number(m[2]) });
-    });
-    return points;
+    return parseSvgPoints(body);
   }
 
   function addLayoutRoute(layout, id, rawPoints) {
@@ -455,7 +448,7 @@
       var height = entry.box && entry.box.height ? entry.box.height : 0;
       var half = port.kind === 'require'
         ? 8
-        : (port.kind === 'provide' ? 7 : 6);
+        : (port.kind === 'provide' ? 7 : port.cx - port.x);
       var inset = Math.max(8, half + 2);
       var left = entry.x;
       var right = entry.x + width;
@@ -608,7 +601,9 @@
 
   function layoutRoutePointsToString(points) {
     return (points || []).map(function(p) {
-      return Math.round(p.x) + ',' + Math.round(p.y);
+      // Route endpoints may lie on fractional node coordinates. Saving an
+      // edited bend must not move those anchors onto an integer grid.
+      return Number(p.x) + ',' + Number(p.y);
     }).join(' ');
   }
 
@@ -1901,6 +1896,7 @@
       }
     }
     container.classList.add(targetClass);
+    container.setAttribute('data-uml-scroll-label', fallbackArchUmlCaption(type));
     if (container.hidden) container.hidden = false;
     container.style.setProperty('display', 'block', 'important');
     return targetClass;
@@ -2047,6 +2043,8 @@
     '.uml-freeform-diagram-container,' +
     '.uml-gitgraph-diagram-container,' +
     '.uml-folder-tree-diagram-container,' +
+    '.uml-venn-diagram-container,' +
+    '.uml-er-diagram-container,' +
     '.uml-crc-diagram-container';
   var refitQueued = false;
   var settleTimer = null;
@@ -2587,6 +2585,63 @@
 
   // ─── SVG Auto-Fit ───────────────────────────────────────────
 
+  // Only overflowing figures enter the tab order. ResizeObserver also covers
+  // figures revealed in quizzes and changes to the surrounding text size.
+  function updateDiagramScrollability(container) {
+    var overflowing = container.clientWidth > 0 && container.scrollWidth > container.clientWidth + 1;
+    var managed = container.hasAttribute('data-uml-scroll-tabindex');
+    if (overflowing && (!container.hasAttribute('tabindex') || managed)) {
+      if (container.getAttribute('tabindex') !== '0') container.setAttribute('tabindex', '0');
+      if (!managed) container.setAttribute('data-uml-scroll-tabindex', 'true');
+      if (!container.hasAttribute('role')) {
+        var svg = container.querySelector('svg');
+        // Live editors own their SVG's interactive semantics. The scrolling
+        // viewport is a region; only authored figure wrappers own img roles.
+        container.setAttribute('role', 'region');
+        container.setAttribute('aria-label', (svg && svg.getAttribute('aria-label')) ||
+          container.getAttribute('data-uml-scroll-label') || 'Diagram');
+      }
+    } else if (!overflowing && managed && container.hasAttribute('tabindex')) {
+      container.removeAttribute('tabindex');
+    }
+  }
+
+  var diagramScrollObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(function (entries) {
+        entries.forEach(function (entry) { updateDiagramScrollability(entry.target); });
+      })
+    : null;
+
+  function sizeDiagramForReadability(container) {
+    var svg = container && container.querySelector('svg');
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    var width = svg.viewBox.baseVal.width;
+    var smallestFont = Infinity;
+    var labels = svg.querySelectorAll('text, tspan');
+    var svgMatrix = svg.getCTM();
+    for (var i = 0; i < labels.length; i++) {
+      if (!labels[i].textContent.trim()) continue;
+      var font = parseFloat(getComputedStyle(labels[i]).fontSize);
+      var labelMatrix = labels[i].getCTM();
+      if (svgMatrix && labelMatrix) {
+        var local = svgMatrix.inverse().multiply(labelMatrix);
+        var scale = Math.hypot(local.c, local.d);
+        if (isFinite(scale) && scale > 0) font *= scale;
+      }
+      if (isFinite(font) && font > 0) smallestFont = Math.min(smallestFont, font);
+    }
+    // Preserve all relative geometry. An em width lets the same serialized
+    // SVG follow the page's paragraph size, including without JavaScript.
+    var readableWidth = isFinite(smallestFont)
+      ? 'max(' + width + 'px, ' + (width / smallestFont) + 'em)'
+      : width + 'px';
+    if (svg.style.getPropertyValue('--uml-readable-width') !== readableWidth) {
+      svg.style.setProperty('--uml-readable-width', readableWidth);
+    }
+    updateDiagramScrollability(container);
+    if (diagramScrollObserver) diagramScrollObserver.observe(container);
+  }
+
   /**
    * After rendering SVG into a container, expand the viewBox to fit all content.
    * Call this after setting container.innerHTML = svgString.
@@ -2634,6 +2689,7 @@
 
   function autoFitSVG(container, pad) {
     applyAutoFitSVG(container, pad);
+    sizeDiagramForReadability(container);
     var svg = container && container.querySelector ? container.querySelector('svg') : null;
     if (!isPlaceholderAutoFit(svg)) {
       if (container && container.removeAttribute) container.removeAttribute('data-uml-autofit-retries');
@@ -2646,6 +2702,7 @@
     container.setAttribute('data-uml-autofit-retries', String(retries + 1));
     setTimeout(function () {
       applyAutoFitSVG(container, pad);
+      sizeDiagramForReadability(container);
       var retriedSvg = container.querySelector('svg');
       if (isPlaceholderAutoFit(retriedSvg)) {
         autoFitSVG(container, pad);
@@ -2656,7 +2713,9 @@
   }
 
   function fitSVGToContent(container, pad) {
-    return applyAutoFitSVG(container, pad, true);
+    var fitted = applyAutoFitSVG(container, pad, true);
+    sizeDiagramForReadability(container);
+    return fitted;
   }
 
   function resolveNodeTarget(targetName, entries) {
@@ -3128,6 +3187,60 @@
     return fractions;
   }
 
+  function nearestClearHorizontalOffset(intervals) {
+    intervals.sort((a, b) => a.left - b.left || a.right - b.right);
+    let right = 0;
+    for (const interval of intervals) {
+      if (interval.left < right && interval.right > right) right = interval.right;
+    }
+    let left = 0;
+    for (let i = intervals.length - 1; i >= 0; i--) {
+      if (intervals[i].left < left && intervals[i].right > left) left = intervals[i].left;
+    }
+    return -left < right ? left : right;
+  }
+
+  /** Find the nearest clear translation of a finite label rectangle.
+   * Exclusions are {rect, pad}; input geometry is never mutated. Obstacle
+   * boundary rows cover every change in free space, so the search terminates
+   * without an arbitrary radius cap or an overlapping last resort.
+   */
+  function findClearLabelPlacement(rect, exclusions) {
+    const base = normalizeRect(rect);
+    const expanded = exclusions.map((exclusion) => {
+      const bounds = normalizeRect(exclusion.rect);
+      const gap = (exclusion.pad || 0) + 0.25;
+      return {
+        left: bounds.left - gap, right: bounds.right + gap,
+        top: bounds.top - gap, bottom: bounds.bottom + gap
+      };
+    });
+    const rows = new Set([0]);
+    for (const obstacle of expanded) {
+      rows.add(obstacle.top - base.bottom);
+      rows.add(obstacle.bottom - base.top);
+    }
+    let best = { dx: 0, dy: 0, distance: Infinity };
+    const orderedRows = Array.from(rows).sort((a, b) => Math.abs(a) - Math.abs(b) || a - b);
+    for (const dy of orderedRows) {
+      if (Math.abs(dy) >= best.distance) break;
+      const intervals = [];
+      for (const obstacle of expanded) {
+        if (base.bottom + dy > obstacle.top && base.top + dy < obstacle.bottom) {
+          intervals.push({ left: obstacle.left - base.right, right: obstacle.right - base.left });
+        }
+      }
+      const dx = nearestClearHorizontalOffset(intervals);
+      const distance = Math.abs(dx) + Math.abs(dy);
+      if (distance < best.distance) best = { dx: dx, dy: dy, distance: distance };
+    }
+    return {
+      dx: best.dx,
+      dy: best.dy,
+      rect: makeRect(base.left + best.dx, base.top + best.dy, base.w, base.h)
+    };
+  }
+
   function placeOrthogonalLabel(label, points, obstacles, placedLabels, options) {
     var opts = options || {};
     var fontSize = opts.fontSize || 14;
@@ -3146,7 +3259,6 @@
     });
 
     var best = null;
-    var bestSoft = null;
     var preferredGap = opts.preferredGap || 7;
     var maxComfortGap = opts.maxComfortGap || 18;
     var preferredPoint = opts.preferredPoint || polylinePointAtFraction(points, 0.5);
@@ -3236,10 +3348,7 @@
               score: score
             };
 
-            if (hitsSegments) {
-              candidate.score -= 40;
-              if (!bestSoft || candidate.score > bestSoft.score) bestSoft = candidate;
-            } else if (!best || candidate.score > best.score) {
+            if (!hitsSegments && (!best || candidate.score > best.score)) {
               best = candidate;
             }
           }
@@ -3249,50 +3358,20 @@
 
     if (best) return best;
 
-    // Fallback: no position cleanly avoided obstacles. Try progressively
-    // larger offsets away from the segment until we find one that DOES
-    // clear every obstacle. Previously the fallback ignored obstacles and
-    // just placed the label at the segment midpoint — which could place
-    // a transition label right on top of an adjacent state box.
+    // Exhaustive fallback preserves readability even when every local sample
+    // is crowded. Its exclusions include route shafts as well as boxes/text.
     var fallbackSeg = segments[0];
     var fallbackAnchor = fallbackSeg.isH ? 'middle' : 'start';
-    var fallbackBaseX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x;
-    var fallbackBaseY = fallbackSeg.isH ? fallbackSeg.y : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
-    var tryOffsets = [];
-    for (var step = 1; step <= 6; step++) {
-      var d = step * (labelH + 6);
-      if (fallbackSeg.isH) {
-        tryOffsets.push({ dx: 0, dy: -d });
-        tryOffsets.push({ dx: 0, dy: d });
-      } else {
-        tryOffsets.push({ dx: d, dy: 0, anchor: 'start' });
-        tryOffsets.push({ dx: -d, dy: 0, anchor: 'end' });
-      }
-    }
-    var obstaclePadStrict = opts.obstaclePad || 6;
-    for (var toi = 0; toi < tryOffsets.length; toi++) {
-      var off = tryOffsets[toi];
-      var fx = fallbackBaseX + off.dx;
-      var fy = fallbackBaseY + off.dy;
-      var fa = off.anchor || fallbackAnchor;
-      var fr = makeLabelRect(fx, fy, labelW, labelH, fa);
-      if (!labelRectHitsObstacles(fr, obstacles, obstaclePadStrict) &&
-          !labelRectHitsPlacedLabels(fr, placedLabels, opts.labelPad || 8) &&
-          !labelRectHitsSegments(fr, segments, null, opts.segmentPad || 3) &&
-          !labelRectHitsSegments(fr, otherSegments, null, opts.segmentPad || 3)) {
-        return { x: fx, y: fy, anchor: fa, rect: fr, score: -Infinity };
-      }
-    }
-    if (bestSoft) return bestSoft;
-    // Last resort — preserve previous behavior (place at segment center,
-    // may overlap an obstacle). Still better than rendering no label at all.
-    var fallbackX = fallbackSeg.isH ? fallbackBaseX : fallbackSeg.x + 10;
-    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 10 : fallbackBaseY;
+    var fallbackX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x + 8;
+    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 8 : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
+    var clearPlacement = findClearLabelPlacement(
+      makeLabelRect(fallbackX, fallbackY, labelW, labelH, fallbackAnchor), exclusions
+    );
     return {
-      x: fallbackX,
-      y: fallbackY,
+      x: fallbackX + clearPlacement.dx,
+      y: fallbackY + clearPlacement.dy,
       anchor: fallbackAnchor,
-      rect: makeLabelRect(fallbackX, fallbackY, labelW, labelH, fallbackAnchor),
+      rect: clearPlacement.rect,
       score: -Infinity
     };
   }
@@ -4160,6 +4239,7 @@
     fitSVGToContent: fitSVGToContent,
     buildOrthogonalSegments: buildOrthogonalSegments,
     placeOrthogonalLabel: placeOrthogonalLabel,
+    findClearLabelPlacement: findClearLabelPlacement,
     simplifyOrthogonalPath: simplifyOrthogonalPath,
     measureOrthogonalRoute: measureOrthogonalRoute,
     countOrthogonalBends: countOrthogonalBends,
@@ -6812,6 +6892,18 @@
 
   // Relationship patterns ordered by specificity
   var REL_PATTERNS = [
+    { token: '*x-->', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '*x--x', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'non-navigable' },
+    { token: '*x--', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'unspecified' },
+    { token: '*<--x', type: 'composition', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+    { token: '*<--', type: 'composition', fromNavigability: 'navigable', toNavigability: 'unspecified' },
+    { token: 'ox-->', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: 'ox--x', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'non-navigable' },
+    { token: 'ox--', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'unspecified' },
+    { token: 'o<--x', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+    { token: 'o<--', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'unspecified' },
+    { token: 'x-->', type: 'association', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '<--x', type: 'association', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
     { token: '--|>', type: 'generalization' },
     { token: '<|--', type: 'generalization', reverse: true },
     { token: '..|>', type: 'realization' },
@@ -6839,7 +6931,6 @@
 
     // Tolerant aliases for mixed marker spelling seen in examples
     { token: '*<-->x', type: 'composition', navigability: 'non-navigable' },
-    { token: 'ox-->', type: 'aggregation', navigability: 'non-navigable' },
 
     // Association / Dependency
     { token: '<-->', type: 'association', navigability: 'bidirectional' },
@@ -6927,6 +7018,8 @@
         to: toName,
         type: pat.type,
         navigability: pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified'),
+        fromNavigability: pat.fromNavigability || (pat.navigability === 'bidirectional' ? 'navigable' : pat.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified'),
+        toNavigability: pat.toNavigability || (pat.type === 'navigable' || pat.navigability === 'navigable' || pat.navigability === 'bidirectional' ? 'navigable' : pat.navigability === 'non-navigable' || pat.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified'),
         label: label,
         labelDirection: labelDirection,
         fromMult: fromMult,
@@ -9252,6 +9345,32 @@
       }
     }
 
+    // A recursive association has two distinct ends on the same classifier.
+    // Keep its outside loop separate from the distinct-node simplifiers, which
+    // correctly collapse unnecessary U bends but would erase this relationship.
+    var selfRelationCounts = {};
+    function classSelfRoute(entry, relation) {
+      var index = selfRelationCounts[relation.from] || 0;
+      selfRelationCounts[relation.from] = index + 1;
+      var reach = Math.max(70, UMLShared.textWidth(relation.label || '', false, CFG.fontSize) + 28) + index * 26;
+      var x = entry.x, y = entry.y, w = entry.box.width, h = entry.box.height;
+      var candidates = [
+        [{x:x+w,y:y+h*.25},{x:x+w+reach,y:y+h*.25},{x:x+w+reach,y:y+h*.75},{x:x+w,y:y+h*.75}],
+        [{x:x,y:y+h*.25},{x:x-reach,y:y+h*.25},{x:x-reach,y:y+h*.75},{x:x,y:y+h*.75}],
+        [{x:x+w*.25,y:y},{x:x+w*.25,y:y-reach},{x:x+w*.75,y:y-reach},{x:x+w*.75,y:y}],
+        [{x:x+w*.25,y:y+h},{x:x+w*.25,y:y+h+reach},{x:x+w*.75,y:y+h+reach},{x:x+w*.75,y:y+h}]
+      ];
+      var skip = {}; skip[relation.from] = true;
+      var best = candidates[0], bestScore = Infinity;
+      candidates.forEach(function(points, sideIndex) {
+        var score = (UMLShared.routeHitsObstacle(points, classObstacles, skip, null) ? 100000 : 0) +
+          UMLShared.countRouteCrossings(points, classOccupiedSegments) * 1000 +
+          UMLShared.routeTrackOverlapLength(points, classOccupiedSegments) * 100 + sideIndex;
+        if (score < bestScore) { bestScore = score; best = points; }
+      });
+      return { points: best };
+    }
+
     // Draw other relationships with orthogonal (right-angle) routing
     for (var oi = 0; oi < otherRels.length; oi++) {
       var orel = otherRels[oi];
@@ -9285,7 +9404,8 @@
       // router explore all sides so it can avoid crossings and obstacles.
       var restrictSourceSide = forceCompactDependencyBelowSource;
 
-      var route = computeOrthogonalRoute(
+      var isSelfRelation = orel.from === orel.to;
+      var route = isSelfRelation ? classSelfRoute(fromE, orel) : computeOrthogonalRoute(
         fromE,
         toE,
         hasInheritAtBottom[orel.from],
@@ -9312,6 +9432,7 @@
       );
       var pathPoints = route.points; // array of {x,y}
       var safePathPoints = cloneClassRoutePoints(pathPoints);
+      if (!isSelfRelation) {
       // Apply reanchor only when route actually exits from top/bottom
       if ((orel.type === 'composition' || orel.type === 'aggregation') && pathPoints.length >= 2) {
         var actualExitSide = classEdgeForPoint(pathPoints[0], fromE, sourceSide);
@@ -9382,6 +9503,7 @@
         pathPoints = safePathPoints;
       }
 
+      }
       var markerPathPoints = pathPoints;
       var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
       var pLast = markerPathPoints[markerPathPoints.length - 1], pPrev = markerPathPoints[markerPathPoints.length - 2];
@@ -9448,7 +9570,7 @@
         sourceMarkerObstacles.push(sourceAggregationObstacle);
       }
 
-      if (orel.navigability === 'bidirectional') {
+      if (orel.fromNavigability === 'navigable' || orel.navigability === 'bidirectional') {
         var sourceArrowX = p0.x;
         var sourceArrowY = p0.y;
         if (orel.type === 'composition' || orel.type === 'aggregation') {
@@ -9461,8 +9583,10 @@
         var sourceArrowObstacle = pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceArrowObstacle);
         sourceMarkerObstacles.push(sourceArrowObstacle);
-      } else if (orel.navigability === 'non-navigable-both') {
-        var sourceCross = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'cross');
+      } else if (orel.fromNavigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
+        var sourceCrossGap = (orel.type === 'composition' || orel.type === 'aggregation')
+          ? CFG.diamondClassGap + CFG.diamondH * 1.12 + 8 : 0;
+        var sourceCross = offsetClassMarkerPoint(p0.x + startDx * sourceCrossGap, p0.y + startDy * sourceCrossGap, startDx, startDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, sourceCross.x, sourceCross.y, startDx, startDy, colors.line);
         var sourceCrossObstacle = pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceCrossObstacle);
@@ -9470,13 +9594,13 @@
       }
 
       // Target decorations (deferred to draw on top of class boxes)
-      if (orel.type === 'dependency' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
+      if (orel.type === 'dependency' || orel.toNavigability === 'navigable' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
         var targetArrow = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, targetArrow.x, targetArrow.y, endDx, endDy, colors.line);
         var targetArrowObstacle = pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(targetArrowObstacle);
         targetMarkerObstacles.push(targetArrowObstacle);
-      } else if (orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
+      } else if (orel.toNavigability === 'non-navigable' || orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
         var targetCross = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, targetCross.x, targetCross.y, endDx, endDy, colors.line);
         var targetCrossObstacle = pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6);
@@ -9808,6 +9932,7 @@
       function scoreNoteConnectorCandidate(candidate) {
         var points = UMLShared.simplifyOrthogonalPath(candidate);
         if (!points || points.length < 2) return null;
+        if (noteConnectorRetraces(points)) return null;
         if (!noteMemberApproachIsValid(points)) return null;
         if (UMLShared.routeHitsObstacle(points, hardModelObstacles, noteOnlySkipNames, null)) return null;
         var labelHit = UMLShared.routeHitsObstacle(points, placedLabels.concat(noteMarkerObstacles), null, null) ? 1 : 0;
@@ -9822,6 +9947,17 @@
             UMLShared.measureOrthogonalRoute(points) +
             UMLShared.countOrthogonalBends(points) * 28
         };
+      }
+
+      function noteConnectorRetraces(points) {
+        for (let i = 1; i < points.length - 1; i++) {
+          const before = points[i - 1], point = points[i], after = points[i + 1];
+          const firstX = point.x - before.x, firstY = point.y - before.y;
+          const nextX = after.x - point.x, nextY = after.y - point.y;
+          if (Math.abs(firstX * nextY - firstY * nextX) < 0.001 &&
+              firstX * nextX + firstY * nextY < -0.001) return true;
+        }
+        return false;
       }
 
       function noteMemberApproachIsValid(points) {
@@ -10017,7 +10153,11 @@
         connTo = slideNoteTargetEndpointOffMarkers(connTo, np2, 'x');
         connFrom.x = clampNote(connTo.x, np2.x + 8, np2.x + np2.w - 8);
       }
-      return { from: connFrom, to: connTo };
+      return {
+        from: connFrom,
+        to: connTo,
+        targetSide: memberTargetInset ? np2.note.position : null
+      };
     }
 
     var noteConnectorRoutes = [];
@@ -11112,7 +11252,7 @@
       }
 
       // Combined fragment: alt, loop, opt, break, par, critical, ref, neg
-      var fragMatch = line.match(/^(alt|loop|opt|break|par|critical|ref|neg)\s*(\[.*\])?(.*)$/i);
+      var fragMatch = line.match(/^(alt|loop|opt|break|par|critical|ref|neg)\b\s*(\[.*\])?(.*)$/i);
       if (fragMatch) {
         var fragType = fragMatch[1].toLowerCase();
         var condition = (fragMatch[2] || fragMatch[3] || '').trim();
@@ -11123,7 +11263,7 @@
       }
 
       // Else clause in alt
-      var elseMatch = line.match(/^else\s*(\[.*\])?(.*)$/i);
+      var elseMatch = line.match(/^else\b\s*(\[.*\])?(.*)$/i);
       if (elseMatch) {
         var elseCond = (elseMatch[1] || elseMatch[2] || '').trim();
         if (elseCond.startsWith('[')) elseCond = elseCond.substring(1);
@@ -11226,7 +11366,7 @@
         var msgType = 'sync'; // default
         var isDashed = false;
         if (arrow === '-->' || arrow === '<--') { msgType = 'response'; isDashed = true; }
-        else if (arrow === '->>' || arrow === '->>') { msgType = 'async'; }
+        else if (arrow === '->>' || arrow === '<<-') { msgType = 'async'; }
         else if (arrow === '->') { msgType = 'sync'; }
 
         messages.push({
@@ -12323,10 +12463,11 @@
 
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-    fontSize: 14,
-    fontSizeBold: 15,
-    fontSizeAction: 12,
-    lineHeight: 22,
+    fontSize: 20,
+    fontSizeBold: 20,
+    fontSizeAction: 20,
+    lineHeight: 28,
+    actionLineHeight: 28,
     padX: 20,
     padY: 10,
     stateMinW: 120,
@@ -12346,13 +12487,61 @@
 
   // ─── Parser ───────────────────────────────────────────────────────
 
+  // Expand the editor's inline state bodies without treating braces or
+  // semicolons in a normal action row as state structure.
+  function stateSourceLines(text) {
+    const result = [];
+    let inNote = false;
+    text.split('\n').forEach(function (line) {
+      if (inNote) {
+        result.push(line);
+        if (/^\s*end\s*note\s*$/i.test(line)) inNote = false;
+        return;
+      }
+      if (/^\s*note\s+(?:left|right|top|bottom|over)\s+(?:of\s+)?\S+\s*$/i.test(line)) inNote = true;
+      if (!/^\s*(?:state\b|})/.test(line)) { result.push(line); return; }
+      let statement = '';
+      let quoted = false;
+      let escaped = false;
+      let expressionDepth = 0;
+      const flush = function () {
+        if (statement.trim()) result.push(statement.trim());
+        statement = '';
+      };
+      for (const ch of line) {
+        if (escaped) { statement += ch; escaped = false; continue; }
+        if (ch === '\\' && quoted) { statement += ch; escaped = true; continue; }
+        if (ch === '"') quoted = !quoted;
+        if (!quoted) {
+          if (ch === '{' && /^\s*state\b/.test(statement)) {
+            statement += ch;
+            flush();
+            continue;
+          }
+          if (ch === '{') expressionDepth++;
+          if (ch === '}' && expressionDepth > 0) expressionDepth--;
+          else if (ch === '}' && expressionDepth === 0) {
+            flush();
+            result.push('}');
+            continue;
+          }
+          if (ch === ';' && expressionDepth === 0) { flush(); continue; }
+        }
+        statement += ch;
+      }
+      flush();
+    });
+    return result;
+  }
+
   function parse(text) {
-    var lines = text.split('\n');
-    var states = {};       // name -> { name, type, entryAction, exitAction, doActivity }
+    var lines = stateSourceLines(text);
+    var states = Object.create(null); // name -> state, retaining existing public IDs
+    var declaredStates = Object.create(null);
     var transitions = [];
     var notes = [];
     var inState = null;
-    var braceDepth = 0;
+    const stateStack = [];
     var direction = 'TB';
     var layoutPreference = null;
     var shadowEnabled = true;
@@ -12366,11 +12555,33 @@
       }
     }
 
+    function attachToCurrentState(name, declaration) {
+      if (declaration) {
+        declaredStates[name] = true;
+        if (!inState) { delete states[name].parent; return; }
+      } else if (declaredStates[name]) return;
+      if (!inState || name === inState || (states[name].parent && !declaration)) return;
+      // Invalid drafts may repeat an ancestor's identifier. Keep rendering
+      // them without introducing a cycle in the containment graph.
+      let ancestor = inState;
+      while (ancestor) {
+        if (ancestor === name) return;
+        ancestor = states[ancestor] && states[ancestor].parent;
+      }
+      states[name].parent = inState;
+      states[inState].isComposite = true;
+    }
+
     var actionProperties = { entry: 'entryAction', exit: 'exitAction', do: 'doActivity' };
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (line === '}') {
+        stateStack.pop();
+        inState = stateStack.length ? stateStack[stateStack.length - 1] : null;
+        continue;
+      }
 
       // Layout directive
       var layoutDirective = UMLShared.parseLayoutDirective(line);
@@ -12393,44 +12604,18 @@
         var actionState = namedAction[1];
         ensureState(actionState);
         states[actionState][actionProperties[namedAction[2].toLowerCase()]] = namedAction[3].trim();
-        if (inState !== null && actionState !== inState) {
-          states[actionState].parent = inState;
-          states[inState].isComposite = true;
-        }
+        attachToCurrentState(actionState);
         continue;
       }
 
       // Inside a state block
       if (inState !== null) {
-        for (var ci = 0; ci < line.length; ci++) {
-          if (line[ci] === '{') braceDepth++;
-          if (line[ci] === '}') braceDepth--;
-        }
-        if (braceDepth <= 0) {
-          inState = null;
-          braceDepth = 0;
-          continue;
-        }
         // Parse internal actions
         var blockAction = line.match(/^(entry|exit|do)\s*\/\s*(.+)$/i);
         if (blockAction) {
           states[inState][actionProperties[blockAction[1].toLowerCase()]] = blockAction[2].trim();
           continue;
         }
-        // Sub-transitions inside composite state
-        var subTrans = line.match(/^(\S+)\s+-->\s+((?:\[[^\]]*\]\s*)?)(\S+)((?:\s*\/[^:]*)?)\s*(?::\s*(.*))?$/);
-        if (subTrans) {
-          var sf = subTrans[1], sg = subTrans[2] ? subTrans[2].trim() : '', st = subTrans[3];
-          var sa = subTrans[4] ? subTrans[4].trim() : '', se = subTrans[5] ? subTrans[5].trim() : '';
-          ensureState(sf); ensureState(st);
-          states[sf].parent = inState; states[st].parent = inState;
-          states[inState].isComposite = true;
-          var slp = []; if (se) slp.push(se); if (sg) slp.push(sg); if (sa) slp.push(sa);
-          var subLabelInfo = UMLShared.parseLabelDirectionCue(slp.join(' '));
-          transitions.push({ from: sf, to: st, label: subLabelInfo.text, labelDirection: subLabelInfo.hasDirection, parent: inState });
-          continue;
-        }
-        continue;
       }
 
       // Note
@@ -12455,6 +12640,7 @@
       if (choiceMatch) {
         var cName = choiceMatch[1];
         ensureState(cName);
+        attachToCurrentState(cName, true);
         states[cName].type = 'choice';
         if (stateHighlight) states[cName].highlight = stateHighlight;
         if (stateTexture) states[cName].texture = stateTexture;
@@ -12466,15 +12652,12 @@
       if (stateMatch) {
         var sName = stateMatch[1];
         ensureState(sName);
+        attachToCurrentState(sName, true);
         if (stateHighlight) states[sName].highlight = stateHighlight;
         if (stateTexture) states[sName].texture = stateTexture;
         if (lineForState.indexOf('{') !== -1) {
-          braceDepth = 1;
-          if (lineForState.indexOf('}') !== -1 && lineForState.indexOf('}') > lineForState.indexOf('{')) {
-            braceDepth = 0;
-          } else {
-            inState = sName;
-          }
+          stateStack.push(sName);
+          inState = sName;
         }
         continue;
       }
@@ -12495,7 +12678,9 @@
         var stateLabelInfo = UMLShared.parseLabelDirectionCue(labelParts.join(' '));
         ensureState(from);
         ensureState(to);
-        transitions.push({ from: from, to: to, label: stateLabelInfo.text, labelDirection: stateLabelInfo.hasDirection });
+        attachToCurrentState(from);
+        attachToCurrentState(to);
+        transitions.push({ from: from, to: to, label: stateLabelInfo.text, labelDirection: stateLabelInfo.hasDirection, parent: inState });
         continue;
       }
     }
@@ -12550,6 +12735,18 @@
     // Remove the generic [*] placeholder
     delete states['[*]'];
 
+    // A reference never changes explicit declaration ownership. After forward
+    // declarations resolve, route each transition in the common enclosing
+    // region of its endpoints, including transitions that leave a composite.
+    transitions.forEach(function(transition) {
+      var ancestors = [null];
+      var parent = states[transition.from].parent || null;
+      while (parent) { ancestors.push(parent); parent = states[parent].parent || null; }
+      parent = states[transition.to].parent || null;
+      while (parent && ancestors.indexOf(parent) === -1) parent = states[parent].parent || null;
+      transition.parent = parent;
+    });
+
     // Convert to array
     var stateList = [];
     for (var sn in states) stateList.push(states[sn]);
@@ -12580,7 +12777,7 @@
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
     var height = CFG.padY * 2 + CFG.lineHeight;
-    if (hasActions) height += 4 + actionLines * 16; // divider + action lines
+    if (hasActions) height += 4 + actionLines * CFG.actionLineHeight;
 
     return { width: Math.ceil(width), height: Math.ceil(height), hasActions: hasActions, actionLines: actionLines };
   }
@@ -12630,6 +12827,37 @@
     }
   }
 
+  function computeStateLayout(nodes, edges, options) {
+    var result = window.UMLAdvancedLayout.compute(nodes, edges, options);
+    if (result.direction !== 'TB') return result;
+
+    // Branch labels need horizontal room between sibling paths as well as
+    // vertical room between ranks. A clear label placed outside the whole
+    // drawing would otherwise appear to describe an unrelated transition.
+    var branches = {};
+    edges.forEach(function(edge) {
+      var from = result.nodes[edge.source], to = result.nodes[edge.target];
+      if (!from || !to || to.y <= from.y) return;
+      if (!branches[edge.source]) branches[edge.source] = [];
+      branches[edge.source].push(edge);
+    });
+    var gap = options.gapX;
+    Object.keys(branches).forEach(function(source) {
+      if (branches[source].length < 2) return;
+      branches[source].forEach(function(edge) {
+        var transition = edge.data || {};
+        if (!transition.label) return;
+        gap = Math.max(gap, UMLShared.labelDirectionTextWidth(
+          transition.label, transition.labelDirection, CFG.fontSize
+        ) + CFG.fontSize * 2);
+      });
+    });
+    if (gap <= options.gapX) return result;
+    return window.UMLAdvancedLayout.compute(nodes, edges, Object.assign({}, options, {
+      gapX: gap, direction: result.direction, directionLocked: true
+    }));
+  }
+
   function computeLayout(parsed, colors) {
     var stateList = parsed.states;
     var transitions = parsed.transitions;
@@ -12648,6 +12876,11 @@
       }
     }
 
+    function scopeEndpoint(name, parent) {
+      while (childOf[name] && (childOf[name] || null) !== parent) name = childOf[name];
+      return name;
+    }
+
     // Measure all states (children get measured individually)
     for (var i = 0; i < stateList.length; i++) {
       var s = stateList[i];
@@ -12655,10 +12888,21 @@
       entries[s.name] = { state: s, box: box, x: 0, y: 0 };
     }
 
-    // For composite states, run sub-layout to compute their size
-    var compositeHeaderH = CFG.padY * 2 + CFG.lineHeight + 4; // header + divider
+    // Size descendants before their parents, then position parents before
+    // descendants. A child's full region must contribute to its parent's box.
+    function stateDepth(name) {
+      var depth = 0;
+      while (childOf[name]) { depth++; name = childOf[name]; }
+      return depth;
+    }
+    var compositeNames = Object.keys(compositeChildren).sort(function(a, b) {
+      return stateDepth(b) - stateDepth(a);
+    });
     var compositePad = 20;
-    for (var pName in compositeChildren) {
+    for (var parentIndex = 0; parentIndex < compositeNames.length; parentIndex++) {
+      var pName = compositeNames[parentIndex];
+      var parentHeader = measureState(entries[pName].state);
+      var compositeHeaderH = parentHeader.height + 4;
       var kids = compositeChildren[pName];
       var subNodes = [], subEdges = [];
       for (var ki = 0; ki < kids.length; ki++) {
@@ -12667,7 +12911,7 @@
       }
       for (var ti = 0; ti < transitions.length; ti++) {
         if (transitions[ti].parent === pName) {
-          subEdges.push({ source: transitions[ti].from, target: transitions[ti].to, type: 'navigable', data: transitions[ti] });
+          subEdges.push({ source: scopeEndpoint(transitions[ti].from, pName), target: scopeEndpoint(transitions[ti].to, pName), type: 'navigable', data: transitions[ti] });
         }
       }
       if (subNodes.length > 0) {
@@ -12686,7 +12930,7 @@
             });
           } catch (e) { /* keep default */ }
         }
-        var subResult = window.UMLAdvancedLayout.compute(subNodes, subEdges, {
+        var subResult = computeStateLayout(subNodes, subEdges, {
           gapX: Math.max(subFloor.minX, 14, Math.round(CFG.gapX * subGapScale)),
           gapY: Math.max(subFloor.minY, 14, Math.round(CFG.gapY * subGapScale)),
           direction: parsed.direction || 'TB',
@@ -12723,6 +12967,22 @@
             y: subResult.nodes[childId].y
           };
         }
+        function includeDescendants(parentId) {
+          var measured = entries[parentId];
+          if (!measured.subLayout) return;
+          var positioned = subEntries[parentId];
+          Object.keys(measured.subLayout.nodes).forEach(function(descendantId) {
+            var local = measured.subLayout.nodes[descendantId];
+            subEntries[descendantId] = {
+              state: entries[descendantId].state,
+              box: entries[descendantId].box,
+              x: positioned.x + measured.subOffset.x + local.x,
+              y: positioned.y + measured.subOffset.y + local.y
+            };
+            includeDescendants(descendantId);
+          });
+        }
+        kids.forEach(includeDescendants);
         var subDrawing = routeStateTransitions({
           entries: subEntries,
           layoutResult: subResult
@@ -12755,9 +13015,10 @@
         }
         var subW = sMaxX - sMinX + compositePad * 2;
         var subH = sMaxY - sMinY + compositePad * 2;
-        var compositeW = Math.max(subW, UMLShared.textWidth(pName, true, CFG.fontSizeBold) + CFG.padX * 2);
+        var compositeW = Math.max(subW, parentHeader.width);
         var compositeH = compositeHeaderH + subH;
-        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: false, actionLines: 0 };
+        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: parentHeader.hasActions, actionLines: parentHeader.actionLines };
+        entries[pName].headerHeight = compositeHeaderH;
         entries[pName].subLayout = subResult;
         entries[pName].subOffset = { x: -sMinX + compositePad, y: compositeHeaderH - sMinY + compositePad };
         entries[pName].subBounds = { w: subW, h: subH };
@@ -12775,7 +13036,7 @@
     for (var t = 0; t < transitions.length; t++) {
       var tr = transitions[t];
       if (tr.parent) continue; // skip sub-transitions
-      layoutEdges.push({ source: tr.from, target: tr.to, type: 'navigable', data: tr });
+      layoutEdges.push({ source: scopeEndpoint(tr.from, null), target: scopeEndpoint(tr.to, null), type: 'navigable', data: tr });
     }
 
     var stateGapX = CFG.gapX;
@@ -12805,7 +13066,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var result = computeStateLayout(layoutNodes, layoutEdges, {
       gapX: stateGapX,
       gapY: stateGapY,
       direction: parsed.direction || 'TB',
@@ -12831,9 +13092,18 @@
     }
 
     // Position children inside their composite parents
-    for (var pn in compositeChildren) {
+    for (var positionIndex = compositeNames.length - 1; positionIndex >= 0; positionIndex--) {
+      var pn = compositeNames[positionIndex];
       var pe = entries[pn];
       if (!pe.subLayout) continue;
+      // Saved coordinates are absolute. Apply each ancestor before deriving
+      // unsaved child positions; a nested parent's own position takes priority
+      // over the position inherited from its enclosing region.
+      var savedParentPosition = UMLShared.findLayoutPosition(parsed.layout, pn);
+      if (savedParentPosition) {
+        if (savedParentPosition.x !== undefined) pe.x = savedParentPosition.x;
+        if (savedParentPosition.y !== undefined) pe.y = savedParentPosition.y;
+      }
       var off = pe.subOffset;
       var ckids = compositeChildren[pn];
       for (var cki = 0; cki < ckids.length; cki++) {
@@ -12861,6 +13131,22 @@
   function stateLayoutAttrs(id) {
     return ' data-layout-id="' + UMLShared.escapeXml(id) + '"' +
       ' data-layout-bounds-id="' + UMLShared.escapeXml(id) + '"';
+  }
+
+  function drawStateActions(svg, entry, colors) {
+    if (!entry.box.hasActions) return;
+    var attrs = stateLayoutAttrs(entry.state.name);
+    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
+    svg.push('<line' + attrs + ' x1="' + entry.x + '" y1="' + dividerY + '" x2="' + (entry.x + entry.box.width) + '" y2="' + dividerY +
+      '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+    var actionY = dividerY + CFG.fontSizeAction;
+    [['entry', entry.state.entryAction], ['exit', entry.state.exitAction], ['do', entry.state.doActivity]].forEach(function(action) {
+      if (!action[1]) return;
+      svg.push('<text' + attrs + ' x="' + (entry.x + CFG.padX / 2) + '" y="' + actionY +
+        '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">' + action[0] + ' / ' +
+        UMLShared.escapeXml(action[1]) + '</text>');
+      actionY += CFG.actionLineHeight;
+    });
   }
 
   function stateTransitionsInScope(parsed, parent) {
@@ -13017,14 +13303,18 @@
     backEdgeList.sort(function(a, b) { return (a.far - a.near) - (b.far - b.near) || a.ti - b.ti; });
     for (var bri = 0; bri < backEdgeList.length; bri++) {
       var backRoute = backEdgeList[bri];
-      backRoute.lane = 0;
+      var margin = routeMargin;
       for (var previous = 0; previous < bri; previous++) {
         var occupiedRoute = backEdgeList[previous];
         if (backRoute.near < occupiedRoute.far && backRoute.far > occupiedRoute.near) {
-          backRoute.lane = Math.max(backRoute.lane, occupiedRoute.lane + 1);
+          var occupiedTransition = transitions[occupiedRoute.ti];
+          var labelSpace = occupiedTransition.label
+            ? (isTB ? UMLShared.labelDirectionTextWidth(occupiedTransition.label, occupiedTransition.labelDirection, CFG.fontSize) : CFG.fontSize + 6)
+            : 0;
+          margin = Math.max(margin, backEdgeMargin[occupiedRoute.ti] + Math.max(laneStep, labelSpace + 20));
         }
       }
-      backEdgeMargin[backRoute.ti] = routeMargin + backRoute.lane * laneStep;
+      backEdgeMargin[backRoute.ti] = margin;
     }
     var customTransitionTargets = {};
     function transitionTargetSide(ti) {
@@ -13681,7 +13971,9 @@
       if (!parent.subLayout) continue;
       var childEntries = {};
       for (var childId in entries) {
-        if (entries[childId].state.parent === parentId) childEntries[childId] = entries[childId];
+        var ancestor = entries[childId].state.parent;
+        while (ancestor && ancestor !== parentId) ancestor = entries[ancestor].state.parent;
+        if (ancestor === parentId) childEntries[childId] = entries[childId];
       }
       // Route again at the final coordinates: manual layout metadata may
       // move a child after its parent's automatic size was measured.
@@ -13769,7 +14061,15 @@
     svg = finalSvg;
 
     // ── Draw composite state backgrounds first ──
-    for (var cen in entries) {
+    var compositePaintOrder = Object.keys(entries).filter(function(id) { return entries[id].state.isComposite; });
+    function paintDepth(id) {
+      var depth = 0;
+      while (entries[id] && entries[id].state.parent) { depth++; id = entries[id].state.parent; }
+      return depth;
+    }
+    compositePaintOrder.sort(function(a, b) { return paintDepth(a) - paintDepth(b); });
+    for (var compositeIndex = 0; compositeIndex < compositePaintOrder.length; compositeIndex++) {
+      var cen = compositePaintOrder[compositeIndex];
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
       var cFills = UMLShared.highlightFills(colors, ce.state.highlight, ce.state.texture);
@@ -13788,8 +14088,9 @@
       svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + chY +
         '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(ce.state.name) + '</text>');
-      // Divider line
-      var cdY = ce.y + CFG.padY * 2 + CFG.lineHeight;
+      drawStateActions(svg, ce, colors);
+      // Separate the state's own behavior from its child region.
+      var cdY = ce.y + (ce.headerHeight || ce.box.height) - 4;
       svg.push('<line x1="' + ce.x + '" y1="' + cdY + '" x2="' + (ce.x + ce.box.width) + '" y2="' + cdY +
         '" stroke="' + colors.stroke + '" stroke-width="1"/>');
       svg.push('</g>');
@@ -13849,31 +14150,7 @@
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
           UMLShared.escapeXml(s.name) + '</text>');
 
-        // Internal actions
-        if (e.box.hasActions) {
-          var divY = e.y + CFG.padY * 2 + CFG.lineHeight;
-          svg.push('<line' + stateLayoutAttrs(en) + ' x1="' + e.x + '" y1="' + divY + '" x2="' + (e.x + e.box.width) + '" y2="' + divY +
-            '" stroke="' + colors.stroke + '" stroke-width="1"/>');
-
-          var actionY = divY + 14;
-          if (s.entryAction) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">entry / ' +
-              UMLShared.escapeXml(s.entryAction) + '</text>');
-            actionY += 16;
-          }
-          if (s.exitAction) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">exit / ' +
-              UMLShared.escapeXml(s.exitAction) + '</text>');
-            actionY += 16;
-          }
-          if (s.doActivity) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">do / ' +
-              UMLShared.escapeXml(s.doActivity) + '</text>');
-          }
-        }
+        drawStateActions(svg, e, colors);
       }
     }
 
@@ -13986,6 +14263,14 @@
   };
   var COMPONENT_CONNECTOR_LABEL_MAX_WIDTH = 180;
   var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
+
+  function componentPortBottomInset() {
+    var fontSize = CFG.fontSize - 1;
+    var label = UMLShared.labelTextRect('', 0, fontSize * 0.35, 'start', fontSize);
+    // Port labels share the square's center but extend farther downward.
+    // Leave the same four-pixel border clearance for both rendered shapes.
+    return Math.max(CFG.portSize / 2, label.bottom) + 4;
+  }
 
   // ─── Parser ───────────────────────────────────────────────────────
 
@@ -14548,7 +14833,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var layoutOptions = {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: parsed.direction || 'LR',
@@ -14557,8 +14842,32 @@
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
       edgeSizes: compEdgeSizes
-    });
-    var actualDirection = parsed.direction || result.direction || 'LR';
+    };
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, layoutOptions);
+
+    // Reserve parallel label lanes against the actual neighbor positions:
+    // container fit can choose a different orientation than the source asks
+    // for. Reflow once with that orientation held steady, so the reservation
+    // changes spacing without restarting the orientation decision.
+    var resizedForLabels = false;
+    for (const node of layoutNodes) {
+      const entry = entries[node.id];
+      if (entry.hasPorts || entry.standalonePort) continue;
+      const span = parallelComponentLabelSpan(node.id, connectors, result.nodes);
+      const width = Math.max(node.width, span.width);
+      const height = Math.max(node.height, span.height);
+      if (width === node.width && height === node.height) continue;
+      node.width = entry.box.width = width;
+      node.height = entry.box.height = height;
+      resizedForLabels = true;
+    }
+    if (resizedForLabels) {
+      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, Object.assign({}, layoutOptions, {
+        direction: result.direction || layoutOptions.direction,
+        directionLocked: true
+      }));
+    }
+    var actualDirection = result.direction || parsed.direction || 'LR';
 
     for (var n in result.nodes) {
       if (!entries[n]) continue;
@@ -15007,7 +15316,7 @@
       var centers = {};
       if (!sidePorts.length) return centers;
       var lower = portTop + portHalf + 4;
-      var upper = portTop + portAreaH - portHalf - 4;
+      var upper = portTop + portAreaH - componentPortBottomInset();
       if (sidePorts.length === 1) {
         var onlyKey = portKey(entry.comp.name, sidePorts[0]);
         var onlyDesiredY = averagePortY(onlyKey);
@@ -16049,8 +16358,9 @@
   }
 
   function buildComponentSideAnchors(connectors, entries) {
-    var exitGroups = {};
-    var entryGroups = {};
+    // Incoming and outgoing relationships share the same component face.
+    // Allocate them together so reciprocal links cannot reserve the same lane.
+    const sideGroups = {};
 
     function pushGroup(groupMap, key, item) {
       if (!groupMap[key]) groupMap[key] = [];
@@ -16066,7 +16376,7 @@
     }
 
     function assignAnchors(groupMap) {
-      var assigned = {};
+      const assigned = { exits: {}, entries: {} };
 
       for (var key in groupMap) {
         var splitAt = key.lastIndexOf(':');
@@ -16097,7 +16407,7 @@
             pos = axisStart + span * (i / (items.length - 1));
           }
 
-          assigned[items[i].index] = isVerticalSide
+          assigned[items[i].role][items[i].index] = isVerticalSide
             ? {
                 x: side === 'left' ? compEntry.x : compEntry.x + compEntry.box.width,
                 y: pos,
@@ -16129,18 +16439,15 @@
 
       if (!conn.fromPort) {
         var exitKey = conn.from + ':' + pref.fromSide;
-        pushGroup(exitGroups, exitKey, { index: ci, primary: exitPrimary, secondary: exitSecondary });
+        pushGroup(sideGroups, exitKey, { index: ci, role: 'exits', primary: exitPrimary, secondary: exitSecondary });
       }
       if (!conn.toPort) {
         var entryKey = conn.to + ':' + pref.toSide;
-        pushGroup(entryGroups, entryKey, { index: ci, primary: entryPrimary, secondary: entrySecondary });
+        pushGroup(sideGroups, entryKey, { index: ci, role: 'entries', primary: entryPrimary, secondary: entrySecondary });
       }
     }
 
-    return {
-      exits: assignAnchors(exitGroups),
-      entries: assignAnchors(entryGroups)
-    };
+    return assignAnchors(sideGroups);
   }
 
   function makeLabelRect(x, y, labelW, labelH, anchor) {
@@ -16151,6 +16458,36 @@
       top: y - labelH,
       bottom: y + 4
     };
+  }
+
+  function parallelComponentLabelSpan(componentName, connectors, positions) {
+    const groups = new Map();
+    for (const connector of connectors) {
+      if (connector.fromPort || connector.toPort || connector.from === connector.to) continue;
+      if (connector.from !== componentName && connector.to !== componentName) continue;
+      const peer = connector.from === componentName ? connector.to : connector.from;
+      const group = groups.get(peer) || { count: 0, width: 0, height: 0 };
+      group.count++;
+      if (connector.label) {
+        const metrics = componentLabelMetrics(connector.label, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+        group.width = Math.max(group.width, metrics.width);
+        group.height = Math.max(group.height, metrics.height);
+      }
+      groups.set(peer, group);
+    }
+    const span = { width: 0, height: 0 };
+    const component = positions[componentName];
+    if (!component) return span;
+    for (const [peerName, group] of groups) {
+      const peer = positions[peerName];
+      if (!peer || group.count < 2 || !group.width) continue;
+      // Match the side choice used for component relationship anchors.
+      const dx = peer.x + peer.width / 2 - component.x - component.width / 2;
+      const dimension = Math.abs(dx) > 5 ? 'height' : 'width';
+      const laneGap = group[dimension] + CFG.fontSize * 2 + 4;
+      span[dimension] = Math.max(span[dimension], Math.ceil((group.count - 1) * laneGap + COMPONENT_SIDE_ANCHOR_PAD * 2));
+    }
+    return span;
   }
 
   function componentLabelTokens(label, fontSize, maxWidth) {
@@ -16166,10 +16503,12 @@
 
       if (token.indexOf('/') >= 0) {
         var parts = token.split('/').filter(Boolean);
-        for (var pi = 0; pi < parts.length; pi++) {
-          pushSizedToken('/' + parts[pi]);
+        if (parts.length > 1) {
+          for (var pi = 0; pi < parts.length; pi++) {
+            tokens.push('/' + parts[pi]);
+          }
+          return;
         }
-        return;
       }
 
       // A single identifier is more readable slightly over budget than split
@@ -16440,7 +16779,6 @@
 
     var fractions = [0.5, 0.35, 0.65, 0.22, 0.78];
     var best = null;
-    var bestSoft = null;
 
     for (var gi = 0; gi < segments.length; gi++) {
       var segment = segments[gi];
@@ -16492,11 +16830,7 @@
             lines: metrics.lines
           };
 
-          // Prefer a clear label on any segment over an overlapping label on
-          // a longer segment. Keep the latter only when no clear candidate exists.
-          if (hitsSegments) {
-            if (!bestSoft || candidate.score > bestSoft.score) bestSoft = candidate;
-          } else if (!best || candidate.score > best.score) {
+          if (!hitsSegments && (!best || candidate.score > best.score)) {
             best = candidate;
           }
         }
@@ -16504,7 +16838,6 @@
     }
 
     if (best) return best;
-    if (bestSoft) return bestSoft;
     if (!segments.length) return null;
 
     var fallbackSeg = segments[0];
@@ -16513,11 +16846,25 @@
     var fallbackY = fallbackSeg.isH
       ? (opts.preferredVerticalSide === 'below' ? fallbackSeg.y + cfg.fontSize + 12 : fallbackSeg.y - 10 - (metrics.lines.length - 1) * metrics.lineHeight)
       : (fallbackSeg.y1 + fallbackSeg.y2) / 2 - ((metrics.lines.length - 1) * metrics.lineHeight) / 2;
+    // Crowded parallel routes can exhaust the preferred slots. Reserve the
+    // complete multiline box before looking beyond them; never return a
+    // midpoint that covers another label, component, or connector.
+    const exclusions = obstacles.map(function(obstacle) {
+      return { rect: componentObstacleRect(obstacle), pad: 6 };
+    }).filter(function(exclusion) { return exclusion.rect; });
+    placedLabels.forEach(function(rect) { exclusions.push({ rect: rect, pad: 8 }); });
+    routeSegments.forEach(function(segment) {
+      exclusions.push({ rect: segment.isH
+        ? { left: segment.x1, right: segment.x2, top: segment.y, bottom: segment.y }
+        : { left: segment.x, right: segment.x, top: segment.y1, bottom: segment.y2 }, pad: 3 });
+    });
+    const clear = UMLShared.findClearLabelPlacement(
+      makeComponentLabelRect(fallbackX, fallbackY, metrics, fallbackAnchor), exclusions);
     return {
-      x: fallbackX,
-      y: fallbackY,
+      x: fallbackX + clear.dx,
+      y: fallbackY + clear.dy,
       anchor: fallbackAnchor,
-      rect: makeComponentLabelRect(fallbackX, fallbackY, metrics, fallbackAnchor),
+      rect: clear.rect,
       score: -Infinity,
       lines: metrics.lines
     };
@@ -17012,7 +17359,7 @@
       var portAreaH = entry.box.height - (entry.hasPorts ? headerHeight : 0);
       var halfPort = CFG.portSize / 2;
       var lower = portTop + halfPort + 4;
-      var upper = portTop + portAreaH - halfPort - 4;
+      var upper = portTop + portAreaH - componentPortBottomInset();
       var minGap = Math.max(CFG.portSize + 8, CFG.portPad * 0.72);
 
       if (portIdx > 0) {
@@ -17984,6 +18331,43 @@
       }
     })();
 
+    // Align local port pairs before reserving routes. Moving one pair can free
+    // a neighbor's spacing bound; routing first would freeze that neighbor's
+    // now-avoidable dogleg. Each successful pair stays aligned, so at most one
+    // pass per connector is needed to propagate the newly available room.
+    function alignFacingComponentPorts(conn) {
+      if (!conn.fromPort || !conn.toPort) return false;
+      const sourceEntry = entries[conn.from];
+      const targetEntry = entries[conn.to];
+      const sourceBounds = getPortMovementBounds(sourceEntry, conn.fromPort);
+      const targetBounds = getPortMovementBounds(targetEntry, conn.toPort);
+      if (!sourceBounds || !targetBounds) return false;
+      const source = sourceBounds.pos;
+      const target = targetBounds.pos;
+      if (source.kind || target.kind || source.standalone || target.standalone ||
+          Math.abs(source.cy - target.cy) < 0.75) return false;
+      const facesRight = source.side === 'right' && target.side === 'left' && source.connX < target.connX;
+      const facesLeft = source.side === 'left' && target.side === 'right' && source.connX > target.connX;
+      if (!facesRight && !facesLeft) return false;
+      const lower = Math.max(sourceBounds.lower, targetBounds.lower);
+      const upper = Math.min(sourceBounds.upper, targetBounds.upper);
+      if (lower > upper) return false;
+      const laneY = Math.max(lower, Math.min(upper, source.cy));
+      const route = [{ x: source.connX, y: laneY }, { x: target.connX, y: laneY }];
+      const skipNames = { [conn.from]: true, [conn.to]: true };
+      if (routeHitsObstacle(route, obstacles, skipNames, null)) return false;
+      const movedSource = movePortPositionToY(sourceEntry, conn.fromPort, laneY);
+      const movedTarget = movePortPositionToY(targetEntry, conn.toPort, laneY);
+      return !!(movedSource || movedTarget);
+    }
+    for (let pass = 0; pass < connectors.length; pass++) {
+      let moved = false;
+      for (const connector of connectors) {
+        if (alignFacingComponentPorts(connector)) moved = true;
+      }
+      if (!moved) break;
+    }
+
     var connectorPortSlotYs = {};
     var sharedPortSlotGroups = [];
     (function buildSharedPortSlots() {
@@ -18535,8 +18919,9 @@
           if (snapEntry && snapAlias && snapEntry.portPositions && snapEntry.portPositions[snapAlias]) {
             var snapPos = snapEntry.portPositions[snapAlias];
             var snapBounds = getPortMovementBounds(snapEntry, snapAlias);
-            // Allow snap if within bounds OR if the dogleg is tiny (cosmetic jog ≤ 6px)
-            var canSnap = dgVLen <= 6 || (snapBounds && snapY >= snapBounds.lower && snapY <= snapBounds.upper);
+            // Cosmetic cleanup obeys the same fixed-position and spacing
+            // bounds as every other port movement.
+            var canSnap = snapBounds && snapY >= snapBounds.lower && snapY <= snapBounds.upper;
             if (canSnap) {
               var straightLine = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
               if (!routeHitsObstacle(straightLine, obstacles, skipN, null)) {
@@ -19657,16 +20042,16 @@
 
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-    fontSize: 14,
-    fontSizeBold: 15,
-    fontSizeComp: 13,
-    lineHeight: 22,
+    fontSize: 20,
+    fontSizeBold: 20,
+    fontSizeComp: 20,
+    lineHeight: 28,
     nodePadX: 20,
     nodePadY: 14,
-    nodeMinW: 160,
-    nodeMinH: 60,
+    nodeMinW: 180,
+    nodeMinH: 70,
     node3dDepth: 12,
-    compH: 26,
+    compH: 36,
     compPadX: 10,
     compIconW: 14,
     compIconH: 10,
@@ -19686,7 +20071,6 @@
   function parse(text) {
     var lines = text.split('\n');
     var nodes = [];
-    var nodeMap = {};
     var links = [];
     var notes = [];
     var currentNode = null;
@@ -19694,12 +20078,68 @@
     var direction = 'TB';
     var layoutPreference = null;
 
-    function addNodeChild(nodeName, childLine) {
-      var child = String(childLine || '').trim();
-      var childMatch = child.match(/^(component|artifact)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?/i);
-      if (childMatch && nodeMap[nodeName]) {
-        nodeMap[nodeName].components.push(childMatch[4] || childMatch[2] || childMatch[3]);
+    var elements = [];
+    var elementMap = Object.create(null);
+    function unquote(value) {
+      return String(value || '').replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1');
+    }
+    function addElement(declaration, parentId) {
+      var highlight = UMLShared.parseHighlightColor(declaration);
+      if (!/^(node|component|artifact)\s+\S/i.test(highlight.stripped)) {
+        highlight = { stripped: declaration, highlight: null, texture: null };
       }
+      var match = highlight.stripped.match(/^(node|component|artifact)\s+("(?:\\.|[^"\\])*"|[^\s{}]+)(?:\s+as\s+("(?:\\.|[^"\\])*"|[^\s{}]+))?(?:\s+<<([^>]+)>>)?/i);
+      if (!match) return null;
+      var kind = match[1].toLowerCase();
+      if (parentId && kind === 'node') return null; // Nested deployment nodes are outside this renderer's subset.
+      var label = unquote(match[2]);
+      var id = unquote(match[3] || match[2]);
+      var element = elementMap[id];
+      if (!element) {
+        element = { name: id, label: label, kind: kind, parentId: parentId || null, stereotype: match[4] || '',
+          isInstance: label.indexOf(':') !== -1, components: [], children: [], highlight: highlight.highlight, texture: highlight.texture };
+        elementMap[id] = element;
+        elements.push(element);
+        if (kind === 'node') nodes.push(element);
+        if (parentId && elementMap[parentId]) {
+          elementMap[parentId].components.push(id);
+          elementMap[parentId].children.push(element);
+        }
+      }
+      return element;
+    }
+
+    function readDeploymentDeclarations(line) {
+      var parts = [], statement = '', quoted = false, escaped = false;
+      for (var ci = 0; ci < line.length; ci++) {
+        var character = line[ci];
+        if (escaped) { statement += character; escaped = false; continue; }
+        if (quoted && character === '\\') { statement += character; escaped = true; continue; }
+        if (character === '"') { quoted = !quoted; statement += character; continue; }
+        if (!quoted && /[{};]/.test(character)) {
+          if (statement.trim()) parts.push(statement.trim());
+          statement = '';
+          if (character !== ';') parts.push(character);
+        } else statement += character;
+      }
+      if (statement.trim()) parts.push(statement.trim());
+      var lastDeclaration = null;
+      parts.forEach(function(part) {
+        if (part === '{') {
+          if (currentNode !== null) braceDepth++;
+          else if (lastDeclaration && lastDeclaration.kind === 'node') {
+            currentNode = lastDeclaration.name;
+            braceDepth = 1;
+          }
+          lastDeclaration = null;
+        } else if (part === '}') {
+          if (currentNode !== null && --braceDepth <= 0) {
+            currentNode = null;
+            braceDepth = 0;
+          }
+          lastDeclaration = null;
+        } else lastDeclaration = addElement(part, currentNode);
+      });
     }
 
     for (var i = 0; i < lines.length; i++) {
@@ -19718,85 +20158,47 @@
         continue;
       }
 
-      // Inside a node block
-      if (currentNode !== null) {
-        for (var ci = 0; ci < line.length; ci++) {
-          if (line[ci] === '{') braceDepth++;
-          if (line[ci] === '}') braceDepth--;
-        }
-        if (braceDepth <= 0) {
-          currentNode = null;
-          braceDepth = 0;
-          continue;
-        }
-        addNodeChild(currentNode, line);
-        continue;
-      }
-
-      // Strip optional trailing `#color` highlight.
-      // Guard against swallowing a node named after a texture keyword.
-      var depHl = UMLShared.parseHighlightColor(line);
-      var depLine = line;
-      var depHighlight = null;
-      var depTexture = null;
-      if (/^node\s+\S/i.test(depHl.stripped) || depHl.highlight) {
-        depLine = depHl.stripped;
-        depHighlight = depHl.highlight;
-        depTexture = depHl.texture;
-      }
-
-      // Node declaration
-      var nodeMatch = depLine.match(/^node\s+(\S+)\s*\{?/);
-      if (nodeMatch) {
-        var nName = nodeMatch[1];
-        if (!nodeMap[nName]) {
-          // Support instance notation: "instanceName:TypeName" (underlined per UML spec Fig 9-3)
-          var isInstance = nName.indexOf(':') !== -1;
-          nodeMap[nName] = { name: nName, isInstance: isInstance, components: [], highlight: depHighlight, texture: depTexture };
-          nodes.push(nodeMap[nName]);
-        } else {
-          if (depHighlight) nodeMap[nName].highlight = depHighlight;
-          if (depTexture) nodeMap[nName].texture = depTexture;
-        }
-        if (depLine.indexOf('{') !== -1) {
-          braceDepth = 1;
-          if (depLine.indexOf('}') !== -1 && depLine.indexOf('}') > depLine.indexOf('{')) {
-            var inlineBody = depLine.substring(depLine.indexOf('{') + 1, depLine.lastIndexOf('}'));
-            var pieces = inlineBody.split(/[;\n]/);
-            for (var depi = 0; depi < pieces.length; depi++) addNodeChild(nName, pieces[depi]);
-            braceDepth = 0;
-          } else {
-            currentNode = nName;
-          }
-        }
-        continue;
-      }
-
-      // Note
+      // Notes and comments are literal content, including any braces in them.
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
+      if (/^(?:\/\/|'|#)/.test(line)) continue;
+
+      // Braces and separators are structural only outside quoted names.
+      if (currentNode !== null || /^(?:node|component|artifact)\s/i.test(line)) {
+        readDeploymentDeclarations(line);
+        continue;
+      }
 
       // Link: A --> B : label  or  A ..> B : label
-      var linkMatch = line.match(/^(\S+)\s+(-->|\.\.>|--)\s+(\S+)\s*(?::\s*(.*))?$/);
+      var linkMatch = line.match(/^("(?:\\.|[^"\\])*"|\S+)\s+(-->|\.\.>|--)\s+("(?:\\.|[^"\\])*"|\S+?)(?:\s+(dashed))?\s*(?::\s*(.*))?$/);
       if (linkMatch) {
-        var from = linkMatch[1], arrow = linkMatch[2], to = linkMatch[3];
-        var linkLabelInfo = UMLShared.parseLabelDirectionCue(linkMatch[4] || '');
-        // Ensure nodes exist
-        if (!nodeMap[from]) { nodeMap[from] = { name: from, isInstance: from.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[from]); }
-        if (!nodeMap[to]) { nodeMap[to] = { name: to, isInstance: to.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[to]); }
+        var from = unquote(linkMatch[1]), arrow = linkMatch[2], to = unquote(linkMatch[3]);
+        var linkLabelInfo = UMLShared.parseLabelDirectionCue(linkMatch[5] || '');
         var type = arrow === '..>' ? 'dependency' : 'link';
-        links.push({ from: from, to: to, type: type, label: linkLabelInfo.text, labelDirection: linkLabelInfo.hasDirection });
+        links.push({ from: from, to: to, type: type, arrow: arrow, dashed: arrow === '..>' || !!linkMatch[4], sourceIndex: i,
+          label: linkLabelInfo.text, labelDirection: linkLabelInfo.hasDirection });
         continue;
       }
     }
 
-    return { nodes: nodes, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
+    // Resolve undeclared endpoints after reading declarations, so a forward
+    // reference to an artifact never manufactures a second, cube-shaped node.
+    links.forEach(function(link) {
+      [link.from, link.to].forEach(function(id) {
+        if (!elementMap[id]) addElement('node "' + id.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"', null);
+      });
+    });
+    return { nodes: nodes, elements: elements, elementMap: elementMap, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
   }
 
   // ─── Layout ───────────────────────────────────────────────────────
 
+  function deploymentChildHeight(element) {
+    return CFG.compH + (element.kind === 'artifact' || element.stereotype ? CFG.lineHeight : 0);
+  }
+
   function computeLayout(parsed) {
-    var nodes = parsed.nodes;
+    var nodes = parsed.elements.filter(function(element) { return !element.parentId; });
     var links = parsed.links;
     if (nodes.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
 
@@ -19806,25 +20208,35 @@
 
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i];
-      var nameW = UMLShared.textWidth(n.name, true, CFG.fontSizeBold);
+      var nameW = UMLShared.textWidth(n.label, true, CFG.fontSizeBold);
+      var stereotype = n.kind === 'artifact' ? 'artifact' : n.stereotype;
+      if (stereotype) nameW = Math.max(nameW, UMLShared.textWidth('«' + stereotype + '»', false, CFG.fontSize));
       var compMaxW = 0;
-      for (var c = 0; c < n.components.length; c++) {
-        compMaxW = Math.max(compMaxW, UMLShared.textWidth(n.components[c], false, CFG.fontSizeComp) + CFG.compIconW + CFG.compPadX * 2 + 8);
+      for (var c = 0; c < n.children.length; c++) {
+        var child = n.children[c];
+        var childTextWidth = UMLShared.textWidth(child.label, false, CFG.fontSizeComp);
+        var childStereotype = child.kind === 'artifact' ? 'artifact' : child.stereotype;
+        if (childStereotype) childTextWidth = Math.max(childTextWidth, UMLShared.textWidth('«' + childStereotype + '»', false, CFG.fontSizeComp));
+        compMaxW = Math.max(compMaxW, childTextWidth + CFG.compIconW + CFG.compPadX * 2 + 8);
       }
       var w = Math.max(CFG.nodeMinW, nameW + CFG.nodePadX * 2, compMaxW + CFG.nodePadX * 2);
-      var h = CFG.nodePadY + CFG.lineHeight + 8; // name area
-      if (n.components.length > 0) {
-        h += n.components.length * (CFG.compH + CFG.compGapY) + CFG.nodePadY;
+      var headerHeight = CFG.nodePadY + CFG.lineHeight + (stereotype ? CFG.lineHeight : 0) + 8;
+      var h = headerHeight;
+      if (n.children.length > 0) {
+        n.children.forEach(function(child) { h += deploymentChildHeight(child) + CFG.compGapY; });
+        h += CFG.nodePadY;
       } else {
         h = Math.max(h + CFG.nodePadY, CFG.nodeMinH);
       }
-      entries[n.name] = { node: n, box: { width: Math.ceil(w), height: Math.ceil(h) }, x: 0, y: 0 };
+      entries[n.name] = { node: n, headerHeight: headerHeight, box: { width: Math.ceil(w), height: Math.ceil(h) }, x: 0, y: 0 };
       layoutNodes.push({ id: n.name, width: Math.ceil(w), height: Math.ceil(h), data: n });
     }
 
     for (var li = 0; li < links.length; li++) {
       var lk = links[li];
-      layoutEdges.push({ source: lk.from, target: lk.to, type: lk.type, data: lk });
+      var fromRoot = parsed.elementMap[lk.from].parentId || lk.from;
+      var toRoot = parsed.elementMap[lk.to].parentId || lk.to;
+      if (fromRoot !== toRoot) layoutEdges.push({ source: fromRoot, target: toRoot, type: lk.type, data: lk });
     }
 
     // Compute link label widths for gap sizing
@@ -19864,7 +20276,7 @@
       if (!dlk || dlk.from === dlk.to) continue;
       var dlw = (dlk.label || dlk.labelDirection) ? UMLShared.labelDirectionTextWidth(dlk.label, dlk.labelDirection, CFG.fontSize) : 0;
       depEdgeSizes.push({
-        source: dlk.from, target: dlk.to,
+        source: parsed.elementMap[dlk.from].parentId || dlk.from, target: parsed.elementMap[dlk.to].parentId || dlk.to,
         labelWidth: dlw,
         labelHeight: (dlk.label || dlk.labelDirection) ? depLineHeight : 0,
         markerExtent: CFG.arrowSize + CFG.node3dDepth,
@@ -19889,11 +20301,26 @@
       entries[nm].y = result.nodes[nm].y;
     }
 
+    // Apply parent positions before constructing and routing child geometry.
+    // This keeps a connector attached to a contained artifact when its host moves.
+    UMLShared.applyLayoutPositions({ entries: entries }, parsed.layout);
+    nodes.forEach(function(node) {
+      var parent = entries[node.name];
+      var childY = parent.y + parent.headerHeight;
+      node.children.forEach(function(child) {
+        entries[child.name] = { node: child, x: parent.x + CFG.nodePadX, y: childY,
+          box: { width: parent.box.width - CFG.nodePadX * 2, height: deploymentChildHeight(child) } };
+        childY += deploymentChildHeight(child) + CFG.compGapY;
+      });
+    });
+    UMLShared.applyLayoutPositions({ entries: entries }, parsed.layout);
+
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var en in entries) {
       var e = entries[en];
-      minX = Math.min(minX, e.x); minY = Math.min(minY, e.y - CFG.node3dDepth);
-      maxX = Math.max(maxX, e.x + e.box.width + CFG.node3dDepth);
+      var depth = e.node.kind === 'node' ? CFG.node3dDepth : 0;
+      minX = Math.min(minX, e.x); minY = Math.min(minY, e.y - depth);
+      maxX = Math.max(maxX, e.x + e.box.width + depth);
       maxY = Math.max(maxY, e.y + e.box.height);
     }
 
@@ -19951,7 +20378,9 @@
     var labelSvg = [];
     var placedLabels = [];
     var placedRouteSegments = [];
-    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+    // Saved positions and connector points share SVG coordinates; content
+    // fitting adjusts the viewBox instead of translating the drawing root.
+    svg.push(UMLShared.svgOpen(svgW, svgH, 0, 0, CFG.fontFamily));
     // ── Pre-compute distributed exit/entry points ──
     var exitsByFrom = {}, entriesByTo = {};
     for (var pli = 0; pli < links.length; pli++) {
@@ -20014,10 +20443,11 @@
     var obstacles = [];
     for (var obn in entries) {
       var obe = entries[obn];
+      var obstacleDepth = obe.node.kind === 'node' ? CFG.node3dDepth : 0;
       obstacles.push({
         x1: obe.x - obPad,
-        y1: obe.y - CFG.node3dDepth - obPad,
-        x2: obe.x + obe.box.width + CFG.node3dDepth + obPad,
+        y1: obe.y - obstacleDepth - obPad,
+        x2: obe.x + obe.box.width + obstacleDepth + obPad,
         y2: obe.y + obe.box.height + obPad,
         name: obn
       });
@@ -20168,6 +20598,33 @@
       };
     }
 
+    function deploymentEndpointObstacle(entry, side) {
+      // Keep endpoint interiors blocked even though their padded routing
+      // obstacles are skipped. During grid search reserve the outer approach
+      // too, so the path cannot reach a stub through its own node and retrace
+      // the final arrow segment.
+      var approach = 18;
+      return {
+        x1: entry.x - (side === 'left' ? approach : 0),
+        y1: entry.y - (side === 'top' ? approach : 0),
+        x2: entry.x + entry.box.width + (side === 'right' ? approach : 0),
+        y2: entry.y + entry.box.height + (side === 'bottom' ? approach : 0)
+      };
+    }
+
+    function deploymentEndpointObstacles(fromEntry, toEntry, sourceSide, targetSide) {
+      var endpointObstacles = [];
+      // A containing node is permeable when the relationship addresses one
+      // of its children. The nested component still remains an obstacle.
+      if (toEntry.node.parentId !== fromEntry.node.name) {
+        endpointObstacles.push(deploymentEndpointObstacle(fromEntry, sourceSide));
+      }
+      if (fromEntry.node.parentId !== toEntry.node.name) {
+        endpointObstacles.push(deploymentEndpointObstacle(toEntry, targetSide));
+      }
+      return endpointObstacles;
+    }
+
     // ── Draw links ──
     var occupiedSegments = { h: [], v: [] };
     for (var li = 0; li < links.length; li++) {
@@ -20175,7 +20632,7 @@
       var fromE = entries[lk.from], toE = entries[lk.to];
       if (!fromE || !toE) continue;
 
-      var isDash = lk.type === 'dependency';
+      var isDash = lk.dashed;
       var dAttr = isDash ? ' stroke-dasharray="8,4"' : '';
 
       var sourceCenterX = fromE.x + fromE.box.width / 2;
@@ -20186,6 +20643,9 @@
       var skipN = {};
       skipN[lk.from] = true;
       skipN[lk.to] = true;
+      var routeObstacles = obstacles.concat(deploymentEndpointObstacles(fromE, toE));
+      if (fromE.node.parentId) skipN[fromE.node.parentId] = true;
+      if (toE.node.parentId) skipN[toE.node.parentId] = true;
 
       var sourceSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, true);
       var targetSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, false);
@@ -20206,6 +20666,7 @@
           (sourceSide === 'top' || sourceSide === 'bottom') ? sourcePreferredX : sourcePreferredY
         );
         for (var sai = 0; sai < sourceAnchors.length; sai++) {
+          sourceAnchors[sai].stub = toE.node.parentId === lk.from ? 0 : 18;
           sourceCandidates.push({ anchor: sourceAnchors[sai], sideRank: ssi, anchorRank: sai });
         }
       }
@@ -20218,6 +20679,7 @@
           (targetSide === 'top' || targetSide === 'bottom') ? targetPreferredX : targetPreferredY
         );
         for (var tai = 0; tai < targetAnchors.length; tai++) {
+          targetAnchors[tai].stub = fromE.node.parentId === lk.to ? 0 : 18;
           targetCandidates.push({ anchor: targetAnchors[tai], sideRank: tsi, anchorRank: tai });
         }
       }
@@ -20227,15 +20689,19 @@
         var sourceCandidate = sourceCandidates[sci];
         for (var tci = 0; tci < targetCandidates.length; tci++) {
           var targetCandidate = targetCandidates[tci];
-          var routed = UMLShared.routeOrthogonalConnector(sourceCandidate.anchor, targetCandidate.anchor, obstacles, {
+          var searchObstacles = obstacles.concat(deploymentEndpointObstacles(
+            fromE, toE, sourceCandidate.anchor.side, targetCandidate.anchor.side));
+          var routed = UMLShared.routeOrthogonalConnector(sourceCandidate.anchor, targetCandidate.anchor, searchObstacles, {
             skipNames: skipN,
             occupied: occupiedSegments,
+            stub: 18,
             clearance: 10,
             bendPenalty: 44,
             extraXs: routeExtraXs,
             extraYs: routeExtraYs
           });
           if (!routed || !routed.points || routed.points.length < 2) continue;
+          if (UMLShared.routeHitsObstacle(routed.points, routeObstacles, skipN, null)) continue;
 
           var crosses = UMLShared.countRouteCrossings(routed.points, occupiedSegments);
           var score = routed.length + routed.bends * 40 + crosses * 5000;
@@ -20260,7 +20726,7 @@
       var points = bestRoute ? bestRoute.points : UMLShared.routeOrthogonalConnector(
         buildDeploymentAnchorCandidates(fromE, sourceSideOrder[0], sourceSideOrder[0] === 'top' || sourceSideOrder[0] === 'bottom' ? sourcePreferredX : sourcePreferredY)[0],
         buildDeploymentAnchorCandidates(toE, targetSideOrder[0], targetSideOrder[0] === 'top' || targetSideOrder[0] === 'bottom' ? targetPreferredX : targetPreferredY)[0],
-        obstacles,
+        routeObstacles,
         {
           skipNames: skipN,
           extraXs: routeExtraXs,
@@ -20272,7 +20738,7 @@
           points,
           buildDeploymentEndpointSlideAnchor(fromE, points[0], bestRoute ? bestRoute.sourceSide : sourceSideOrder[0]),
           buildDeploymentEndpointSlideAnchor(toE, points[points.length - 1], bestRoute ? bestRoute.targetSide : targetSideOrder[0]),
-          obstacles,
+          routeObstacles,
           skipN,
           occupiedSegments
         );
@@ -20308,7 +20774,9 @@
 
       var pStr = '';
       for (var pi = 0; pi < points.length; pi++) { if (pi > 0) pStr += ' '; pStr += points[pi].x + ',' + points[pi].y; }
-      svg.push('<polyline points="' + pStr + '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+      svg.push('<polyline points="' + pStr + '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
+        '" data-layout-route-id="rel:' + lk.sourceIndex + '" data-layout-source="' + UMLShared.escapeXml(lk.from) +
+        '" data-layout-target="' + UMLShared.escapeXml(lk.to) + '"' + dAttr + '/>');
 
       // Arrowhead
       var pLast = points[points.length - 1], pPrev = points[points.length - 2];
@@ -20316,18 +20784,12 @@
       var alen = Math.sqrt(adx * adx + ady * ady);
       if (alen > 0) { adx /= alen; ady /= alen; }
       var as = CFG.arrowSize, hw = as * 0.35, px = -ady, py = adx;
-      if (isDash) {
+      if (lk.arrow !== '--') {
         svg.push('<polyline points="' +
           (pLast.x - adx * as + px * hw) + ',' + (pLast.y - ady * as + py * hw) + ' ' +
           pLast.x + ',' + pLast.y + ' ' +
           (pLast.x - adx * as - px * hw) + ',' + (pLast.y - ady * as - py * hw) +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-      } else {
-        svg.push('<polygon points="' +
-          pLast.x + ',' + pLast.y + ' ' +
-          (pLast.x - adx * as + px * hw) + ',' + (pLast.y - ady * as + py * hw) + ' ' +
-          (pLast.x - adx * as - px * hw) + ',' + (pLast.y - ady * as - py * hw) +
-          '" fill="' + colors.line + '"/>');
       }
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
@@ -20365,83 +20827,58 @@
       placedRouteSegments = placedRouteSegments.concat(routeSegments);
     }
 
-    // ── Draw nodes (3D cube style) ──
+    // Element shapes sit behind relationships, including routes leaving an
+    // artifact inside a node. Every element has its own stable selection bounds.
+    var elementSvg = [];
     for (var en in entries) {
       var e = entries[en];
       var n = e.node;
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
       var d = CFG.node3dDepth;
       var nodeFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
-
-      svg.push('<g filter="url(#uml-node-shadow)">');
-
-      // 3D effect: top face (parallelogram)
-      svg.push('<polygon points="' +
-        bx + ',' + by + ' ' +
-        (bx + d) + ',' + (by - d) + ' ' +
-        (bx + bw + d) + ',' + (by - d) + ' ' +
-        (bx + bw) + ',' + by +
-        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
-
-      // 3D effect: right face (parallelogram)
-      svg.push('<polygon points="' +
-        (bx + bw) + ',' + by + ' ' +
-        (bx + bw + d) + ',' + (by - d) + ' ' +
-        (bx + bw + d) + ',' + (by + bh - d) + ' ' +
-        (bx + bw) + ',' + (by + bh) +
-        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '" opacity="0.8"/>');
-
-      // Front face (main rectangle)
-      svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + nodeFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      elementSvg.push('<g data-layout-id="' + UMLShared.escapeXml(n.name) + '">');
+      if (n.kind === 'node') {
+        elementSvg.push('<polygon points="' + bx + ',' + by + ' ' + (bx + d) + ',' + (by - d) + ' ' +
+          (bx + bw + d) + ',' + (by - d) + ' ' + (bx + bw) + ',' + by +
+          '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        elementSvg.push('<polygon points="' + (bx + bw) + ',' + by + ' ' + (bx + bw + d) + ',' + (by - d) + ' ' +
+          (bx + bw + d) + ',' + (by + bh - d) + ' ' + (bx + bw) + ',' + (by + bh) +
+          '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      }
+      elementSvg.push('<rect data-layout-bounds-id="' + UMLShared.escapeXml(n.name) + '" x="' + bx + '" y="' + by +
+        '" width="' + bw + '" height="' + bh + '" fill="' + nodeFills.fill + '" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"/>');
       if (nodeFills.textureUrl) {
-        svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
+        elementSvg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
           '" fill="' + nodeFills.textureUrl + '" stroke="none"/>');
       }
-
-      svg.push('</g>');
-
-      // Node name (top area) — bold for classifier, underlined for instance (name:Type per UML spec Fig 9-3)
-      var nameAttrs = ' font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"';
-      if (n.isInstance) {
-        nameAttrs += ' text-decoration="underline"';
-      } else {
-        nameAttrs += ' font-weight="bold"';
+      var child = !!n.parentId;
+      var fontSize = child ? CFG.fontSizeComp : CFG.fontSizeBold;
+      var textX = bx + (child ? CFG.compPadX : CFG.nodePadX);
+      var textY = by + (child ? CFG.compH / 2 + fontSize * .35 : CFG.nodePadY + CFG.lineHeight * .75);
+      var stereotype = n.kind === 'artifact' ? 'artifact' : n.stereotype;
+      if (stereotype) {
+        elementSvg.push('<text x="' + textX + '" y="' + textY + '" font-size="' + fontSize + '" fill="' + colors.text + '">«' +
+          UMLShared.escapeXml(stereotype) + '»</text>');
+        textY += CFG.lineHeight;
       }
-      svg.push('<text x="' + (bx + CFG.nodePadX) + '" y="' + (by + CFG.nodePadY + CFG.lineHeight * 0.75) + '"' +
-        nameAttrs + '>' + UMLShared.escapeXml(n.name) + '</text>');
-
-      // Components inside the node
-      var compY = by + CFG.nodePadY + CFG.lineHeight + 8;
-      for (var c = 0; c < n.components.length; c++) {
-        var compName = n.components[c];
-        var compW = bw - CFG.nodePadX * 2;
-        var cx = bx + CFG.nodePadX;
-
-        // Component rectangle
-        svg.push('<rect x="' + cx + '" y="' + compY + '" width="' + compW + '" height="' + CFG.compH +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
-
-        // Component icon (small rect with tabs)
-        var ix = cx + compW - CFG.compIconW - 6;
-        var iy = compY + (CFG.compH - CFG.compIconH) / 2;
-        svg.push('<rect x="' + ix + '" y="' + iy + '" width="' + CFG.compIconW + '" height="' + CFG.compIconH +
+      elementSvg.push('<text x="' + textX + '" y="' + textY + '" font-size="' + fontSize + '" fill="' + colors.text + '"' +
+        (n.isInstance ? ' text-decoration="underline"' : child ? '' : ' font-weight="bold"') + '>' + UMLShared.escapeXml(n.label) + '</text>');
+      if (n.kind === 'component') {
+        var ix = bx + bw - CFG.compIconW - 6;
+        var iy = by + (child ? (CFG.compH - CFG.compIconH) / 2 : CFG.nodePadY);
+        elementSvg.push('<rect x="' + ix + '" y="' + iy + '" width="' + CFG.compIconW + '" height="' + CFG.compIconH +
           '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-        svg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + 1) +
+        elementSvg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + 1) +
           '" width="' + CFG.compIconTabW + '" height="' + CFG.compIconTabH +
           '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-        svg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + CFG.compIconH - CFG.compIconTabH - 1) +
+        elementSvg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + CFG.compIconH - CFG.compIconTabH - 1) +
           '" width="' + CFG.compIconTabW + '" height="' + CFG.compIconTabH +
           '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-
-        // Component name
-        svg.push('<text x="' + (cx + CFG.compPadX) + '" y="' + (compY + CFG.compH / 2 + CFG.fontSizeComp * 0.35) +
-          '" font-size="' + CFG.fontSizeComp + '" fill="' + colors.text + '">' +
-          UMLShared.escapeXml(compName) + '</text>');
-
-        compY += CFG.compH + CFG.compGapY;
       }
+      elementSvg.push('</g>');
     }
+    svg.splice(1, 0, elementSvg.join('\n'));
 
     // ── Draw labels on top ──
     for (var lli = 0; lli < labelSvg.length; lli++) {
@@ -20468,7 +20905,7 @@
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
-    if (!parsed.nodes || parsed.nodes.length === 0) {
+    if (!parsed.elements || parsed.elements.length === 0) {
       container.innerHTML = '<div class="uml-empty-msg">No nodes to display.</div>';
       return;
     }
@@ -20479,7 +20916,6 @@
     }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
-    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     // Protocol labels and manual routes can extend beyond the node envelope.
     UMLShared.fitSVGToContent(container, CFG.svgPad);
@@ -20566,7 +21002,7 @@
     var lines = text.split('\n');
     var actors = {};       // id -> { id, name }
     var usecases = {};     // id -> { id, name, alias }
-    var systems = [];      // [{ name, members: [id, ...] }]
+    var systems = [];      // [{ id, name, members: [id, ...] }]
     var relationships = [];
     var notes = [];
     var direction = 'LR';
@@ -20679,15 +21115,28 @@
       }
 
       // System boundary: rectangle "Name" { ... }
-      var sysMatch = line.match(/^rectangle\s+"([^"]+)"\s*\{/);
+      var sysMatch = line.match(/^rectangle\s+"([^"]+)"(?:\s+as\s+("[^"]+"|\S+))?\s*\{/);
       if (sysMatch) {
-        systems.push({ name: sysMatch[1], members: [] });
+        systems.push({ id: sysMatch[2] ? sysMatch[2].replace(/^"|"$/g, '') : sysMatch[1], name: sysMatch[1], members: [] });
         braceDepth = 1;
-        // Check for immediate close on same line
-        if (line.indexOf('}') !== -1 && line.indexOf('}') > line.indexOf('{')) {
-          braceDepth = 0;
-        } else {
-          inSystem = systems[systems.length - 1];
+        inSystem = systems[systems.length - 1];
+        // Feed inline members through the same body parser as multiline blocks.
+        var tail = line.slice(sysMatch[0].length).trim();
+        if (tail) {
+          // Split semicolons/braces outside quoted labels without splitting a declaration.
+          var statements = [], statement = '', quoted = false, escaped = false;
+          for (var tc = 0; tc < tail.length; tc++) {
+            var ch = tail[tc];
+            if (ch === '"' && !escaped) quoted = !quoted;
+            if (!quoted && (ch === ';' || ch === '}')) {
+              if (statement.trim()) statements.push(statement.trim());
+              statement = '';
+              if (ch === '}') statements.push('}');
+            } else statement += ch;
+            escaped = ch === '\\' && !escaped;
+          }
+          if (statement.trim()) statements.push(statement.trim());
+          lines.splice.apply(lines, [i + 1, 0].concat(statements));
         }
         continue;
       }
@@ -21331,6 +21780,7 @@
         var titleW = UMLShared.textWidth(sys.name, true, CFG.fontSizeBold);
         var boxW = Math.max(sMaxX - sMinX + CFG.sysPadX * 2, titleW + CFG.sysPadX * 2);
         systemBoxes.push({
+          id: sys.id,
           name: sys.name,
           x: sMinX - CFG.sysPadX,
           y: sMinY - CFG.sysPadY - CFG.sysTitlePadY,
@@ -21340,6 +21790,7 @@
       } else {
         var emptyTitleW = UMLShared.textWidth(sys.name, true, CFG.fontSizeBold);
         systemBoxes.push({
+          id: sys.id,
           name: sys.name,
           x: si * (Math.max(CFG.sysMinW, emptyTitleW + CFG.sysPadX * 2) + CFG.gapX),
           y: 0,
@@ -21418,8 +21869,8 @@
     // ── Draw system boundaries (behind everything) ──
     for (var sbi2 = 0; sbi2 < systemBoxes.length; sbi2++) {
       var sbox = systemBoxes[sbi2];
-      svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.name) +
-        '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.name) + '">');
+      svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.id) +
+        '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.id) + '">');
       svg.push('<rect x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
         '" rx="' + CFG.sysRx + '" ry="' + CFG.sysRx +
         '" fill="' + colors.secondaryFill + '" fill-opacity="0.7" stroke="' + colors.secondaryLine + '" stroke-width="1.2"/>');
@@ -21962,8 +22413,6 @@
 
     // Decision stack for if/else/endif nesting
     var decisionStack = [];
-    // Pending branch endpoints from endif (to connect to next node instead of merge diamond)
-    var pendingMergeEnds = [];
 
     function ensureNode(id, type, label) {
       if (!nodes[id]) {
@@ -22081,16 +22530,20 @@
       });
     }
 
-    // After endif, pending branch endpoints need to connect to the next
-    // node that currentNode connects to.  Call this whenever we create
-    // an edge from currentNode to some target.
-    function flushPendingMergeEnds(targetId) {
-      if (pendingMergeEnds.length > 0) {
-        for (var pm = 0; pm < pendingMergeEnds.length; pm++) {
-          addEdge(pendingMergeEnds[pm], targetId);
-        }
-        pendingMergeEnds = [];
-      }
+    function currentFork() {
+      const context = decisionStack[decisionStack.length - 1];
+      return context && context.type === 'fork' ? context : null;
+    }
+
+    function recordForkBranch(targetId, previousId) {
+      const context = currentFork();
+      if (!context) return;
+      const previousIndex = context.branches.indexOf(previousId);
+      if (previousIndex !== -1) context.branches[previousIndex] = targetId;
+      else if (!previousId || previousId === context.forkId) context.branches.push(targetId);
+      // Each continuation in a fork starts a separate branch. Explicit
+      // Source --> Target lines can extend any already recorded branch.
+      currentNode = context.forkId;
     }
 
     for (var i = 0; i < lines.length; i++) {
@@ -22157,7 +22610,6 @@
         nodes[forkId].lane = currentLane;
         if (currentNode) {
           addEdge(currentNode, forkId);
-          flushPendingMergeEnds(forkId);
         }
         // Push fork context: collect branches until endfork
         decisionStack.push({ type: 'fork', forkId: forkId, branches: [], currentBranch: null });
@@ -22182,9 +22634,10 @@
           // Connect all branch endpoints to the join bar
           for (var bi = 0; bi < forkCtx.branches.length; bi++) {
             var branchEnd = forkCtx.branches[bi];
-            if (branchEnd) addEdge(branchEnd, joinId);
+            if (branchEnd && !isFinalNode(branchEnd)) addEdge(branchEnd, joinId);
           }
           currentNode = joinId;
+          recordForkBranch(joinId);
         }
         continue;
       }
@@ -22200,7 +22653,6 @@
         if (actTexture) nodes[decId].texture = actTexture;
         if (currentNode) {
           addEdge(currentNode, decId);
-          flushPendingMergeEnds(decId);
         }
         decisionStack.push({
           type: 'decision',
@@ -22247,24 +22699,26 @@
           } else {
             decCtx2.elseEnd = currentNode;
           }
-          // Instead of creating a merge diamond, collect pending
-          // branch endpoints so the next node receives their edges.
-          var pendingEnds = [];
+          // Alternatives must meet at a MergeNode: multiple control flows
+          // directly into an Action would instead require all branches.
+          const branchEnds = [];
           if (decCtx2.thenEnd && !isFinalNode(decCtx2.thenEnd)) {
-            pendingEnds.push(decCtx2.thenEnd);
+            branchEnds.push(decCtx2.thenEnd);
           }
           if (decCtx2.elseEnd && !isFinalNode(decCtx2.elseEnd)) {
-            pendingEnds.push(decCtx2.elseEnd);
-          }
-          // Use the first pending end as currentNode (for the next
-          // transition line) and stash the rest to be connected later.
-          if (pendingEnds.length > 0) {
-            currentNode = pendingEnds[0];
-            for (var pe = 1; pe < pendingEnds.length; pe++) {
-              pendingMergeEnds.push(pendingEnds[pe]);
-            }
+            branchEnds.push(decCtx2.elseEnd);
           }
           decisionStack.splice(decIdx, 1);
+          if (branchEnds.length > 1 || decCtx2.inThen) {
+            const mergeId = 'merge_' + (++mergeCount);
+            ensureNode(mergeId, 'merge', '');
+            branchEnds.forEach(function (endId) { addEdge(endId, mergeId); });
+            if (decCtx2.inThen) addEdge(decCtx2.decisionId, mergeId, 'else');
+            currentNode = mergeId;
+          } else {
+            currentNode = branchEnds[0] || null;
+          }
+          if (currentNode) recordForkBranch(currentNode);
         }
         continue;
       }
@@ -22284,14 +22738,9 @@
         }
         if (currentNode) {
           addEdge(currentNode, genericTargetId, genericContLabel, relationParts.labelKind, i);
-          flushPendingMergeEnds(genericTargetId);
         }
-        var genericTopCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
-        if (genericTopCtx && genericTopCtx.type === 'fork') {
-          genericTopCtx.branches.push(genericTargetId);
-        } else {
-          currentNode = genericTargetId;
-        }
+        currentNode = genericTargetId;
+        recordForkBranch(genericTargetId);
         continue;
       }
 
@@ -22310,6 +22759,7 @@
         }
         addEdge(genericSourceId, genericFullTargetId, genericLabel, relationParts.labelKind, i);
         currentNode = genericFullTargetId;
+        recordForkBranch(genericFullTargetId, genericSourceId);
         continue;
       }
 
@@ -22323,7 +22773,6 @@
         if (actTexture) targetNode.texture = actTexture;
         if (currentNode) {
           addEdge(currentNode, targetNode.id, guard);
-          flushPendingMergeEnds(targetNode.id);
         }
         // If inside a fork context, record branch endpoint
         var topCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
@@ -22346,7 +22795,6 @@
         nodes[fId].lane = currentLane;
         if (currentNode) {
           addEdge(currentNode, fId, fGuard);
-          flushPendingMergeEnds(fId);
         }
         // Inside fork, record branch endpoint
         var topCtx2 = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
@@ -22416,6 +22864,16 @@
     // Convert to array
     var nodeList = [];
     for (var k in nodes) nodeList.push(nodes[k]);
+
+    // `endif` supplies a merge only for an implicit continuation. Explicit
+    // source-to-target flows after a decision retain their authored topology.
+    // Work outward-in so an unused outer merge also releases nested merges.
+    for (var mergeIndex = mergeCount; mergeIndex > 0; mergeIndex--) {
+      var generatedMerge = 'merge_' + mergeIndex;
+      if (edges.some(function(edge) { return edge.from === generatedMerge; })) continue;
+      edges = edges.filter(function(edge) { return edge.to !== generatedMerge; });
+      nodeList = nodeList.filter(function(node) { return node.id !== generatedMerge; });
+    }
 
     return { nodes: nodeList, edges: edges, notes: notes, lanes: lanes, direction: direction, layoutPreference: layoutPreference };
   }
@@ -23992,6 +24450,7 @@
     container.innerHTML = window.GitGraph.renderToSVG(data);
     UMLShared.applyRenderedPositions(container, layoutExtract.layout);
     UMLShared.applyLayoutRoutes(container, layoutExtract.layout);
+    UMLShared.autoFitSVG(container);
   }
 
   // Accept both `diagram-gitgraph` (explicit HTML) and `language-gitgraph`
@@ -25642,6 +26101,12 @@
       }
 
       // entity / weak entity / relationship / identifying relationship blocks
+      var erHighlight = UMLShared.parseHighlightColor(line);
+      if (/^(?:(?:weak|identifying)\s+)?(?:entity|relationship)\s+\S/i.test(erHighlight.stripped)) {
+        line = erHighlight.stripped;
+      } else {
+        erHighlight = { highlight: null, texture: null };
+      }
       var entMatch = line.match(/^(weak\s+)?entity\s+(?:"([^"]+)"|(\S+))\s*\{?\s*$/i);
       if (entMatch) {
         var weak = !!entMatch[1];
@@ -25655,6 +26120,8 @@
         } else if (weak) {
           ent.weak = true;
         }
+        if (erHighlight.highlight) ent.highlight = erHighlight.highlight;
+        if (erHighlight.texture) ent.texture = erHighlight.texture;
         if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, ent.attrs);
         continue;
       }
@@ -25672,6 +26139,8 @@
         } else if (identifying) {
           rel.identifying = true;
         }
+        if (erHighlight.highlight) rel.highlight = erHighlight.highlight;
+        if (erHighlight.texture) rel.texture = erHighlight.texture;
         if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, rel.attrs);
         continue;
       }
@@ -26295,6 +26764,7 @@
   function drawEntity(svg, pos, colors) {
     var w = pos.box.w, h = pos.box.h;
     var x = pos.cx - w / 2, y = pos.cy - h / 2;
+    var fills = UMLShared.highlightFills(colors, pos.entity.highlight, pos.entity.texture);
     // Filled rectangle with the same light-blue header colour used by
     // other UML renderers (class headers, deployment nodes, component
     // boxes). Wrapped in a uml-node-shadow group so drop shadows apply
@@ -26302,8 +26772,9 @@
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<rect x="' + x + '" y="' + y +
       '" width="' + w + '" height="' + h +
-      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
       '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (fills.textureUrl) svg.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + fills.textureUrl + '" stroke="none"/>');
     if (pos.entity.weak) {
       var d = CFG.doubleInset;
       svg.push('<rect x="' + (x + d) + '" y="' + (y + d) +
@@ -26321,6 +26792,7 @@
   function drawRelationship(svg, pos, colors) {
     var w = pos.box.w, h = pos.box.h;
     var cx = pos.cx, cy = pos.cy;
+    var fills = UMLShared.highlightFills(colors, pos.relationship.highlight, pos.relationship.texture);
     var pts = [
       cx + ',' + (cy - h / 2),
       (cx + w / 2) + ',' + cy,
@@ -26329,8 +26801,9 @@
     ].join(' ');
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<polygon points="' + pts +
-      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
       '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (fills.textureUrl) svg.push('<polygon points="' + pts + '" fill="' + fills.textureUrl + '" stroke="none"/>');
     if (pos.relationship.identifying) {
       var d = CFG.doubleInset * 1.4;
       var innerPts = [

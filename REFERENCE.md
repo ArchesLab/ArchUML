@@ -4,6 +4,8 @@ A complete reference for the `@startuml` syntax supported by the ArchUML rendere
 
 Each section shows the syntax as a code block followed by an HTML rendering div you can embed directly in any page that loads `uml-bundle.js`.
 
+ArchUML supports a subset of UML notation. The visual editor retains incomplete or invalid drafts and reports selected common problems; its diagnostics are not a complete UML validator. Current model limits include nested deployment Nodes, multiple provided/required interfaces owned by one port, distinct same-named activity Actions, multiple independently identified activity InitialNodes, and equal short state names in different composites. Source editing does not remove these model limits.
+
 ---
 
 ## Table of Contents
@@ -401,6 +403,15 @@ A o<--> B        Aggregation + bidirectional
 A o--x B         Aggregation + non-navigable target
 ```
 
+Association ends can be marked independently: `A x--> B` marks the A end
+non-navigable and the B end navigable; `A <--x B` does the reverse. The same
+end markers can follow a whole-part diamond, for example `A *x--> B`,
+`A *<--x B`, `A ox--x B`, or `A o<-- B`. `x` means explicitly non-navigable;
+an unmarked end leaves navigability unspecified.
+
+Recursive associations are supported, including distinct end multiplicities
+and a relationship label: `Person "0..1" -- "*" Person : manages`.
+
 **Example:**
 
 ```
@@ -781,7 +792,7 @@ deactivate browser
 A -> B    Synchronous call    (solid line, filled arrowhead)
 A --> B   Response / return   (dashed line, open arrowhead)
 A ->> B   Asynchronous        (solid line, open arrowhead)
-A ->o B   Lost message        (arrow ends at filled circle)
+A ->o     Lost message        (arrow ends at filled circle)
 o-> A     Found message       (starts from filled circle)
 A -> A    Self-call           (loop-back arrow)
 ```
@@ -803,7 +814,7 @@ server ->> pool: submitTask()
 activate pool
 pool --> server: taskQueued
 deactivate pool
-server -->o : timeout
+server ->o : timeout
 o-> client: networkEvent
 server --> client: response
 deactivate server
@@ -825,7 +836,7 @@ server ->> pool: submitTask()
 activate pool
 pool --> server: taskQueued
 deactivate pool
-server -->o : timeout
+server ->o : timeout
 o-> client: networkEvent
 server --> client: response
 deactivate server
@@ -912,7 +923,7 @@ else [label]
   ...
 end
 
-break [condition]      ← break out of surrounding loop
+break [condition]      ← replace the rest of the enclosing interaction fragment
   ...
 end
 
@@ -1480,14 +1491,38 @@ o_cust --> crm_cust
 ### Nodes, Artifacts & Relationships
 
 ```
-node "NodeName" as alias { ... }     ← execution environment / hardware box
-component ComponentName              ← deployed component inside node
-artifact "ArtifactName" as alias     ← deployable artifact
+node "NodeName" as alias <<device>> { ... }  ← hardware node with stereotype
+node Runtime <<executionEnvironment>> { ... }
+component "ComponentName" as alias   ← component, inside or outside a node
+artifact "ArtifactName" as alias     ← artifact rectangle, inside or outside a node
 
-A --> B : label          ← dependency / communication path
-A ..> B : label          ← dashed dependency
-A -- B                   ← plain association
+A --> B : label          ← directed communication path (open arrow)
+A ..> B : label          ← dependency (dashed line, open arrow)
+A -- B : label           ← communication path with no arrow
+A --> B dashed : label   ← dashed styling without changing the arrow kind
 ```
+
+Aliases are stable identifiers; quoted display names are shown in the diagram.
+Relationships can target a contained artifact or component directly by its
+alias, including a declaration later in the source. Artifacts use the UML
+`«artifact»` keyword and remain distinct from component rectangles and node
+cubes. For example:
+
+```
+node "Web Server" as web <<device>> {
+  artifact "app.war" as App
+}
+artifact "settings.xml" as Config
+Config ..> web : <<deploy>>
+App ..> Config : reads
+```
+
+The parser keeps `nodes` and each node's `components` list of child identifiers
+for compatibility. Its `elements` array and `elementMap` expose every typed
+element with `name` (identifier), `label`, `kind`, `parentId`, and `stereotype`;
+nodes also expose typed `children`. Links preserve `arrow` (`--`, `-->`, or
+`..>`) and the independent `dashed` flag. Nested deployment nodes are outside
+the current supported subset.
 
 Node instance notation (name:Type — underlined per UML spec):
 
@@ -1649,6 +1684,12 @@ rectangle "System Name" {
   alias
 }
 ```
+
+An optional `as SystemID` after the quoted name keeps the boundary's identity
+separate from its display label. Inline members separated by semicolons are also
+accepted. In the visual editor, select the boundary and use **Use cases in this
+system** to include or remove members. Removing membership keeps the use case and
+its relationships in the diagram.
 
 ### Relationships
 
@@ -2855,7 +2896,7 @@ Output JSON format:
 | `A -> B` | Synchronous call |
 | `A --> B` | Return / response |
 | `A ->> B` | Asynchronous |
-| `A ->o B` | Lost message |
+| `A ->o` | Lost message |
 | `o-> A` | Found message |
 
 ### Combined Fragments (Sequence)
