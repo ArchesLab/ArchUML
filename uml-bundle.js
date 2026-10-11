@@ -31,12 +31,16 @@
   // ─── Text Measurement ───────────────────────────────────────────
 
   var _ctx = null;
-  function textWidth(text, bold, fontSize, fontFamily) {
+  function textMetrics(text, bold, fontSize, fontFamily, italic) {
     if (!_ctx) _ctx = document.createElement('canvas').getContext('2d');
     var fs = fontSize || BASE_CFG.fontSize;
     var ff = fontFamily || BASE_CFG.fontFamily;
-    _ctx.font = (bold ? 'bold ' : '') + fs + 'px ' + ff;
-    return _ctx.measureText(text).width;
+    _ctx.font = (italic ? 'italic ' : '') + (bold ? 'bold ' : '') + fs + 'px ' + ff;
+    return _ctx.measureText(text);
+  }
+
+  function textWidth(text, bold, fontSize, fontFamily) {
+    return textMetrics(text, bold, fontSize, fontFamily).width;
   }
 
   // ─── XML Escaping ───────────────────────────────────────────────
@@ -4192,6 +4196,7 @@
     BASE_CFG: BASE_CFG,
     NOTE_CFG: NOTE_CFG,
     textWidth: textWidth,
+    textMetrics: textMetrics,
     escapeXml: escapeXml,
     parseLabelDirectionCue: parseLabelDirectionCue,
     labelDirectionPlacementText: labelDirectionPlacementText,
@@ -7849,8 +7854,8 @@
 
     alignContextEntriesToHierarchyMedians(result.direction || effectiveDirection);
 
-    function packCompactHierarchyFamilies(direction) {
-      if (layoutPreference !== 'compact' || !hasHierarchyEdges) return;
+    function packHierarchyFamilies(direction) {
+      if ((layoutPreference !== 'compact' && layoutPreference !== 'landscape') || !hasHierarchyEdges) return;
       if ((direction || 'TB') !== 'TB') return;
 
       var hAdj = {};
@@ -7899,14 +7904,53 @@
       }
       if (families.length < 2) return;
 
+      // A landscape forest has independent inheritance families. Shared row
+      // heights and association-label gaps make every short family pay for
+      // the largest unrelated class/label. Lay each family out at its own
+      // measured size, preserving the forest order from the global pass.
+      // Free classes retain the global layout because they may bridge families.
+      var localFamilyLayout = layoutPreference === 'landscape' && classes.every(function(cls) {
+        return !!hNames[cls.name];
+      });
+      if (layoutPreference === 'landscape' && !localFamilyLayout) return;
+      if (localFamilyLayout) {
+        for (var lfi = 0; lfi < families.length; lfi++) {
+          var localFamily = families[lfi];
+          var memberSet = {};
+          localFamily.names.forEach(function(name) { memberSet[name] = true; });
+          var familyNodes = layoutNodes.filter(function(node) { return !!memberSet[node.id]; });
+          var familyEdges = layoutEdges.filter(function(edge) {
+            return memberSet[edge.source] && memberSet[edge.target];
+          });
+          var familySizes = classEdgeSizes.filter(function(edge) {
+            return memberSet[edge.source] && memberSet[edge.target];
+          });
+          var familyLayout = window.UMLAdvancedLayout.compute(familyNodes, familyEdges, {
+            gapX: CFG.gapX,
+            gapY: effectiveGapY,
+            direction: 'TB',
+            directionLocked: true,
+            edgeSizes: familySizes
+          });
+          var familyBounds = window.UMLLayoutCore.boundsOf(familyLayout.nodes);
+          for (var lp = 0; lp < localFamily.names.length; lp++) {
+            var memberName = localFamily.names[lp];
+            var position = familyLayout.nodes[memberName];
+            entries[memberName].x = localFamily.minX + position.x - familyBounds.minX;
+            entries[memberName].y = position.y - familyBounds.minY;
+          }
+          localFamily.maxX = localFamily.minX + familyBounds.width;
+        }
+      }
+
       families.sort(function(a, b) { return a.minX - b.minX; });
       var familyGap = Math.max(18, Math.round(effectiveGapX * 0.52));
       var cursorRight = families[0].maxX;
       for (var fi = 1; fi < families.length; fi++) {
         var family = families[fi];
         var desiredMin = cursorRight + familyGap;
-        var shift = Math.min(0, desiredMin - family.minX);
-        if (shift < -0.5) {
+        var shift = localFamilyLayout ? desiredMin - family.minX : Math.min(0, desiredMin - family.minX);
+        if (Math.abs(shift) > 0.5) {
           for (var fmni = 0; fmni < family.names.length; fmni++) {
             entries[family.names[fmni]].x += shift;
           }
@@ -7917,7 +7961,7 @@
       }
     }
 
-    packCompactHierarchyFamilies(result.direction || effectiveDirection);
+    packHierarchyFamilies(result.direction || effectiveDirection);
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var n2 in entries) {
@@ -8262,6 +8306,18 @@
         w: (maxX - minX) + gap * 2,
         h: (maxY - minY) + gap * 2
       };
+    }
+
+    function wholePartMarkerIsClear(points, relation, sourceEntry) {
+      if (relation.type !== 'composition' && relation.type !== 'aggregation') return true;
+      var side = classEdgeForPoint(points[0], sourceEntry, null);
+      var vector = classSideVector(side);
+      var tip = wholePartDiamondTip(points[0], vector);
+      var bounds = diamondMarkerObstacleRect(tip.x, tip.y, vector.x, vector.y, CFG.strokeWidth / 2);
+      if (classTextPlacementHitsSegments(bounds, classOccupiedSegments, CFG.strokeWidth / 2)) return false;
+      return !noteMarkerObstacles.some(function(obstacle) {
+        return classRectsOverlap(bounds, obstacle, 0);
+      });
     }
 
     function classTextRect(text, x, y, anchor, fontSize) {
@@ -9271,7 +9327,6 @@
     // lines, including inheritance fanouts, are soft constraints handled by
     // route scoring and visible bridge drawing; treating them as walls causes
     // large, low-readability detours in State/Command-style hierarchies.
-    var hierarchyRouteObstacles = [];
     var entryCount = Object.keys(entries).length;
     var useSmallClassRouteBudget = parsed.layoutPreference !== 'compact' &&
       (!parsed.notes || parsed.notes.length === 0) &&
@@ -9360,15 +9415,65 @@
         [{x:x+w*.25,y:y},{x:x+w*.25,y:y-reach},{x:x+w*.75,y:y-reach},{x:x+w*.75,y:y}],
         [{x:x+w*.25,y:y+h},{x:x+w*.25,y:y+h+reach},{x:x+w*.75,y:y+h+reach},{x:x+w*.75,y:y+h}]
       ];
-      var skip = {}; skip[relation.from] = true;
-      var best = candidates[0], bestScore = Infinity;
-      candidates.forEach(function(points, sideIndex) {
-        var score = (UMLShared.routeHitsObstacle(points, classObstacles, skip, null) ? 100000 : 0) +
-          UMLShared.countRouteCrossings(points, classOccupiedSegments) * 1000 +
-          UMLShared.routeTrackOverlapLength(points, classOccupiedSegments) * 100 + sideIndex;
-        if (score < bestScore) { bestScore = score; best = points; }
+      var markerObstacles = noteMarkerObstacles.map(function(marker) {
+        return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
       });
-      return { points: best };
+      var skip = {}; skip[relation.from] = true;
+      var best = null, fallback = null;
+      function lowerSelfRouteScore(score, other) {
+        if (!other) return true;
+        for (var i = 0; i < score.length; i++) {
+          if (score[i] !== other.score[i]) return score[i] < other.score[i];
+        }
+        return false;
+      }
+      function considerSelfRoute(points, preference) {
+        var occlusions = wholePartMarkerIsClear(points, relation, entry) ? 0 : 1;
+        markerObstacles.forEach(function(obstacle) {
+          if (UMLShared.routeHitsObstacle(points, [obstacle], null, null)) occlusions++;
+        });
+        classObstacles.forEach(function(obstacle) {
+          if (UMLShared.routeHitsObstacle(points, [obstacle], skip, null)) occlusions++;
+        });
+        var score = [occlusions,
+          UMLShared.routeTrackOverlapLength(points, classOccupiedSegments),
+          UMLShared.countRouteCrossings(points, classOccupiedSegments),
+          UMLShared.measureOrthogonalRoute(points), preference];
+        var candidate = { points: points, score: score };
+        if (lowerSelfRouteScore(score, fallback)) fallback = candidate;
+        if (!occlusions && lowerSelfRouteScore(score, best)) best = candidate;
+      }
+      candidates.forEach(considerSelfRoute);
+      if (best && !best.score[1]) return { points: best.points };
+
+      // Several recursive relations need different attachment pairs, not
+      // merely different outside lanes with identical endpoint symbols. Bound
+      // the samples by loop count and usable slots, even for very wide boxes.
+      ['right', 'left', 'top', 'bottom'].forEach(function(side) {
+        var horizontal = side === 'top' || side === 'bottom';
+        var near = (horizontal ? x : y) + 8;
+        var far = (horizontal ? x + w : y + h) - 8;
+        var positions = [];
+        var spacing = CFG.diamondW + 6;
+        var slotCount = Math.min(18, Math.max(4, (index + 1) * 2), Math.floor((far - near) / spacing) + 1);
+        for (var slot = 0; slot < slotCount; slot++) positions.push(near + (far - near) * slot / Math.max(1, slotCount - 1));
+        for (var first = 0; first < positions.length; first++) {
+          for (var last = first + 1; last < positions.length; last++) {
+            if (positions[last] - positions[first] < spacing) continue;
+            var a = positions[first], b = positions[last];
+            var points;
+            if (side === 'right') points = [{x:x+w,y:a},{x:x+w+reach,y:a},{x:x+w+reach,y:b},{x:x+w,y:b}];
+            else if (side === 'left') points = [{x:x,y:a},{x:x-reach,y:a},{x:x-reach,y:b},{x:x,y:b}];
+            else if (side === 'top') points = [{x:a,y:y},{x:a,y:y-reach},{x:b,y:y-reach},{x:b,y:y}];
+            else points = [{x:a,y:y+h},{x:a,y:y+h+reach},{x:b,y:y+h+reach},{x:b,y:y+h}];
+            considerSelfRoute(points, 4);
+          }
+        }
+      });
+      // Impossible fixed geometry must not erase the relationship. Keep the
+      // least-conflicting visible loop, prioritizing marker/node occlusion
+      // before shaft overlap, crossings, and length.
+      return { points: (best || fallback).points };
     }
 
     // Draw other relationships with orthogonal (right-angle) routing
@@ -9404,6 +9509,14 @@
       // router explore all sides so it can avoid crossings and obstacles.
       var restrictSourceSide = forceCompactDependencyBelowSource;
 
+      // Reserve visible endpoint decorations, not just their route centers.
+      // In particular, sliding two shafts a few pixels apart must not merge
+      // the filled and hollow diamonds that distinguish their semantics.
+      var markerRouteObstacles = noteMarkerObstacles.map(function(marker) {
+        return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
+      });
+      var markerIsClear = function(points) { return wholePartMarkerIsClear(points, orel, fromE); };
+
       var isSelfRelation = orel.from === orel.to;
       var route = isSelfRelation ? classSelfRoute(fromE, orel) : computeOrthogonalRoute(
         fromE,
@@ -9420,14 +9533,15 @@
         hasInheritAtTop[orel.from],
         hasInheritAtBottom[orel.to],
         classOccupiedSegments,
-        hierarchyRouteObstacles,
+        markerRouteObstacles,
         restrictSourceSide,
         classNoteSidePressure[orel.to],
         {
           fastScore: useSmallClassRouteBudget,
           maxSourceCandidates: 6,
           maxTargetCandidates: 6,
-          occupiedAssociations: associationOccupiedSegments
+          occupiedAssociations: associationOccupiedSegments,
+          acceptRoute: markerIsClear
         }
       );
       var pathPoints = route.points; // array of {x,y}
@@ -9495,7 +9609,9 @@
       }
       // Local cosmetic simplifications may move an endpoint or lane back onto
       // another relationship. Keep the routed path when that loses separation.
-      if (UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
+      if (!markerIsClear(pathPoints) ||
+          UMLShared.routeHitsObstacle(pathPoints, markerRouteObstacles, null, null) ||
+          UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
           UMLShared.routeTrackOverlapLength(pathPoints, associationOccupiedSegments) >
           UMLShared.routeTrackOverlapLength(safePathPoints, associationOccupiedSegments) ||
           UMLShared.countRouteCrossings(pathPoints, associationOccupiedSegments) >
@@ -10533,6 +10649,7 @@
           points = UMLShared.simplifyOrthogonalPath(points);
 
           if (UMLShared.routeHitsObstacle(points, obstacles, skipNames, null)) continue;
+          if (routeOptions && routeOptions.acceptRoute && !routeOptions.acceptRoute(points)) continue;
 
           var crosses = UMLShared.countRouteCrossings(points, occupiedSegments);
           var associationCrosses = UMLShared.countRouteCrossings(points, associationTracks);
@@ -10589,6 +10706,14 @@
         bestCompact.length + 24 < best.length &&
         bestCompact.associationCrosses <= best.associationCrosses && bestCompact.overlap <= best.overlap) {
       best = bestCompact;
+    }
+
+    if (!best && routeOptions && routeOptions.fastScore && routeOptions.acceptRoute) {
+      // The small-diagram budget is an optimization, not permission to reuse
+      // a blocked attachment. Try every face before the generic fallback.
+      var retryArgs = Array.prototype.slice.call(arguments);
+      retryArgs[retryArgs.length - 1] = Object.assign({}, routeOptions, { fastScore: false });
+      return computeOrthogonalRoute.apply(null, retryArgs);
     }
 
     if (!best) {
@@ -13399,6 +13524,88 @@
       }
     })();
 
+    // Independently distributed exits/entries can differ by only a few pixels.
+    // Slide automatic attachments along their shared face range before routing,
+    // while retaining the order and clearance of neighboring transitions.
+    (function alignForwardStateAttachments() {
+      var attachments = [];
+      var obstacles = [];
+      for (var name in entries) {
+        var entry = entries[name];
+        if (!entry.state.isComposite) obstacles.push({
+          entry: entry,
+          x1: entry.x, y1: entry.y, x2: entry.x + entry.box.width, y2: entry.y + entry.box.height
+        });
+      }
+      for (var ti = 0; ti < transitions.length; ti++) {
+        var transition = transitions[ti];
+        var source = entries[transition.from], target = entries[transition.to];
+        if (!source || !target) continue;
+        if (transitionTargetSide(ti) !== (isTB ? 'top' : 'left')) continue;
+        var exit = customExits[ti], entrance = customTransitionTargets[ti];
+        attachments.push({ ti: ti, source: source, target: target,
+          canAlign: primNear(target) > primFar(source),
+          from: exit ? (isTB ? exit.x : exit.y) : secCenter(source),
+          to: entrance ? (isTB ? entrance.x : entrance.y) : secCenter(target) });
+      }
+
+      function freeFaceInterval(attachment, end) {
+        var entry = end === 'from' ? attachment.source : attachment.target;
+        var coordinate = attachment[end];
+        var inset = CFG.stateRx + CFG.strokeWidth;
+        var interval = { near: secNear(entry) + inset, far: secFar(entry) - inset };
+        attachments.forEach(function(other) {
+          if (other === attachment || (end === 'from' ? other.source : other.target) !== entry) return;
+          var gap = Math.min(CFG.arrowSize + CFG.strokeWidth * 2, Math.abs(other[end] - coordinate));
+          if (other[end] < coordinate) interval.near = Math.max(interval.near, other[end] + gap);
+          else interval.far = Math.min(interval.far, other[end] - gap);
+        });
+        return interval;
+      }
+
+      attachments.forEach(function(attachment) {
+        // A nearby branch may need a bend, but its attachment still reserves
+        // space on the same source/target face as a straightenable transition.
+        if (!attachment.canAlign) return;
+        if (attachment.source.state.type !== 'state' || attachment.target.state.type !== 'state') return;
+        var transition = transitions[attachment.ti];
+        if (parsed.layout && parsed.layout.routes && parsed.layout.routes['edge-' + transition.routeIndex]) return;
+        var sourceRange = freeFaceInterval(attachment, 'from');
+        var targetRange = freeFaceInterval(attachment, 'to');
+        var near = Math.max(sourceRange.near, targetRange.near);
+        var far = Math.min(sourceRange.far, targetRange.far);
+        if (near > far) return;
+        // Unrelated outlines are visible obstacles too. Endpoint faces remain
+        // unpadded so the straight segment can attach to its own states.
+        var routeObstacles = obstacles.map(function(obstacle) {
+          if (obstacle.entry === attachment.source || obstacle.entry === attachment.target) return obstacle;
+          return { x1: obstacle.x1 - CFG.strokeWidth, y1: obstacle.y1 - CFG.strokeWidth,
+            x2: obstacle.x2 + CFG.strokeWidth, y2: obstacle.y2 + CFG.strokeWidth };
+        });
+        var candidates = [attachment.from, attachment.to, (attachment.from + attachment.to) / 2, near, far];
+        routeObstacles.forEach(function(obstacle) {
+          candidates.push((isTB ? obstacle.x1 : obstacle.y1) - 1,
+            (isTB ? obstacle.x2 : obstacle.y2) + 1);
+        });
+        candidates.sort(function(a, b) {
+          return Math.abs(a - attachment.from) + Math.abs(a - attachment.to) -
+            Math.abs(b - attachment.from) - Math.abs(b - attachment.to);
+        });
+        for (var ci = 0; ci < candidates.length; ci++) {
+          var coordinate = Math.max(near, Math.min(far, candidates[ci]));
+          var fromPoint = mkPt(primFar(attachment.source), coordinate);
+          var toPoint = mkPt(primNear(attachment.target), coordinate);
+          if (UMLShared.routeHitsObstacle([fromPoint, toPoint], routeObstacles, null, null)) continue;
+          attachment.from = coordinate;
+          attachment.to = coordinate;
+          customExits[attachment.ti] = fromPoint;
+          toPoint.side = isTB ? 'top' : 'left';
+          customTransitionTargets[attachment.ti] = toPoint;
+          break;
+        }
+      });
+    })();
+
     var labelSvg = []; // Transition labels rendered after states so they appear on top
     var placedLabels = [];
     var placedRouteSegments = [];
@@ -13958,7 +14165,8 @@
     var entries = layout.entries;
     var drawing = routeStateTransitions(layout, {
       transitions: stateTransitionsInScope(parsed, null),
-      direction: parsed.direction
+      direction: parsed.direction,
+      layout: parsed.layout
     }, colors);
     var routeSvg = drawing.routes;
     var labelSvg = drawing.labels;
@@ -13982,7 +14190,8 @@
         layoutResult: parent.subLayout
       }, {
         transitions: stateTransitionsInScope(parsed, parentId),
-        direction: parsed.direction
+        direction: parsed.direction,
+        layout: parsed.layout
       }, colors);
       compositeDrawings.push(compositeDrawing);
       placedLabels = placedLabels.concat(compositeDrawing.labelBounds);
@@ -14026,6 +14235,94 @@
       distanceStep: 22,
       overlapPad: 8
     });
+    function stateNoteAnchors(rect, preferredSide, canSlide) {
+      var sides = [preferredSide, 'left', 'right', 'top', 'bottom'].filter(function(side, index, all) {
+        return all.indexOf(side) === index;
+      });
+      var anchors = [];
+      sides.forEach(function(side, sideIndex) {
+        var vertical = side === 'left' || side === 'right';
+        var start = vertical ? rect.y : rect.x, size = vertical ? rect.h : rect.w;
+        var inset = Math.min(CFG.stateRx + 2, size / 3);
+        var coordinate = start + size / 2;
+        anchors.push({ side: side, stub: 8, penalty: sideIndex * 6,
+          slideMin: canSlide ? start + inset : undefined,
+          slideMax: canSlide ? start + size - inset : undefined,
+          x: vertical ? (side === 'left' ? rect.x : rect.x + rect.w) : coordinate,
+          y: vertical ? coordinate : (side === 'top' ? rect.y : rect.y + rect.h) });
+      });
+      return anchors;
+    }
+
+    function routeStateNoteLeader(note, obstacles, transitionObstacles) {
+      var opposite = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
+      var targetRect = { x: note.tx, y: note.ty, w: note.tw, h: note.th };
+      var targetState = entries[note.note.target];
+      var stateNoteObstacles = obstacles.map(function(obstacle) {
+        if (!obstacle.stateId || obstacle.stateId === note.note.target) return obstacle;
+        // Reserve the visible outline as well as the state interior. The
+        // actual target keeps its boundary available for the attachment.
+        var pad = CFG.strokeWidth;
+        return { x: obstacle.x - pad, y: obstacle.y - pad,
+          w: obstacle.w + pad * 2, h: obstacle.h + pad * 2 };
+      });
+      var sources = stateNoteAnchors(note, opposite[note.note.position], true);
+      var targets = stateNoteAnchors(targetRect, note.note.position,
+        targetState && targetState.state.type === 'state');
+      function anchorDistance(source, target) {
+        return ['x', 'y'].reduce(function(distance, axis) {
+          function range(anchor) {
+            var slideAxis = anchor.side === 'left' || anchor.side === 'right' ? 'y' : 'x';
+            return axis === slideAxis && anchor.slideMin != null
+              ? [anchor.slideMin, anchor.slideMax] : [anchor[axis], anchor[axis]];
+          }
+          var sourceRange = range(source), targetRange = range(target);
+          return distance + Math.max(0, sourceRange[0] - targetRange[1], targetRange[0] - sourceRange[1]);
+        }, 0);
+      }
+      // A transition cycle can surround one face of a state. Trying its other
+      // faces avoids crossing that cycle while retaining the note's placement.
+      // Route once per face pair; the shared slide optimizer removes endpoint
+      // jogs without rebuilding a routing grid for each attachment coordinate.
+      for (var pass = 0; pass < 2; pass++) {
+        var routeObstacles = pass === 0 ? stateNoteObstacles.concat(transitionObstacles) : stateNoteObstacles;
+        var best = null;
+        sources.forEach(function(source) {
+          targets.forEach(function(target) {
+            var preference = source.penalty + target.penalty;
+            if (best && anchorDistance(source, target) + preference >= best.score) return;
+            var route = UMLShared.routeOrthogonalConnector(source, target, routeObstacles, {
+              stub: 8, clearance: 6, bendPenalty: 26
+            });
+            var points = UMLShared.optimizeEndpointSlides(route.points, source, target, routeObstacles, null, null);
+            if (UMLShared.routeHitsObstacle(points, routeObstacles, null, null)) return;
+            var score = UMLShared.measureOrthogonalRoute(points) + UMLShared.countOrthogonalBends(points) * 26 + preference;
+            if (!best || score < best.score) best = { points: points, score: score };
+          });
+        });
+        if (best) return best.points;
+      }
+      return [sources[0], targets[0]];
+    }
+
+    var noteLeaderObstacles = placedLabels.map(function(label) {
+      return { left: label.left - 3, top: label.top - 3, right: label.right + 3, bottom: label.bottom + 3 };
+    }).concat(notePositions);
+    for (var noteStateId in entries) {
+      var noteState = entries[noteStateId];
+      if (!noteState.state.isComposite) noteLeaderObstacles.push({ stateId: noteStateId, x: noteState.x, y: noteState.y,
+        w: noteState.box.width, h: noteState.box.height });
+    }
+    var transitionLeaderObstacles = placedRouteSegments.map(function(segment) {
+      return stateRouteSegmentObstacle(segment, 3);
+    }).concat(curveBounds);
+    var noteLeaderRoutes = notePositions.map(function(note) {
+      var points = routeStateNoteLeader(note, noteLeaderObstacles, transitionLeaderObstacles);
+      UMLShared.buildOrthogonalSegments(points).forEach(function(segment) {
+        transitionLeaderObstacles.push(stateRouteSegmentObstacle(segment, 3));
+      });
+      return points;
+    });
     function includeStateExtraRect(rect, extras) {
       if (!rect) return;
       var left = typeof rect.left === 'number' ? rect.left : rect.x;
@@ -14049,6 +14346,9 @@
     for (var nbi = 0; nbi < notePositions.length; nbi++) {
       var npb = notePositions[nbi];
       includeStateExtraRect(npb, stateExtras);
+      noteLeaderRoutes[nbi].forEach(function(point) {
+        includeStateExtraRect({ x: point.x - 4, y: point.y - 4, w: 8, h: 8 }, stateExtras);
+      });
     }
 
     var ox = layout.offsetX + CFG.svgPad + stateExtras.left;
@@ -14161,12 +14461,8 @@
 
     // ── Draw notes (using pre-computed positions) ──
     for (var ni = 0; ni < notePositions.length; ni++) {
-      var np2 = notePositions[ni]; var cF, cT;
-      if (np2.note.position === 'right') { cF = { x: np2.x, y: np2.y + np2.h / 2 }; cT = { x: np2.tx + np2.tw, y: np2.ty + np2.th / 2 }; }
-      else if (np2.note.position === 'left') { cF = { x: np2.x + np2.w, y: np2.y + np2.h / 2 }; cT = { x: np2.tx, y: np2.ty + np2.th / 2 }; }
-      else if (np2.note.position === 'top') { cF = { x: np2.x + np2.w / 2, y: np2.y + np2.h }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty }; }
-      else { cF = { x: np2.x + np2.w / 2, y: np2.y }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty + np2.th }; }
-      UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors, { fromX: cF.x, fromY: cF.y, toX: cT.x, toY: cT.y });
+      var np2 = notePositions[ni];
+      UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors, { points: noteLeaderRoutes[ni] });
     }
 
     svg.push(UMLShared.svgClose());
@@ -17359,6 +17655,21 @@
       var portAreaH = entry.box.height - (entry.hasPorts ? headerHeight : 0);
       var halfPort = CFG.portSize / 2;
       var lower = portTop + halfPort + 4;
+      if (entry.hasPorts) {
+        // The initial row pitch is deliberately generous. Endpoint alignment
+        // may use its spare padding, but must keep the title and label font
+        // boxes apart (including ascenders and descenders in the chosen font).
+        var headerMetrics = UMLShared.textMetrics(entry.comp.name, true, CFG.fontSizeBold, CFG.fontFamily);
+        var labelFontSize = CFG.fontSize - 1;
+        var labelMetrics = UMLShared.textMetrics(pos.label || alias, false, labelFontSize, CFG.fontFamily, true);
+        var headerDescent = isFinite(headerMetrics.fontBoundingBoxDescent) ? headerMetrics.fontBoundingBoxDescent : 4;
+        var labelAscent = isFinite(labelMetrics.fontBoundingBoxAscent) ? labelMetrics.fontBoundingBoxAscent : labelFontSize + 6;
+        var titleBottom = CFG.padY + CFG.fontSizeBold * 0.35 + 2 + headerDescent;
+        var labelAboveCenter = labelAscent - labelFontSize * 0.35;
+        if (isFinite(titleBottom) && isFinite(labelAboveCenter)) {
+          lower = entry.y + titleBottom + 4 + Math.max(halfPort, labelAboveCenter);
+        }
+      }
       var upper = portTop + portAreaH - componentPortBottomInset();
       var minGap = Math.max(CFG.portSize + 8, CFG.portPad * 0.72);
 
@@ -18344,7 +18655,7 @@
       if (!sourceBounds || !targetBounds) return false;
       const source = sourceBounds.pos;
       const target = targetBounds.pos;
-      if (source.kind || target.kind || source.standalone || target.standalone ||
+      if (source.standalone || target.standalone ||
           Math.abs(source.cy - target.cy) < 0.75) return false;
       const facesRight = source.side === 'right' && target.side === 'left' && source.connX < target.connX;
       const facesLeft = source.side === 'left' && target.side === 'right' && source.connX > target.connX;
