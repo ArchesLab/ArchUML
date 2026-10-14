@@ -2622,11 +2622,14 @@
     var width = svg.viewBox.baseVal.width;
     var smallestFont = Infinity;
     var labels = svg.querySelectorAll('text, tspan');
-    var svgMatrix = svg.getCTM();
+    // Use one shared screen coordinate space. In Firefox, the outer SVG's
+    // getCTM() omits its viewBox scale while a descendant's includes it.
+    // Mixing those spaces makes repeated fitting alternate between two sizes.
+    var svgMatrix = svg.getScreenCTM();
     for (var i = 0; i < labels.length; i++) {
       if (!labels[i].textContent.trim()) continue;
       var font = parseFloat(getComputedStyle(labels[i]).fontSize);
-      var labelMatrix = labels[i].getCTM();
+      var labelMatrix = labels[i].getScreenCTM();
       if (svgMatrix && labelMatrix) {
         var local = svgMatrix.inverse().multiply(labelMatrix);
         var scale = Math.hypot(local.c, local.d);
