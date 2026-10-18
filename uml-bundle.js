@@ -2592,7 +2592,9 @@
   // Only overflowing figures enter the tab order. ResizeObserver also covers
   // figures revealed in quizzes and changes to the surrounding text size.
   function updateDiagramScrollability(container) {
-    var overflowing = container.clientWidth > 0 && container.scrollWidth > container.clientWidth + 1;
+    var overflowing = container.clientWidth > 0 &&
+      (container.scrollWidth > container.clientWidth + 1 ||
+       container.scrollHeight > container.clientHeight + 1);
     var managed = container.hasAttribute('data-uml-scroll-tabindex');
     if (overflowing && (!container.hasAttribute('tabindex') || managed)) {
       if (container.getAttribute('tabindex') !== '0') container.setAttribute('tabindex', '0');
@@ -2612,7 +2614,10 @@
 
   var diagramScrollObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver(function (entries) {
-        entries.forEach(function (entry) { updateDiagramScrollability(entry.target); });
+        entries.forEach(function (entry) {
+          if (entry.target.isConnected) updateDiagramScrollability(entry.target);
+          else diagramScrollObserver.unobserve(entry.target);
+        });
       })
     : null;
 
