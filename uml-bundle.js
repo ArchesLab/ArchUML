@@ -2608,6 +2608,27 @@
     return false;
   }
 
+  function setReadableDiagramWidth(container) {
+    const svg = container.querySelector('svg');
+    if (!svg) return;
+    const width = svg.getBoundingClientRect().width;
+    if (!width) return;
+    let smallestLabel = Infinity;
+    for (const label of svg.querySelectorAll('text')) {
+      if (!label.textContent.trim() || !label.getScreenCTM) continue;
+      const matrix = label.getScreenCTM();
+      if (!matrix) continue;
+      const style = getComputedStyle(label);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const size = parseFloat(style.fontSize) * Math.hypot(matrix.c, matrix.d);
+      if (size > 0) smallestLabel = Math.min(smallestLabel, size);
+    }
+    if (!Number.isFinite(smallestLabel)) return;
+    // An em width scales the entire drawing with the surrounding paragraph,
+    // including after text zoom and when a serialized SVG is read without JS.
+    svg.style.setProperty('--uml-readable-width', Math.ceil(width / smallestLabel * 1000) / 1000 + 'em');
+  }
+
   let diagramScrollObserver = null;
 
   function updateDiagramScrollFocus(container) {
@@ -2645,6 +2666,7 @@
 
   function autoFitSVG(container, pad) {
     applyAutoFitSVG(container, pad);
+    setReadableDiagramWidth(container);
     observeDiagramScrollFocus(container);
     var svg = container && container.querySelector ? container.querySelector('svg') : null;
     if (!isPlaceholderAutoFit(svg)) {
@@ -2658,6 +2680,7 @@
     container.setAttribute('data-uml-autofit-retries', String(retries + 1));
     setTimeout(function () {
       applyAutoFitSVG(container, pad);
+      setReadableDiagramWidth(container);
       observeDiagramScrollFocus(container);
       var retriedSvg = container.querySelector('svg');
       if (isPlaceholderAutoFit(retriedSvg)) {
@@ -2669,7 +2692,9 @@
   }
 
   function fitSVGToContent(container, pad) {
-    return applyAutoFitSVG(container, pad, true);
+    const fitted = applyAutoFitSVG(container, pad, true);
+    setReadableDiagramWidth(container);
+    return fitted;
   }
 
   function resolveNodeTarget(targetName, entries) {
