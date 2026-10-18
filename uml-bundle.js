@@ -2608,8 +2608,44 @@
     return false;
   }
 
+  let diagramScrollObserver = null;
+
+  function updateDiagramScrollFocus(container) {
+    const managed = container.hasAttribute('data-uml-scroll-tabindex');
+    // Preserve focus policies supplied by an editor or another caller.
+    if (container.hasAttribute('tabindex') && !managed) return;
+    const overflowing = container.clientWidth > 0 &&
+      (container.scrollWidth > container.clientWidth + 1 ||
+       container.scrollHeight > container.clientHeight + 1);
+    if (overflowing) {
+      container.setAttribute('tabindex', '0');
+      container.setAttribute('data-uml-scroll-tabindex', 'true');
+    } else if (managed) {
+      container.removeAttribute('tabindex');
+      container.removeAttribute('data-uml-scroll-tabindex');
+    }
+  }
+
+  function observeDiagramScrollFocus(container) {
+    // Read-only figure wrappers own the image role; editor SVGs keep their
+    // own interactive descendants and focus management.
+    if (!container || !container.getAttribute || container.getAttribute('role') !== 'img') return;
+    updateDiagramScrollFocus(container);
+    if (typeof ResizeObserver !== 'function') return;
+    if (!diagramScrollObserver) {
+      diagramScrollObserver = new ResizeObserver(entries => {
+        for (const { target } of entries) {
+          if (target.isConnected) updateDiagramScrollFocus(target);
+          else diagramScrollObserver.unobserve(target);
+        }
+      });
+    }
+    diagramScrollObserver.observe(container);
+  }
+
   function autoFitSVG(container, pad) {
     applyAutoFitSVG(container, pad);
+    observeDiagramScrollFocus(container);
     var svg = container && container.querySelector ? container.querySelector('svg') : null;
     if (!isPlaceholderAutoFit(svg)) {
       if (container && container.removeAttribute) container.removeAttribute('data-uml-autofit-retries');
@@ -2622,6 +2658,7 @@
     container.setAttribute('data-uml-autofit-retries', String(retries + 1));
     setTimeout(function () {
       applyAutoFitSVG(container, pad);
+      observeDiagramScrollFocus(container);
       var retriedSvg = container.querySelector('svg');
       if (isPlaceholderAutoFit(retriedSvg)) {
         autoFitSVG(container, pad);
