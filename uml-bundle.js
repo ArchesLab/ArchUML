@@ -325,14 +325,7 @@
 
   function parseLayoutRoutePoints(raw) {
     var body = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
-    if (!body) return [];
-    var points = [];
-    body.split(/\s+/).forEach(function(part) {
-      var m = part.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
-      if (!m) return;
-      points.push({ x: Number(m[1]), y: Number(m[2]) });
-    });
-    return points;
+    return parseSvgPoints(body);
   }
 
   function addLayoutRoute(layout, id, rawPoints) {
@@ -604,7 +597,7 @@
 
   function layoutRoutePointsToString(points) {
     return (points || []).map(function(p) {
-      return Math.round(p.x) + ',' + Math.round(p.y);
+      return p.x + ',' + p.y;
     }).join(' ');
   }
 
@@ -6863,6 +6856,12 @@
     { token: 'o--x', type: 'aggregation', navigability: 'non-navigable' },
     { token: 'o--', type: 'aggregation', navigability: 'unspecified' },
 
+    // Navigation belongs to each association end, independently of a diamond.
+    { token: '*x-->', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: 'ox-->', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '*<--x', type: 'composition', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+    { token: 'o<--x', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+
     // Reverse aliases (diamond at target side)
     { token: '<-->*', type: 'composition', navigability: 'bidirectional', reverse: true },
     { token: '<--*', type: 'composition', navigability: 'navigable', reverse: true },
@@ -6875,11 +6874,12 @@
 
     // Tolerant aliases for mixed marker spelling seen in examples
     { token: '*<-->x', type: 'composition', navigability: 'non-navigable' },
-    { token: 'ox-->', type: 'aggregation', navigability: 'non-navigable' },
 
     // Association / Dependency
     { token: '<-->', type: 'association', navigability: 'bidirectional' },
     { token: 'x--x', type: 'association', navigability: 'non-navigable-both' },
+    { token: 'x-->', type: 'association', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '<--x', type: 'association', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
     { token: '-->', type: 'navigable' },
     { token: '<--', type: 'navigable', reverse: true },
     { token: '--x', type: 'association', navigability: 'non-navigable' },
@@ -6958,11 +6958,21 @@
         toMult = tmpMult;
       }
 
+      var navigability = pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified');
+      var fromNavigability = pat.fromNavigability ||
+        (navigability === 'bidirectional' ? 'navigable' :
+          navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
+      var toNavigability = pat.toNavigability ||
+        (navigability === 'bidirectional' || navigability === 'navigable' ? 'navigable' :
+          navigability === 'non-navigable' || navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
+
       return {
         from: fromName,
         to: toName,
         type: pat.type,
-        navigability: pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified'),
+        navigability: navigability,
+        fromNavigability: fromNavigability,
+        toNavigability: toNavigability,
         label: label,
         labelDirection: labelDirection,
         fromMult: fromMult,
@@ -9288,6 +9298,36 @@
       }
     }
 
+    var selfRouteCounts = Object.create(null);
+    function routeRecursiveAssociation(entry, rel) {
+      var ordinal = selfRouteCounts[rel.from] || 0;
+      selfRouteCounts[rel.from] = ordinal + 1;
+      var extent = Math.max(56, classRelationLabelWidth(rel, CFG.fontSizeStereotype) / 2 + 16) + ordinal * 28;
+      var cx = entry.x + entry.box.width / 2;
+      var cy = entry.y + entry.box.height / 2;
+      var skipNames = {};
+      skipNames[rel.from] = true;
+      var best = null;
+      // Adjacent sides give distinct ports and two full marker stubs. Evaluate
+      // every corner so a neighbouring class does not force a hidden loop.
+      [[1, -1], [1, 1], [-1, -1], [-1, 1]].forEach(function (corner) {
+        var edgeX = corner[0] > 0 ? entry.x + entry.box.width : entry.x;
+        var edgeY = corner[1] > 0 ? entry.y + entry.box.height : entry.y;
+        var laneX = edgeX + corner[0] * extent;
+        var laneY = edgeY + corner[1] * extent;
+        var points = [
+          { x: edgeX, y: cy }, { x: laneX, y: cy },
+          { x: laneX, y: laneY }, { x: cx, y: laneY },
+          { x: cx, y: edgeY }
+        ];
+        var penalty = (UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null) ? 1000000 : 0) +
+          UMLShared.routeTrackOverlapLength(points, associationOccupiedSegments) * 10 +
+          UMLShared.countRouteCrossings(points, associationOccupiedSegments) * 100;
+        if (!best || penalty < best.penalty) best = { points: points, penalty: penalty };
+      });
+      return best;
+    }
+
     // Draw other relationships with orthogonal (right-angle) routing
     for (var oi = 0; oi < otherRels.length; oi++) {
       var orel = otherRels[oi];
@@ -9321,7 +9361,8 @@
       // router explore all sides so it can avoid crossings and obstacles.
       var restrictSourceSide = forceCompactDependencyBelowSource;
 
-      var route = computeOrthogonalRoute(
+      var isRecursive = orel.from === orel.to;
+      var route = isRecursive ? routeRecursiveAssociation(fromE, orel) : computeOrthogonalRoute(
         fromE,
         toE,
         hasInheritAtBottom[orel.from],
@@ -9348,74 +9389,77 @@
       );
       var pathPoints = route.points; // array of {x,y}
       var safePathPoints = cloneClassRoutePoints(pathPoints);
-      // Apply reanchor only when route actually exits from top/bottom
-      if ((orel.type === 'composition' || orel.type === 'aggregation') && pathPoints.length >= 2) {
-        var actualExitSide = classEdgeForPoint(pathPoints[0], fromE, sourceSide);
-        if (actualExitSide === 'top' || actualExitSide === 'bottom') {
-          pathPoints = reanchorWholePartRouteStart(pathPoints, fromE, actualExitSide);
+      // Ordinary endpoint sliding can collapse a self-loop back onto its box.
+      if (!isRecursive) {
+        // Apply reanchor only when route actually exits from top/bottom
+        if ((orel.type === 'composition' || orel.type === 'aggregation') && pathPoints.length >= 2) {
+          var actualExitSide = classEdgeForPoint(pathPoints[0], fromE, sourceSide);
+          if (actualExitSide === 'top' || actualExitSide === 'bottom') {
+            pathPoints = reanchorWholePartRouteStart(pathPoints, fromE, actualExitSide);
+          }
         }
-      }
-      // Eliminate unnecessary detours/corners by simplifying U-shaped bends
-      pathPoints = eliminateUnnecessaryCorners(pathPoints, classObstacles, fromE, toE);
-      if (pathPoints.length >= 4) {
-        var classSkipNames = {};
-        classSkipNames[orel.from] = true;
-        classSkipNames[orel.to] = true;
-        pathPoints = UMLShared.optimizeEndpointSlides(
-          pathPoints,
-          buildClassEndpointSlideAnchor(fromE, pathPoints[0], sourceSide),
-          buildClassEndpointSlideAnchor(toE, pathPoints[pathPoints.length - 1], tgtSide),
-          classObstacles,
-          classSkipNames,
-          classOccupiedSegments
-        );
-      }
+        // Eliminate unnecessary detours/corners by simplifying U-shaped bends
+        pathPoints = eliminateUnnecessaryCorners(pathPoints, classObstacles, fromE, toE);
+        if (pathPoints.length >= 4) {
+          var classSkipNames = {};
+          classSkipNames[orel.from] = true;
+          classSkipNames[orel.to] = true;
+          pathPoints = UMLShared.optimizeEndpointSlides(
+            pathPoints,
+            buildClassEndpointSlideAnchor(fromE, pathPoints[0], sourceSide),
+            buildClassEndpointSlideAnchor(toE, pathPoints[pathPoints.length - 1], tgtSide),
+            classObstacles,
+            classSkipNames,
+            classOccupiedSegments
+          );
+        }
 
-      // Eliminate tiny H-V-H doglegs: when the middle segment is small,
-      // snap the shorter end to the longer end's coordinate for a cleaner look.
-      if (pathPoints.length === 4) {
-        var cdg0 = pathPoints[0], cdg1 = pathPoints[1], cdg2 = pathPoints[2], cdg3 = pathPoints[3];
-        var cdgH1 = Math.abs(cdg1.y - cdg0.y) < 1;
-        var cdgV  = Math.abs(cdg2.x - cdg1.x) < 1;
-        var cdgH2 = Math.abs(cdg3.y - cdg2.y) < 1;
-        var cdgVLen = Math.abs(cdg2.y - cdg1.y);
-        if (cdgH1 && cdgV && cdgH2 && cdgVLen > 0.3 && cdgVLen <= 8) {
-          // Snap to the Y of the longer horizontal segment
-          var cdgFirstLen = Math.abs(cdg1.x - cdg0.x);
-          var cdgThirdLen = Math.abs(cdg3.x - cdg2.x);
-          var cdgSnapY = cdgFirstLen >= cdgThirdLen ? cdg0.y : cdg3.y;
-          pathPoints = [{ x: cdg0.x, y: cdgSnapY }, { x: cdg3.x, y: cdgSnapY }];
+        // Eliminate tiny H-V-H doglegs: when the middle segment is small,
+        // snap the shorter end to the longer end's coordinate for a cleaner look.
+        if (pathPoints.length === 4) {
+          var cdg0 = pathPoints[0], cdg1 = pathPoints[1], cdg2 = pathPoints[2], cdg3 = pathPoints[3];
+          var cdgH1 = Math.abs(cdg1.y - cdg0.y) < 1;
+          var cdgV  = Math.abs(cdg2.x - cdg1.x) < 1;
+          var cdgH2 = Math.abs(cdg3.y - cdg2.y) < 1;
+          var cdgVLen = Math.abs(cdg2.y - cdg1.y);
+          if (cdgH1 && cdgV && cdgH2 && cdgVLen > 0.3 && cdgVLen <= 8) {
+            // Snap to the Y of the longer horizontal segment
+            var cdgFirstLen = Math.abs(cdg1.x - cdg0.x);
+            var cdgThirdLen = Math.abs(cdg3.x - cdg2.x);
+            var cdgSnapY = cdgFirstLen >= cdgThirdLen ? cdg0.y : cdg3.y;
+            pathPoints = [{ x: cdg0.x, y: cdgSnapY }, { x: cdg3.x, y: cdgSnapY }];
+          }
+          // V-H-V pattern
+          var cdgV1 = Math.abs(cdg1.x - cdg0.x) < 1;
+          var cdgH  = Math.abs(cdg2.y - cdg1.y) < 1;
+          var cdgV2 = Math.abs(cdg3.x - cdg2.x) < 1;
+          var cdgHLen = Math.abs(cdg2.x - cdg1.x);
+          if (cdgV1 && cdgH && cdgV2 && cdgHLen > 0.3 && cdgHLen <= 8) {
+            var cdgFirstVLen = Math.abs(cdg1.y - cdg0.y);
+            var cdgThirdVLen = Math.abs(cdg3.y - cdg2.y);
+            var cdgSnapX = cdgFirstVLen >= cdgThirdVLen ? cdg0.x : cdg3.x;
+            pathPoints = [{ x: cdgSnapX, y: cdg0.y }, { x: cdgSnapX, y: cdg3.y }];
+          }
         }
-        // V-H-V pattern
-        var cdgV1 = Math.abs(cdg1.x - cdg0.x) < 1;
-        var cdgH  = Math.abs(cdg2.y - cdg1.y) < 1;
-        var cdgV2 = Math.abs(cdg3.x - cdg2.x) < 1;
-        var cdgHLen = Math.abs(cdg2.x - cdg1.x);
-        if (cdgV1 && cdgH && cdgV2 && cdgHLen > 0.3 && cdgHLen <= 8) {
-          var cdgFirstVLen = Math.abs(cdg1.y - cdg0.y);
-          var cdgThirdVLen = Math.abs(cdg3.y - cdg2.y);
-          var cdgSnapX = cdgFirstVLen >= cdgThirdVLen ? cdg0.x : cdg3.x;
-          pathPoints = [{ x: cdgSnapX, y: cdg0.y }, { x: cdgSnapX, y: cdg3.y }];
-        }
-      }
 
-      pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
-      pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
-      pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
-      pathPoints = ensureWholePartMarkerStub(pathPoints, orel, fromE);
-      if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
-          safePathPoints.length >= 2 &&
-          !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
-        pathPoints = safePathPoints;
-      }
-      // Local cosmetic simplifications may move an endpoint or lane back onto
-      // another relationship. Keep the routed path when that loses separation.
-      if (UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
-          UMLShared.routeTrackOverlapLength(pathPoints, associationOccupiedSegments) >
-          UMLShared.routeTrackOverlapLength(safePathPoints, associationOccupiedSegments) ||
-          UMLShared.countRouteCrossings(pathPoints, associationOccupiedSegments) >
-          UMLShared.countRouteCrossings(safePathPoints, associationOccupiedSegments)) {
-        pathPoints = safePathPoints;
+        pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
+        pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
+        pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
+        pathPoints = ensureWholePartMarkerStub(pathPoints, orel, fromE);
+        if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
+            safePathPoints.length >= 2 &&
+            !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
+          pathPoints = safePathPoints;
+        }
+        // Local cosmetic simplifications may move an endpoint or lane back onto
+        // another relationship. Keep the routed path when that loses separation.
+        if (UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
+            UMLShared.routeTrackOverlapLength(pathPoints, associationOccupiedSegments) >
+            UMLShared.routeTrackOverlapLength(safePathPoints, associationOccupiedSegments) ||
+            UMLShared.countRouteCrossings(pathPoints, associationOccupiedSegments) >
+            UMLShared.countRouteCrossings(safePathPoints, associationOccupiedSegments)) {
+          pathPoints = safePathPoints;
+        }
       }
 
       var markerPathPoints = pathPoints;
@@ -9484,21 +9528,23 @@
         sourceMarkerObstacles.push(sourceAggregationObstacle);
       }
 
-      if (orel.navigability === 'bidirectional') {
-        var sourceArrowX = p0.x;
-        var sourceArrowY = p0.y;
-        if (orel.type === 'composition' || orel.type === 'aggregation') {
-          var markerOffset = 16;
-          sourceArrowX += startDx * markerOffset;
-          sourceArrowY += startDy * markerOffset;
-        }
+      var fromNavigation = orel.fromNavigability ||
+        (orel.navigability === 'bidirectional' ? 'navigable' :
+          orel.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
+      var toNavigation = orel.toNavigability ||
+        (orel.navigability === 'navigable' || orel.navigability === 'bidirectional' || orel.type === 'navigable' ? 'navigable' :
+          orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
+      var sourceNavigationOffset = sourceDiamondTip ? CFG.diamondClassGap + CFG.diamondH * 1.12 + 4 : 0;
+      var sourceArrowX = p0.x + startDx * sourceNavigationOffset;
+      var sourceArrowY = p0.y + startDy * sourceNavigationOffset;
+      if (fromNavigation === 'navigable') {
         var sourceArrow = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, sourceArrow.x, sourceArrow.y, startDx, startDy, colors.line);
         var sourceArrowObstacle = pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceArrowObstacle);
         sourceMarkerObstacles.push(sourceArrowObstacle);
-      } else if (orel.navigability === 'non-navigable-both') {
-        var sourceCross = offsetClassMarkerPoint(p0.x, p0.y, startDx, startDy, 'cross');
+      } else if (fromNavigation === 'non-navigable') {
+        var sourceCross = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, sourceCross.x, sourceCross.y, startDx, startDy, colors.line);
         var sourceCrossObstacle = pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceCrossObstacle);
@@ -9506,13 +9552,13 @@
       }
 
       // Target decorations (deferred to draw on top of class boxes)
-      if (orel.type === 'dependency' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
+      if (orel.type === 'dependency' || toNavigation === 'navigable') {
         var targetArrow = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, targetArrow.x, targetArrow.y, endDx, endDy, colors.line);
         var targetArrowObstacle = pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(targetArrowObstacle);
         targetMarkerObstacles.push(targetArrowObstacle);
-      } else if (orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
+      } else if (toNavigation === 'non-navigable') {
         var targetCross = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, targetCross.x, targetCross.y, endDx, endDy, colors.line);
         var targetCrossObstacle = pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6);
@@ -11148,7 +11194,7 @@
       }
 
       // Combined fragment: alt, loop, opt, break, par, critical, ref, neg
-      var fragMatch = line.match(/^(alt|loop|opt|break|par|critical|ref|neg)\s*(\[.*\])?(.*)$/i);
+      var fragMatch = line.match(/^(alt|loop|opt|break|par|critical|ref|neg)\b\s*(\[.*\])?(.*)$/i);
       if (fragMatch) {
         var fragType = fragMatch[1].toLowerCase();
         var condition = (fragMatch[2] || fragMatch[3] || '').trim();
@@ -11159,7 +11205,7 @@
       }
 
       // Else clause in alt
-      var elseMatch = line.match(/^else\s*(\[.*\])?(.*)$/i);
+      var elseMatch = line.match(/^else\b\s*(\[.*\])?(.*)$/i);
       if (elseMatch) {
         var elseCond = (elseMatch[1] || elseMatch[2] || '').trim();
         if (elseCond.startsWith('[')) elseCond = elseCond.substring(1);
@@ -11262,7 +11308,10 @@
         var msgType = 'sync'; // default
         var isDashed = false;
         if (arrow === '-->' || arrow === '<--') { msgType = 'response'; isDashed = true; }
-        else if (arrow === '->>' || arrow === '->>') { msgType = 'async'; }
+        else if (arrow === '->>' || arrow === '<<-' || arrow === '-->>' || arrow === '<<--') {
+          msgType = 'async';
+          isDashed = arrow === '-->>' || arrow === '<<--';
+        }
         else if (arrow === '->') { msgType = 'sync'; }
 
         messages.push({
@@ -12359,12 +12408,12 @@
 
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-    fontSize: 14,
-    fontSizeBold: 15,
-    fontSizeAction: 12,
-    lineHeight: 22,
+    fontSize: 20,
+    fontSizeBold: 22,
+    fontSizeAction: 20,
+    lineHeight: 28,
     padX: 20,
-    padY: 10,
+    padY: 14,
     stateMinW: 120,
     stateRx: 12,
     initialR: 8,
@@ -12382,24 +12431,57 @@
 
   // ─── Parser ───────────────────────────────────────────────────────
 
+  // Split compact state declarations without treating action code or note text
+  // as region delimiters. Actions retain their braces, strings, and semicolons.
+  function stateStatements(text) {
+    const statements = [];
+    let inNote = false;
+    for (const rawLine of text.split('\n')) {
+      let remaining = rawLine.trim();
+      if (inNote || /^note\b/i.test(remaining)) {
+        statements.push(rawLine);
+        if (/^end\s*note$/i.test(remaining)) inNote = false;
+        else if (/^note\b/i.test(remaining) && !remaining.includes(':')) inNote = true;
+        continue;
+      }
+      while (remaining) {
+        if (remaining[0] === '}') {
+          statements.push('}');
+          remaining = remaining.slice(1).replace(/^\s*;?\s*/, '');
+          continue;
+        }
+        const declaration = remaining.match(/^state\s+[^{};]+(?:\{|;|(?=\})|$)/i);
+        if (!declaration) {
+          statements.push(remaining);
+          break;
+        }
+        statements.push(declaration[0].replace(/;$/, '').trim());
+        remaining = remaining.slice(declaration[0].length).trim();
+      }
+    }
+    return statements;
+  }
+
   function parse(text) {
-    var lines = text.split('\n');
-    var states = {};       // name -> { name, type, entryAction, exitAction, doActivity }
+    const lines = stateStatements(text);
+    const states = Object.create(null);
+    const stateStack = [];
     var transitions = [];
     var notes = [];
-    var inState = null;
-    var braceDepth = 0;
     var direction = 'TB';
     var layoutPreference = null;
     var shadowEnabled = true;
 
-    // Ensure [*] pseudo-states exist
-    function ensureState(name) {
+    function ensureState(name, parent, explicit) {
       if (!states[name]) {
-        var type = 'state';
-        if (name === '[*]') type = 'pseudo'; // resolved later per usage
-        states[name] = { name: name, type: type, entryAction: '', exitAction: '', doActivity: '' };
+        states[name] = { name: name, type: name === '[*]' ? 'pseudo' : 'state',
+          entryAction: '', exitAction: '', doActivity: '', parent: parent || null };
       }
+      // Declarations own containment. A transition merely references its ends.
+      if (explicit) {
+        states[name].parent = parent || null;
+      }
+      return states[name];
     }
 
     var actionProperties = { entry: 'entryAction', exit: 'exitAction', do: 'doActivity' };
@@ -12407,10 +12489,17 @@
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
+      const parent = stateStack.length ? stateStack[stateStack.length - 1] : null;
+      if (line === '}') {
+        stateStack.pop();
+        continue;
+      }
 
-      // Layout directive
+      var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
+      if (noteIdx >= 0) { i = noteIdx; continue; }
+
       var layoutDirective = UMLShared.parseLayoutDirective(line);
-      if (layoutDirective && inState === null) {
+      if (layoutDirective && parent === null) {
         if (layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
           shadowEnabled = layoutDirective.shadowEnabled;
         } else if (layoutDirective.direction) {
@@ -12422,117 +12511,39 @@
         continue;
       }
 
-      // A named activity row has the same meaning as an action inside that
-      // state's block. It may also introduce a child within a composite region.
       var namedAction = line.match(/^(\S+)\s*:\s*(entry|exit|do)\s*\/\s*(.+)$/i);
       if (namedAction) {
-        var actionState = namedAction[1];
-        ensureState(actionState);
-        states[actionState][actionProperties[namedAction[2].toLowerCase()]] = namedAction[3].trim();
-        if (inState !== null && actionState !== inState) {
-          states[actionState].parent = inState;
-          states[inState].isComposite = true;
-        }
+        const actionState = ensureState(namedAction[1], parent);
+        actionState[actionProperties[namedAction[2].toLowerCase()]] = namedAction[3].trim();
+        continue;
+      }
+      var blockAction = line.match(/^(entry|exit|do)\s*\/\s*(.+)$/i);
+      if (blockAction && parent !== null) {
+        states[parent][actionProperties[blockAction[1].toLowerCase()]] = blockAction[2].trim();
         continue;
       }
 
-      // Inside a state block
-      if (inState !== null) {
-        for (var ci = 0; ci < line.length; ci++) {
-          if (line[ci] === '{') braceDepth++;
-          if (line[ci] === '}') braceDepth--;
-        }
-        if (braceDepth <= 0) {
-          inState = null;
-          braceDepth = 0;
-          continue;
-        }
-        // Parse internal actions
-        var blockAction = line.match(/^(entry|exit|do)\s*\/\s*(.+)$/i);
-        if (blockAction) {
-          states[inState][actionProperties[blockAction[1].toLowerCase()]] = blockAction[2].trim();
-          continue;
-        }
-        // Sub-transitions inside composite state
-        var subTrans = line.match(/^(\S+)\s+-->\s+((?:\[[^\]]*\]\s*)?)(\S+)((?:\s*\/[^:]*)?)\s*(?::\s*(.*))?$/);
-        if (subTrans) {
-          var sf = subTrans[1], sg = subTrans[2] ? subTrans[2].trim() : '', st = subTrans[3];
-          var sa = subTrans[4] ? subTrans[4].trim() : '', se = subTrans[5] ? subTrans[5].trim() : '';
-          ensureState(sf); ensureState(st);
-          states[sf].parent = inState; states[st].parent = inState;
-          states[inState].isComposite = true;
-          var slp = []; if (se) slp.push(se); if (sg) slp.push(sg); if (sa) slp.push(sa);
-          var subLabelInfo = UMLShared.parseLabelDirectionCue(slp.join(' '));
-          transitions.push({ from: sf, to: st, label: subLabelInfo.text, labelDirection: subLabelInfo.hasDirection, parent: inState });
-          continue;
-        }
-        continue;
-      }
-
-      // Note
-      var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
-      if (noteIdx >= 0) { i = noteIdx; continue; }
-
-      // Strip optional `#color` highlight suffix on state declarations.
-      // Guard against swallowing a state named `hatched` / `dotted` / ... —
-      // only strip when the remainder still looks like a `state` decl.
       var stateHl = UMLShared.parseHighlightColor(line);
-      var lineForState = line;
-      var stateHighlight = null;
-      var stateTexture = null;
-      if (/^state\s+\S/i.test(stateHl.stripped)) {
-        lineForState = stateHl.stripped;
-        stateHighlight = stateHl.highlight;
-        stateTexture = stateHl.texture;
-      }
-
-      // Choice pseudostate: state Name <<choice>>
-      var choiceMatch = lineForState.match(/^state\s+(\S+)\s+<<choice>>\s*$/);
-      if (choiceMatch) {
-        var cName = choiceMatch[1];
-        ensureState(cName);
-        states[cName].type = 'choice';
-        if (stateHighlight) states[cName].highlight = stateHighlight;
-        if (stateTexture) states[cName].texture = stateTexture;
+      const declaration = stateHl.stripped.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
+      if (declaration) {
+        const state = ensureState(declaration[1], parent, true);
+        if (/<<choice>>/.test(stateHl.stripped)) state.type = 'choice';
+        if (stateHl.highlight) state.highlight = stateHl.highlight;
+        if (stateHl.texture) state.texture = stateHl.texture;
+        if (declaration[2]) stateStack.push(state.name);
         continue;
       }
 
-      // State declaration: state Name { ... }
-      var stateMatch = lineForState.match(/^state\s+(\S+)\s*\{?/);
-      if (stateMatch) {
-        var sName = stateMatch[1];
-        ensureState(sName);
-        if (stateHighlight) states[sName].highlight = stateHighlight;
-        if (stateTexture) states[sName].texture = stateTexture;
-        if (lineForState.indexOf('{') !== -1) {
-          braceDepth = 1;
-          if (lineForState.indexOf('}') !== -1 && lineForState.indexOf('}') > lineForState.indexOf('{')) {
-            braceDepth = 0;
-          } else {
-            inState = sName;
-          }
-        }
-        continue;
-      }
-
-      // Transition: From --> [guard?] To [/ action?] [: event]
-      // Also handles standard: From --> To : event [guard] / action
-      var transRe = line.match(/^(\S+)\s+-->\s+((?:\[[^\]]*\]\s*)?)(\S+)((?:\s*\/[^:]*)?)\s*(?::\s*(.*))?$/);
-      if (transRe) {
-        var from = transRe[1];
-        var preGuard = transRe[2] ? transRe[2].trim() : '';
-        var to = transRe[3];
-        var preAction = transRe[4] ? transRe[4].trim() : '';
-        var eventLabel = transRe[5] ? transRe[5].trim() : '';
-        var labelParts = [];
-        if (eventLabel) labelParts.push(eventLabel);
-        if (preGuard) labelParts.push(preGuard);
-        if (preAction) labelParts.push(preAction);
-        var stateLabelInfo = UMLShared.parseLabelDirectionCue(labelParts.join(' '));
-        ensureState(from);
-        ensureState(to);
-        transitions.push({ from: from, to: to, label: stateLabelInfo.text, labelDirection: stateLabelInfo.hasDirection });
-        continue;
+      // Transition: From --> [guard?] To [/ action?] [: event].
+      var transition = line.match(/^(\S+)\s+-->\s+((?:\[[^\]]*\]\s*)?)(\S+)((?:\s*\/[^:]*)?)\s*(?::\s*(.*))?$/);
+      if (transition) {
+        const from = transition[1], to = transition[3];
+        const label = [transition[5], transition[2], transition[4]].filter(Boolean).map(part => part.trim()).join(' ');
+        const labelInfo = UMLShared.parseLabelDirectionCue(label);
+        ensureState(from, parent);
+        ensureState(to, parent);
+        transitions.push({ from: from, to: to, label: labelInfo.text,
+          labelDirection: labelInfo.hasDirection, parent: parent });
       }
     }
 
@@ -12586,6 +12597,25 @@
     // Remove the generic [*] placeholder
     delete states['[*]'];
 
+    function containingRegions(name) {
+      const regions = [];
+      const visited = new Set([name]);
+      let parent = states[name] && states[name].parent;
+      while (parent && !visited.has(parent)) {
+        regions.push(parent);
+        visited.add(parent);
+        parent = states[parent] && states[parent].parent;
+      }
+      return regions;
+    }
+    for (const state of Object.values(states)) {
+      if (state.parent && states[state.parent]) states[state.parent].isComposite = true;
+    }
+    for (const transition of transitions) {
+      const targetRegions = new Set(containingRegions(transition.to));
+      transition.parent = containingRegions(transition.from).find(region => targetRegions.has(region)) || null;
+    }
+
     // Convert to array
     var stateList = [];
     for (var sn in states) stateList.push(states[sn]);
@@ -12616,7 +12646,7 @@
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
     var height = CFG.padY * 2 + CFG.lineHeight;
-    if (hasActions) height += 4 + actionLines * 16; // divider + action lines
+    if (hasActions) height += 4 + actionLines * CFG.lineHeight; // divider + action lines
 
     return { width: Math.ceil(width), height: Math.ceil(height), hasActions: hasActions, actionLines: actionLines };
   }
@@ -12666,6 +12696,38 @@
     }
   }
 
+  function stateAncestorIds(entries, id) {
+    const ancestors = [];
+    const seen = new Set([id]);
+    let parent = entries[id] && entries[id].state.parent;
+    while (parent && entries[parent] && !seen.has(parent)) {
+      ancestors.push(parent);
+      seen.add(parent);
+      parent = entries[parent].state.parent;
+    }
+    return ancestors;
+  }
+
+  function stateEndpointInRegion(entries, id, parent) {
+    let current = id;
+    for (const ancestor of stateAncestorIds(entries, id)) {
+      if (ancestor === parent) break;
+      current = ancestor;
+    }
+    return current;
+  }
+
+  function includeStateDescendants(target, entries, id, x, y) {
+    const entry = entries[id];
+    target[id] = Object.assign({}, entry, { x: x, y: y });
+    if (!entry.subLayout) return;
+    for (const childId of Object.keys(entry.subLayout.nodes)) {
+      const child = entry.subLayout.nodes[childId];
+      includeStateDescendants(target, entries, childId,
+        x + entry.subOffset.x + child.x, y + entry.subOffset.y + child.y);
+    }
+  }
+
   function computeLayout(parsed, colors) {
     var stateList = parsed.states;
     var transitions = parsed.transitions;
@@ -12692,9 +12754,12 @@
     }
 
     // For composite states, run sub-layout to compute their size
-    var compositeHeaderH = CFG.padY * 2 + CFG.lineHeight + 4; // header + divider
     var compositePad = 20;
-    for (var pName in compositeChildren) {
+    const compositeOrder = Object.keys(compositeChildren).sort((left, right) =>
+      stateAncestorIds(entries, right).length - stateAncestorIds(entries, left).length);
+    for (const pName of compositeOrder) {
+      const headerBox = measureState(entries[pName].state);
+      const compositeHeaderH = headerBox.height + 4;
       var kids = compositeChildren[pName];
       var subNodes = [], subEdges = [];
       for (var ki = 0; ki < kids.length; ki++) {
@@ -12703,7 +12768,9 @@
       }
       for (var ti = 0; ti < transitions.length; ti++) {
         if (transitions[ti].parent === pName) {
-          subEdges.push({ source: transitions[ti].from, target: transitions[ti].to, type: 'navigable', data: transitions[ti] });
+          const from = stateEndpointInRegion(entries, transitions[ti].from, pName);
+          const to = stateEndpointInRegion(entries, transitions[ti].to, pName);
+          if (from !== to) subEdges.push({ source: from, target: to, type: 'navigable', data: transitions[ti] });
         }
       }
       if (subNodes.length > 0) {
@@ -12752,12 +12819,8 @@
         }
         var subEntries = {};
         for (var childId in subResult.nodes) {
-          subEntries[childId] = {
-            state: entries[childId].state,
-            box: entries[childId].box,
-            x: subResult.nodes[childId].x,
-            y: subResult.nodes[childId].y
-          };
+          includeStateDescendants(subEntries, entries, childId,
+            subResult.nodes[childId].x, subResult.nodes[childId].y);
         }
         var subDrawing = routeStateTransitions({
           entries: subEntries,
@@ -12791,9 +12854,9 @@
         }
         var subW = sMaxX - sMinX + compositePad * 2;
         var subH = sMaxY - sMinY + compositePad * 2;
-        var compositeW = Math.max(subW, UMLShared.textWidth(pName, true, CFG.fontSizeBold) + CFG.padX * 2);
+        var compositeW = Math.max(subW, headerBox.width);
         var compositeH = compositeHeaderH + subH;
-        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: false, actionLines: 0 };
+        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: headerBox.hasActions, actionLines: headerBox.actionLines };
         entries[pName].subLayout = subResult;
         entries[pName].subOffset = { x: -sMinX + compositePad, y: compositeHeaderH - sMinY + compositePad };
         entries[pName].subBounds = { w: subW, h: subH };
@@ -12811,7 +12874,9 @@
     for (var t = 0; t < transitions.length; t++) {
       var tr = transitions[t];
       if (tr.parent) continue; // skip sub-transitions
-      layoutEdges.push({ source: tr.from, target: tr.to, type: 'navigable', data: tr });
+      const from = stateEndpointInRegion(entries, tr.from, null);
+      const to = stateEndpointInRegion(entries, tr.to, null);
+      if (from !== to) layoutEdges.push({ source: from, target: to, type: 'navigable', data: tr });
     }
 
     var stateGapX = CFG.gapX;
@@ -12867,7 +12932,7 @@
     }
 
     // Position children inside their composite parents
-    for (var pn in compositeChildren) {
+    for (const pn of compositeOrder.slice().reverse()) {
       var pe = entries[pn];
       if (!pe.subLayout) continue;
       var off = pe.subOffset;
@@ -13700,6 +13765,23 @@
     };
   }
 
+  function drawStateActions(svg, entry, colors) {
+    const state = entry.state;
+    if (!entry.box.hasActions) return;
+    const dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
+    svg.push('<line x1="' + entry.x + '" y1="' + dividerY + '" x2="' +
+      (entry.x + entry.box.width) + '" y2="' + dividerY +
+      '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+    let actionY = dividerY + CFG.lineHeight * 0.85;
+    for (const [label, value] of [['entry', state.entryAction], ['exit', state.exitAction], ['do', state.doActivity]]) {
+      if (!value) continue;
+      svg.push('<text x="' + (entry.x + CFG.padX / 2) + '" y="' + actionY +
+        '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">' +
+        label + ' / ' + UMLShared.escapeXml(value) + '</text>');
+      actionY += CFG.lineHeight;
+    }
+  }
+
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var drawing = routeStateTransitions(layout, {
@@ -13717,7 +13799,7 @@
       if (!parent.subLayout) continue;
       var childEntries = {};
       for (var childId in entries) {
-        if (entries[childId].state.parent === parentId) childEntries[childId] = entries[childId];
+        if (stateAncestorIds(entries, childId).includes(parentId)) childEntries[childId] = entries[childId];
       }
       // Route again at the final coordinates: manual layout metadata may
       // move a child after its parent's automatic size was measured.
@@ -13805,7 +13887,9 @@
     svg = finalSvg;
 
     // ── Draw composite state backgrounds first ──
-    for (var cen in entries) {
+    const paintOrder = Object.keys(entries).sort((left, right) =>
+      stateAncestorIds(entries, left).length - stateAncestorIds(entries, right).length);
+    for (const cen of paintOrder) {
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
       var cFills = UMLShared.highlightFills(colors, ce.state.highlight, ce.state.texture);
@@ -13825,7 +13909,8 @@
         '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(ce.state.name) + '</text>');
       // Divider line
-      var cdY = ce.y + CFG.padY * 2 + CFG.lineHeight;
+      drawStateActions(svg, ce, colors);
+      var cdY = ce.y + measureState(ce.state).height;
       svg.push('<line x1="' + ce.x + '" y1="' + cdY + '" x2="' + (ce.x + ce.box.width) + '" y2="' + cdY +
         '" stroke="' + colors.stroke + '" stroke-width="1"/>');
       svg.push('</g>');
@@ -13885,31 +13970,7 @@
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
           UMLShared.escapeXml(s.name) + '</text>');
 
-        // Internal actions
-        if (e.box.hasActions) {
-          var divY = e.y + CFG.padY * 2 + CFG.lineHeight;
-          svg.push('<line' + stateLayoutAttrs(en) + ' x1="' + e.x + '" y1="' + divY + '" x2="' + (e.x + e.box.width) + '" y2="' + divY +
-            '" stroke="' + colors.stroke + '" stroke-width="1"/>');
-
-          var actionY = divY + 14;
-          if (s.entryAction) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">entry / ' +
-              UMLShared.escapeXml(s.entryAction) + '</text>');
-            actionY += 16;
-          }
-          if (s.exitAction) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">exit / ' +
-              UMLShared.escapeXml(s.exitAction) + '</text>');
-            actionY += 16;
-          }
-          if (s.doActivity) {
-            svg.push('<text' + stateLayoutAttrs(en) + ' x="' + (e.x + CFG.padX / 2) + '" y="' + actionY +
-              '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">do / ' +
-              UMLShared.escapeXml(s.doActivity) + '</text>');
-          }
-        }
+        drawStateActions(svg, e, colors);
       }
     }
 
@@ -13933,6 +13994,24 @@
   }
 
 
+  function applyStateLayoutPositions(layout, metadata) {
+    if (!metadata || !metadata.positions) return;
+    const before = Object.fromEntries(Object.entries(layout.entries).map(([id, entry]) =>
+      [id, { x: entry.x, y: entry.y }]));
+    UMLShared.applyLayoutPositions(layout, metadata);
+    const ordered = Object.keys(layout.entries).sort((left, right) =>
+      stateAncestorIds(layout.entries, left).length - stateAncestorIds(layout.entries, right).length);
+    for (const id of ordered) {
+      const entry = layout.entries[id];
+      const parent = entry.state.parent;
+      if (!parent || metadata.positions[id]) continue;
+      entry.x += layout.entries[parent].x - before[parent].x;
+      entry.y += layout.entries[parent].y - before[parent].y;
+    }
+    // Recompute the viewport after moving descendants; saved nodes stay fixed.
+    UMLShared.applyLayoutPositions(layout, metadata);
+  }
+
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
@@ -13949,7 +14028,7 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed, colors);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
+    applyStateLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
@@ -19690,10 +19769,10 @@
 
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-    fontSize: 14,
-    fontSizeBold: 15,
-    fontSizeComp: 13,
-    lineHeight: 22,
+    fontSize: 20,
+    fontSizeBold: 22,
+    fontSizeComp: 20,
+    lineHeight: 28,
     nodePadX: 20,
     nodePadY: 14,
     nodeMinW: 160,
@@ -19719,29 +19798,72 @@
   function parse(text) {
     var lines = text.split('\n');
     var nodes = [];
-    var nodeMap = {};
+    var elements = [];
+    var elementMap = Object.create(null);
+    var labelMap = Object.create(null);
     var links = [];
     var notes = [];
-    var currentNode = null;
-    var braceDepth = 0;
+    var parents = [];
     var direction = 'TB';
     var layoutPreference = null;
 
-    function addNodeChild(nodeName, childLine) {
-      var child = String(childLine || '').trim();
-      var childMatch = child.match(/^(component|artifact)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?/i);
-      if (childMatch && nodeMap[nodeName]) {
-        nodeMap[nodeName].components.push(childMatch[4] || childMatch[2] || childMatch[3]);
+    function unquote(value) {
+      return value.charAt(0) === '"'
+        ? value.slice(1, -1).replace(/\\(["\\])/g, '$1')
+        : value;
+    }
+
+    // Braces and semicolons inside display labels are ordinary text. Keep
+    // statements on their original line so connector editing can find them.
+    function splitStatements(line) {
+      var parts = [], start = 0, quoted = false, escaped = false;
+      for (var c = 0; c < line.length; c++) {
+        var ch = line.charAt(c);
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') quoted = false;
+        } else if (ch === '"') {
+          quoted = true;
+        } else if (ch === '{' || ch === '}' || ch === ';') {
+          if (c > start) parts.push(line.slice(start, c).trim());
+          parts.push(ch);
+          start = c + 1;
+        }
       }
+      if (start < line.length) parts.push(line.slice(start).trim());
+      return parts;
+    }
+
+    function addElement(name, label, kind, parentId, stereotype, style, sourceLine) {
+      var element = elementMap[name];
+      if (!element) {
+        element = {
+          name: name, label: label, kind: kind, parentId: parentId,
+          stereotype: stereotype, isInstance: label.indexOf(':') !== -1,
+          components: [], highlight: style.highlight, texture: style.texture,
+          sourceLine: sourceLine
+        };
+        elementMap[name] = element;
+        elements.push(element);
+        if (kind === 'node') nodes.push(element);
+        if (parentId && elementMap[parentId]) elementMap[parentId].components.push(name);
+      } else {
+        if (style.highlight) element.highlight = style.highlight;
+        if (style.texture) element.texture = style.texture;
+        if (stereotype) element.stereotype = stereotype;
+      }
+      labelMap[label] = name;
+      return element;
     }
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
-      if (!line || line === '@startuml' || line === '@enduml') continue;
+      if (!line || line === '@startuml' || line === '@enduml' || line.charAt(0) === "'") continue;
 
       // Layout directive
       var layoutDirective = UMLShared.parseLayoutDirective(line);
-      if (layoutDirective && !currentNode) {
+      if (layoutDirective && parents.length === 0) {
         if (layoutDirective.direction) {
           direction = layoutDirective.direction;
           layoutPreference = null;
@@ -19751,113 +19873,154 @@
         continue;
       }
 
-      // Inside a node block
-      if (currentNode !== null) {
-        for (var ci = 0; ci < line.length; ci++) {
-          if (line[ci] === '{') braceDepth++;
-          if (line[ci] === '}') braceDepth--;
-        }
-        if (braceDepth <= 0) {
-          currentNode = null;
-          braceDepth = 0;
-          continue;
-        }
-        addNodeChild(currentNode, line);
-        continue;
-      }
-
-      // Strip optional trailing `#color` highlight.
-      // Guard against swallowing a node named after a texture keyword.
-      var depHl = UMLShared.parseHighlightColor(line);
-      var depLine = line;
-      var depHighlight = null;
-      var depTexture = null;
-      if (/^node\s+\S/i.test(depHl.stripped) || depHl.highlight) {
-        depLine = depHl.stripped;
-        depHighlight = depHl.highlight;
-        depTexture = depHl.texture;
-      }
-
-      // Node declaration
-      var nodeMatch = depLine.match(/^node\s+(\S+)\s*\{?/);
-      if (nodeMatch) {
-        var nName = nodeMatch[1];
-        if (!nodeMap[nName]) {
-          // Support instance notation: "instanceName:TypeName" (underlined per UML spec Fig 9-3)
-          var isInstance = nName.indexOf(':') !== -1;
-          nodeMap[nName] = { name: nName, isInstance: isInstance, components: [], highlight: depHighlight, texture: depTexture };
-          nodes.push(nodeMap[nName]);
-        } else {
-          if (depHighlight) nodeMap[nName].highlight = depHighlight;
-          if (depTexture) nodeMap[nName].texture = depTexture;
-        }
-        if (depLine.indexOf('{') !== -1) {
-          braceDepth = 1;
-          if (depLine.indexOf('}') !== -1 && depLine.indexOf('}') > depLine.indexOf('{')) {
-            var inlineBody = depLine.substring(depLine.indexOf('{') + 1, depLine.lastIndexOf('}'));
-            var pieces = inlineBody.split(/[;\n]/);
-            for (var depi = 0; depi < pieces.length; depi++) addNodeChild(nName, pieces[depi]);
-            braceDepth = 0;
-          } else {
-            currentNode = nName;
-          }
-        }
-        continue;
-      }
-
-      // Note
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
 
-      // Link: A --> B : label  or  A ..> B : label
-      var linkMatch = line.match(/^(\S+)\s+(-->|\.\.>|--)\s+(\S+)\s*(?::\s*(.*))?$/);
-      if (linkMatch) {
-        var from = linkMatch[1], arrow = linkMatch[2], to = linkMatch[3];
-        var linkLabelInfo = UMLShared.parseLabelDirectionCue(linkMatch[4] || '');
-        // Ensure nodes exist
-        if (!nodeMap[from]) { nodeMap[from] = { name: from, isInstance: from.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[from]); }
-        if (!nodeMap[to]) { nodeMap[to] = { name: to, isInstance: to.indexOf(':') !== -1, components: [] }; nodes.push(nodeMap[to]); }
-        var type = arrow === '..>' ? 'dependency' : 'link';
-        links.push({ from: from, to: to, type: type, label: linkLabelInfo.text, labelDirection: linkLabelInfo.hasDirection });
-        continue;
+      var statements = splitStatements(line);
+      var declaredNode = null;
+      for (var si = 0; si < statements.length; si++) {
+        var statement = statements[si];
+        if (!statement || statement === ';') continue;
+        if (statement === '{') {
+          parents.push(declaredNode || (parents.length ? parents[parents.length - 1] : null));
+          declaredNode = null;
+          continue;
+        }
+        if (statement === '}') {
+          parents.pop();
+          declaredNode = null;
+          continue;
+        }
+        declaredNode = null;
+
+        // Parse the identifier before its style suffix: an element called
+        // "dotted" or an alias called "striped" is not a texture request.
+        var declaration = statement.match(/^(node|component|artifact)\s+("(?:\\.|[^"\\])*"|[^\s"]+)(?:\s+as\s+("(?:\\.|[^"\\])*"|[^\s"]+))?(.*)$/i);
+        if (declaration) {
+          var kind = declaration[1].toLowerCase();
+          var label = unquote(declaration[2]);
+          var name = declaration[3] ? unquote(declaration[3]) : label;
+          var suffix = declaration[4].trim();
+          var stereotypeMatch = suffix.match(/^<<([^>]+)>>\s*/);
+          var stereotype = stereotypeMatch ? stereotypeMatch[1] : '';
+          if (stereotypeMatch) suffix = suffix.slice(stereotypeMatch[0].length);
+          var style = UMLShared.parseHighlightColor('element ' + suffix);
+          var parentId = parents.length ? parents[parents.length - 1] : null;
+          addElement(name, label, kind, parentId, stereotype, style, i);
+          if (kind === 'node') declaredNode = name;
+          continue;
+        }
+
+        var linkMatch = statement.match(/^("(?:\\.|[^"\\])*"|[^\s"]+)\s+(-->|\.\.>|--)\s+("(?:\\.|[^"\\])*"|[^\s"]+)(?:\s+(dashed))?\s*(?::\s*(.*))?$/i);
+        if (linkMatch) {
+          var arrow = linkMatch[2];
+          var labelInfo = UMLShared.parseLabelDirectionCue(linkMatch[5] || '');
+          links.push({
+            from: unquote(linkMatch[1]), to: unquote(linkMatch[3]),
+            type: arrow === '..>' ? 'dependency' : 'link', arrow: arrow,
+            dashed: arrow === '..>' || !!linkMatch[4], sourceLine: i,
+            label: labelInfo.text, labelDirection: labelInfo.hasDirection
+          });
+        }
       }
     }
 
-    return { nodes: nodes, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
+    // Resolve after every declaration: an earlier relationship to a child
+    // artifact must not invent a second, top-level hardware node for it.
+    for (var li = 0; li < links.length; li++) {
+      for (var ei = 0; ei < 2; ei++) {
+        var end = ei === 0 ? 'from' : 'to';
+        var ref = links[li][end];
+        var id = elementMap[ref] ? ref : (labelMap[ref] || ref);
+        links[li][end] = id;
+        if (!elementMap[id]) addElement(id, id, 'node', null, '', {}, links[li].sourceLine);
+      }
+    }
+
+    return { nodes: nodes, elements: elements, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
   }
 
   // ─── Layout ───────────────────────────────────────────────────────
 
-  function computeLayout(parsed) {
-    var nodes = parsed.nodes;
-    var links = parsed.links;
-    if (nodes.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
+  function deploymentAncestors(entries, id) {
+    const result = [];
+    const seen = new Set([id]);
+    let parent = entries[id] && entries[id].node.parentId;
+    while (parent && entries[parent] && !seen.has(parent)) {
+      result.push(parent);
+      seen.add(parent);
+      parent = entries[parent].node.parentId;
+    }
+    return result;
+  }
 
-    var entries = {};
+  function deploymentLabelLines(element) {
+    const lines = [];
+    if (element.kind === 'artifact') lines.push({ text: '«artifact»', bold: false });
+    if (element.stereotype) lines.push({ text: '«' + element.stereotype + '»', bold: false });
+    lines.push({ text: element.label || element.name, bold: element.kind === 'node' });
+    return lines;
+  }
+
+  function measureDeploymentElement(element) {
+    const lines = deploymentLabelLines(element);
+    const labelWidth = Math.max(...lines.map(line => UMLShared.textWidth(
+      line.text, line.bold, line.bold ? CFG.fontSizeBold : CFG.fontSizeComp)));
+    const iconSpace = element.kind === 'node' ? 0 : CFG.compIconW + CFG.compPadX;
+    const width = Math.max(CFG.nodeMinW, labelWidth + CFG.nodePadX * 2 + iconSpace);
+    const headerHeight = CFG.nodePadY * 2 + lines.length * CFG.lineHeight;
+    return { width: Math.ceil(width), height: Math.ceil(headerHeight), headerHeight: headerHeight };
+  }
+
+  function computeLayout(parsed) {
+    const elements = parsed.elements || parsed.nodes;
+    var links = parsed.links;
+    if (elements.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
+
+    var entries = Object.create(null);
     var layoutNodes = [];
     var layoutEdges = [];
-
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      var nameW = UMLShared.textWidth(n.name, true, CFG.fontSizeBold);
-      var compMaxW = 0;
-      for (var c = 0; c < n.components.length; c++) {
-        compMaxW = Math.max(compMaxW, UMLShared.textWidth(n.components[c], false, CFG.fontSizeComp) + CFG.compIconW + CFG.compPadX * 2 + 8);
+    const children = Object.create(null);
+    for (const element of elements) {
+      entries[element.name] = { node: element, box: measureDeploymentElement(element), x: 0, y: 0 };
+      if (element.parentId) {
+        if (!children[element.parentId]) children[element.parentId] = [];
+        children[element.parentId].push(element.name);
       }
-      var w = Math.max(CFG.nodeMinW, nameW + CFG.nodePadX * 2, compMaxW + CFG.nodePadX * 2);
-      var h = CFG.nodePadY + CFG.lineHeight + 8; // name area
-      if (n.components.length > 0) {
-        h += n.components.length * (CFG.compH + CFG.compGapY) + CFG.nodePadY;
-      } else {
-        h = Math.max(h + CFG.nodePadY, CFG.nodeMinH);
-      }
-      entries[n.name] = { node: n, box: { width: Math.ceil(w), height: Math.ceil(h) }, x: 0, y: 0 };
-      layoutNodes.push({ id: n.name, width: Math.ceil(w), height: Math.ceil(h), data: n });
     }
-
-    for (var li = 0; li < links.length; li++) {
-      var lk = links[li];
-      layoutEdges.push({ source: lk.from, target: lk.to, type: lk.type, data: lk });
+    const outerFirst = Object.keys(entries).sort((left, right) =>
+      deploymentAncestors(entries, left).length - deploymentAncestors(entries, right).length);
+    // Measure containers from the inside out, retaining an independent box for
+    // every contained element so links and the layout editor share its identity.
+    for (const id of outerFirst.slice().reverse()) {
+      const entry = entries[id];
+      const childIds = children[id] || [];
+      if (!childIds.length) continue;
+      let childY = entry.box.headerHeight;
+      let width = entry.box.width;
+      for (const childId of childIds) {
+        const child = entries[childId];
+        const depth = child.node.kind === 'node' ? CFG.node3dDepth : 0;
+        childY += depth;
+        child.relativeX = CFG.nodePadX;
+        child.relativeY = childY;
+        childY += child.box.height + CFG.compGapY;
+        width = Math.max(width, child.box.width + CFG.nodePadX * 2 + depth);
+      }
+      entry.box.width = Math.ceil(width);
+      entry.box.height = Math.ceil(childY - CFG.compGapY + CFG.nodePadY);
+    }
+    function topLevelId(id) {
+      const ancestors = deploymentAncestors(entries, id);
+      return ancestors.length ? ancestors[ancestors.length - 1] : id;
+    }
+    for (const id of outerFirst) {
+      const entry = entries[id];
+      if (!entry.node.parentId) layoutNodes.push({ id: id, width: entry.box.width, height: entry.box.height, data: entry.node });
+    }
+    for (const link of links) {
+      const from = topLevelId(link.from), to = topLevelId(link.to);
+      if (from !== to) layoutEdges.push({ source: from, target: to, type: link.type, data: link });
     }
 
     // Compute link label widths for gap sizing
@@ -19897,7 +20060,7 @@
       if (!dlk || dlk.from === dlk.to) continue;
       var dlw = (dlk.label || dlk.labelDirection) ? UMLShared.labelDirectionTextWidth(dlk.label, dlk.labelDirection, CFG.fontSize) : 0;
       depEdgeSizes.push({
-        source: dlk.from, target: dlk.to,
+        source: topLevelId(dlk.from), target: topLevelId(dlk.to),
         labelWidth: dlw,
         labelHeight: (dlk.label || dlk.labelDirection) ? depLineHeight : 0,
         markerExtent: CFG.arrowSize + CFG.node3dDepth,
@@ -19922,11 +20085,32 @@
       entries[nm].y = result.nodes[nm].y;
     }
 
+    for (const id of outerFirst) {
+      const entry = entries[id];
+      const parent = entries[entry.node.parentId];
+      if (parent) {
+        entry.x = parent.x + entry.relativeX;
+        entry.y = parent.y + entry.relativeY;
+      }
+    }
+    // Apply authored positions before routing, so child links use their final
+    // borders. Unsaved descendants follow their moved parent.
+    const before = Object.fromEntries(Object.entries(entries).map(([id, entry]) => [id, { x: entry.x, y: entry.y }]));
+    UMLShared.applyLayoutPositions({ entries: entries }, parsed.layout);
+    for (const id of outerFirst) {
+      const entry = entries[id];
+      const parentId = entry.node.parentId;
+      if (!parentId || !entries[parentId] || (parsed.layout && parsed.layout.positions && parsed.layout.positions[id])) continue;
+      entry.x += entries[parentId].x - before[parentId].x;
+      entry.y += entries[parentId].y - before[parentId].y;
+    }
+
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var en in entries) {
       var e = entries[en];
-      minX = Math.min(minX, e.x); minY = Math.min(minY, e.y - CFG.node3dDepth);
-      maxX = Math.max(maxX, e.x + e.box.width + CFG.node3dDepth);
+      const depth = e.node.kind === 'node' ? CFG.node3dDepth : 0;
+      minX = Math.min(minX, e.x); minY = Math.min(minY, e.y - depth);
+      maxX = Math.max(maxX, e.x + e.box.width + depth);
       maxY = Math.max(maxY, e.y + e.box.height);
     }
 
@@ -19956,6 +20140,64 @@
 
   // ─── SVG Renderer ─────────────────────────────────────────────────
 
+  function drawDeploymentElement(svg, entry, colors) {
+    const element = entry.node;
+    const x = entry.x, y = entry.y, width = entry.box.width, height = entry.box.height;
+    const id = UMLShared.escapeXml(element.name);
+    const fills = UMLShared.highlightFills(colors, element.highlight, element.texture);
+    const isNode = element.kind === 'node';
+    const fill = isNode ? fills.fill : fills.headerFill;
+    const anchor = element.parentId ? ' data-layout-anchor="' + UMLShared.escapeXml(element.parentId) + '"' : '';
+    svg.push('<g data-layout-id="' + id + '"' + anchor + '>');
+    svg.push('<g filter="url(#uml-node-shadow)">');
+    if (isNode) {
+      const d = CFG.node3dDepth;
+      svg.push('<polygon points="' + x + ',' + y + ' ' + (x + d) + ',' + (y - d) + ' ' +
+        (x + width + d) + ',' + (y - d) + ' ' + (x + width) + ',' + y +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      svg.push('<polygon points="' + (x + width) + ',' + y + ' ' + (x + width + d) + ',' + (y - d) + ' ' +
+        (x + width + d) + ',' + (y + height - d) + ' ' + (x + width) + ',' + (y + height) +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+    }
+    svg.push('<rect data-layout-bounds-id="' + id + '" x="' + x + '" y="' + y + '" width="' + width + '" height="' + height +
+      '" fill="' + fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (fills.textureUrl) svg.push('<rect x="' + x + '" y="' + y + '" width="' + width + '" height="' + height +
+      '" fill="' + fills.textureUrl + '" stroke="none"/>');
+    svg.push('</g>');
+
+    const iconX = x + width - CFG.compIconW - CFG.compPadX;
+    const iconY = y + CFG.nodePadY;
+    if (element.kind === 'artifact') {
+      // The folded-page icon and standard keyword distinguish a deployable
+      // artifact from the component rectangles beside it.
+      const fold = 5, w = CFG.compIconW, h = CFG.compIconW + 4;
+      svg.push('<path d="M ' + iconX + ' ' + iconY + ' H ' + (iconX + w - fold) + ' L ' +
+        (iconX + w) + ' ' + (iconY + fold) + ' V ' + (iconY + h) + ' H ' + iconX + ' Z M ' +
+        (iconX + w - fold) + ' ' + iconY + ' V ' + (iconY + fold) + ' H ' + (iconX + w) +
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '"/>');
+    } else if (element.kind === 'component') {
+      svg.push('<rect x="' + iconX + '" y="' + iconY + '" width="' + CFG.compIconW + '" height="' + CFG.compIconH +
+        '" fill="' + colors.fill + '" stroke="' + colors.stroke + '"/>');
+      for (const offset of [1, CFG.compIconH - CFG.compIconTabH - 1]) {
+        svg.push('<rect x="' + (iconX - CFG.compIconTabW / 2) + '" y="' + (iconY + offset) +
+          '" width="' + CFG.compIconTabW + '" height="' + CFG.compIconTabH +
+          '" fill="' + colors.fill + '" stroke="' + colors.stroke + '"/>');
+      }
+    }
+    let labelY = y + CFG.nodePadY + CFG.lineHeight * 0.75;
+    const lines = deploymentLabelLines(element);
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const fontSize = line.bold ? CFG.fontSizeBold : CFG.fontSizeComp;
+      const isName = index === lines.length - 1;
+      const emphasis = isName && element.isInstance ? ' text-decoration="underline"' : (line.bold ? ' font-weight="bold"' : '');
+      svg.push('<text x="' + (x + CFG.nodePadX) + '" y="' + labelY + '" font-size="' + fontSize + '" fill="' + colors.text + '"' + emphasis + '>' +
+        UMLShared.escapeXml(line.text) + '</text>');
+      labelY += CFG.lineHeight;
+    }
+    svg.push('</g>');
+  }
+
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var links = parsed.links;
@@ -19984,7 +20226,9 @@
     var labelSvg = [];
     var placedLabels = [];
     var placedRouteSegments = [];
-    svg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily));
+    // Keep editor coordinates and route points in the same SVG coordinate
+    // system; the fitted viewBox supplies padding without translating content.
+    svg.push(UMLShared.svgOpen(svgW, svgH, 0, 0, CFG.fontFamily));
     // ── Pre-compute distributed exit/entry points ──
     var exitsByFrom = {}, entriesByTo = {};
     for (var pli = 0; pli < links.length; pli++) {
@@ -20201,6 +20445,10 @@
       };
     }
 
+    const paintOrder = Object.keys(entries).sort((left, right) =>
+      deploymentAncestors(entries, left).length - deploymentAncestors(entries, right).length);
+    for (const id of paintOrder) drawDeploymentElement(svg, entries[id], colors);
+
     // ── Draw links ──
     var occupiedSegments = { h: [], v: [] };
     for (var li = 0; li < links.length; li++) {
@@ -20208,7 +20456,7 @@
       var fromE = entries[lk.from], toE = entries[lk.to];
       if (!fromE || !toE) continue;
 
-      var isDash = lk.type === 'dependency';
+      var isDash = lk.dashed === true || lk.type === 'dependency';
       var dAttr = isDash ? ' stroke-dasharray="8,4"' : '';
 
       var sourceCenterX = fromE.x + fromE.box.width / 2;
@@ -20219,6 +20467,8 @@
       var skipN = {};
       skipN[lk.from] = true;
       skipN[lk.to] = true;
+      // A contained element's route must be able to leave its enclosing node.
+      for (const parent of deploymentAncestors(entries, lk.from).concat(deploymentAncestors(entries, lk.to))) skipN[parent] = true;
 
       var sourceSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, true);
       var targetSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, false);
@@ -20310,38 +20560,14 @@
           occupiedSegments
         );
       }
-      // Eliminate tiny (<12px) H-V-H or V-H-V doglegs: when the middle
-      // segment is short, snap both endpoints of the dogleg onto the longer
-      // side's coordinate, producing a clean straight line.
-      if (points.length === 4) {
-        var dg0 = points[0], dg1 = points[1], dg2 = points[2], dg3 = points[3];
-        var dgH1 = Math.abs(dg1.y - dg0.y) < 1;
-        var dgV  = Math.abs(dg2.x - dg1.x) < 1;
-        var dgH2 = Math.abs(dg3.y - dg2.y) < 1;
-        var dgVLen = Math.abs(dg2.y - dg1.y);
-        if (dgH1 && dgV && dgH2 && dgVLen > 0.3 && dgVLen <= 12) {
-          var leftLen = Math.abs(dg1.x - dg0.x);
-          var rightLen = Math.abs(dg3.x - dg2.x);
-          var snapY = leftLen >= rightLen ? dg0.y : dg3.y;
-          points = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
-        } else {
-          var dgV1 = Math.abs(dg1.x - dg0.x) < 1;
-          var dgH  = Math.abs(dg2.y - dg1.y) < 1;
-          var dgV2 = Math.abs(dg3.x - dg2.x) < 1;
-          var dgHLen = Math.abs(dg2.x - dg1.x);
-          if (dgV1 && dgH && dgV2 && dgHLen > 0.3 && dgHLen <= 12) {
-            var topLen = Math.abs(dg1.y - dg0.y);
-            var botLen = Math.abs(dg3.y - dg2.y);
-            var snapX = topLen >= botLen ? dg0.x : dg3.x;
-            points = [{ x: snapX, y: dg0.y }, { x: snapX, y: dg3.y }];
-          }
-        }
-      }
       UMLShared.reserveOrthogonalRoute(points, occupiedSegments);
 
       var pStr = '';
       for (var pi = 0; pi < points.length; pi++) { if (pi > 0) pStr += ' '; pStr += points[pi].x + ',' + points[pi].y; }
-      svg.push('<polyline points="' + pStr + '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
+      const routeId = 'rel:' + (Number.isInteger(lk.sourceLine) ? lk.sourceLine : li);
+      svg.push('<polyline data-layout-route-id="' + routeId + '" data-layout-source="' + UMLShared.escapeXml(lk.from) +
+        '" data-layout-target="' + UMLShared.escapeXml(lk.to) + '" points="' + pStr + '" fill="none" stroke="' + colors.line +
+        '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + '/>');
 
       // Arrowhead
       var pLast = points[points.length - 1], pPrev = points[points.length - 2];
@@ -20349,18 +20575,12 @@
       var alen = Math.sqrt(adx * adx + ady * ady);
       if (alen > 0) { adx /= alen; ady /= alen; }
       var as = CFG.arrowSize, hw = as * 0.35, px = -ady, py = adx;
-      if (isDash) {
+      if (lk.arrow !== '--') {
         svg.push('<polyline points="' +
           (pLast.x - adx * as + px * hw) + ',' + (pLast.y - ady * as + py * hw) + ' ' +
           pLast.x + ',' + pLast.y + ' ' +
           (pLast.x - adx * as - px * hw) + ',' + (pLast.y - ady * as - py * hw) +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-      } else {
-        svg.push('<polygon points="' +
-          pLast.x + ',' + pLast.y + ' ' +
-          (pLast.x - adx * as + px * hw) + ',' + (pLast.y - ady * as + py * hw) + ' ' +
-          (pLast.x - adx * as - px * hw) + ',' + (pLast.y - ady * as - py * hw) +
-          '" fill="' + colors.line + '"/>');
       }
       var routeSegments = UMLShared.buildOrthogonalSegments(points);
 
@@ -20398,84 +20618,6 @@
       placedRouteSegments = placedRouteSegments.concat(routeSegments);
     }
 
-    // ── Draw nodes (3D cube style) ──
-    for (var en in entries) {
-      var e = entries[en];
-      var n = e.node;
-      var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
-      var d = CFG.node3dDepth;
-      var nodeFills = UMLShared.highlightFills(colors, n.highlight, n.texture);
-
-      svg.push('<g filter="url(#uml-node-shadow)">');
-
-      // 3D effect: top face (parallelogram)
-      svg.push('<polygon points="' +
-        bx + ',' + by + ' ' +
-        (bx + d) + ',' + (by - d) + ' ' +
-        (bx + bw + d) + ',' + (by - d) + ' ' +
-        (bx + bw) + ',' + by +
-        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
-
-      // 3D effect: right face (parallelogram)
-      svg.push('<polygon points="' +
-        (bx + bw) + ',' + by + ' ' +
-        (bx + bw + d) + ',' + (by - d) + ' ' +
-        (bx + bw + d) + ',' + (by + bh - d) + ' ' +
-        (bx + bw) + ',' + (by + bh) +
-        '" fill="' + nodeFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '" opacity="0.8"/>');
-
-      // Front face (main rectangle)
-      svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-        '" fill="' + nodeFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
-      if (nodeFills.textureUrl) {
-        svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
-          '" fill="' + nodeFills.textureUrl + '" stroke="none"/>');
-      }
-
-      svg.push('</g>');
-
-      // Node name (top area) — bold for classifier, underlined for instance (name:Type per UML spec Fig 9-3)
-      var nameAttrs = ' font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"';
-      if (n.isInstance) {
-        nameAttrs += ' text-decoration="underline"';
-      } else {
-        nameAttrs += ' font-weight="bold"';
-      }
-      svg.push('<text x="' + (bx + CFG.nodePadX) + '" y="' + (by + CFG.nodePadY + CFG.lineHeight * 0.75) + '"' +
-        nameAttrs + '>' + UMLShared.escapeXml(n.name) + '</text>');
-
-      // Components inside the node
-      var compY = by + CFG.nodePadY + CFG.lineHeight + 8;
-      for (var c = 0; c < n.components.length; c++) {
-        var compName = n.components[c];
-        var compW = bw - CFG.nodePadX * 2;
-        var cx = bx + CFG.nodePadX;
-
-        // Component rectangle
-        svg.push('<rect x="' + cx + '" y="' + compY + '" width="' + compW + '" height="' + CFG.compH +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="1"/>');
-
-        // Component icon (small rect with tabs)
-        var ix = cx + compW - CFG.compIconW - 6;
-        var iy = compY + (CFG.compH - CFG.compIconH) / 2;
-        svg.push('<rect x="' + ix + '" y="' + iy + '" width="' + CFG.compIconW + '" height="' + CFG.compIconH +
-          '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-        svg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + 1) +
-          '" width="' + CFG.compIconTabW + '" height="' + CFG.compIconTabH +
-          '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-        svg.push('<rect x="' + (ix - CFG.compIconTabW / 2) + '" y="' + (iy + CFG.compIconH - CFG.compIconTabH - 1) +
-          '" width="' + CFG.compIconTabW + '" height="' + CFG.compIconTabH +
-          '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="0.8"/>');
-
-        // Component name
-        svg.push('<text x="' + (cx + CFG.compPadX) + '" y="' + (compY + CFG.compH / 2 + CFG.fontSizeComp * 0.35) +
-          '" font-size="' + CFG.fontSizeComp + '" fill="' + colors.text + '">' +
-          UMLShared.escapeXml(compName) + '</text>');
-
-        compY += CFG.compH + CFG.compGapY;
-      }
-    }
-
     // ── Draw labels on top ──
     for (var lli = 0; lli < labelSvg.length; lli++) {
       svg.push(labelSvg[lli]);
@@ -20501,7 +20643,7 @@
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
-    if (!parsed.nodes || parsed.nodes.length === 0) {
+    if (!(parsed.elements || parsed.nodes).length) {
       container.innerHTML = '<div class="uml-empty-msg">No nodes to display.</div>';
       return;
     }
@@ -20512,7 +20654,6 @@
     }
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
-    UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     // Protocol labels and manual routes can extend beyond the node envelope.
     UMLShared.fitSVGToContent(container, CFG.svgPad);
@@ -21995,8 +22136,6 @@
 
     // Decision stack for if/else/endif nesting
     var decisionStack = [];
-    // Pending branch endpoints from endif (to connect to next node instead of merge diamond)
-    var pendingMergeEnds = [];
 
     function ensureNode(id, type, label) {
       if (!nodes[id]) {
@@ -22103,6 +22242,7 @@
     }
 
     function addEdge(fromId, toId, guard, labelKind, lineIdx) {
+      fromId = materializeEndpoint(fromId);
       var guardInfo = UMLShared.parseLabelDirectionCue(guard || '');
       edges.push({
         from: fromId,
@@ -22114,16 +22254,26 @@
       });
     }
 
-    // After endif, pending branch endpoints need to connect to the next
-    // node that currentNode connects to.  Call this whenever we create
-    // an edge from currentNode to some target.
-    function flushPendingMergeEnds(targetId) {
-      if (pendingMergeEnds.length > 0) {
-        for (var pm = 0; pm < pendingMergeEnds.length; pm++) {
-          addEdge(pendingMergeEnds[pm], targetId);
-        }
-        pendingMergeEnds = [];
+    // A continuation after alternatives needs an OR merge. Keep that merge
+    // lazy so explicitly authored branch exits do not acquire unused edges.
+    // Nested endpoints retain their own merge rather than flattening branches.
+    function materializeEndpoint(endpoint) {
+      if (typeof endpoint === 'string') return endpoint;
+      if (!endpoint.id) {
+        endpoint.id = 'merge_' + (++mergeCount);
+        ensureNode(endpoint.id, 'merge', '');
+        nodes[endpoint.id].lane = endpoint.lane;
+        endpoint.ends.forEach(function(end) { addEdge(end.node, endpoint.id, end.guard); });
       }
+      return endpoint.id;
+    }
+
+    function recordForkEndpoint(endpoint) {
+      var context = decisionStack[decisionStack.length - 1];
+      if (context && context.type === 'fork') {
+        if (endpoint && !isFinalNode(endpoint)) context.branches.push(endpoint);
+        currentNode = context.forkId;
+      } else currentNode = endpoint;
     }
 
     for (var i = 0; i < lines.length; i++) {
@@ -22190,7 +22340,6 @@
         nodes[forkId].lane = currentLane;
         if (currentNode) {
           addEdge(currentNode, forkId);
-          flushPendingMergeEnds(forkId);
         }
         // Push fork context: collect branches until endfork
         decisionStack.push({ type: 'fork', forkId: forkId, branches: [], currentBranch: null });
@@ -22215,9 +22364,9 @@
           // Connect all branch endpoints to the join bar
           for (var bi = 0; bi < forkCtx.branches.length; bi++) {
             var branchEnd = forkCtx.branches[bi];
-            if (branchEnd) addEdge(branchEnd, joinId);
+            if (branchEnd && !isFinalNode(branchEnd)) addEdge(branchEnd, joinId);
           }
-          currentNode = joinId;
+          recordForkEndpoint(joinId);
         }
         continue;
       }
@@ -22233,7 +22382,6 @@
         if (actTexture) nodes[decId].texture = actTexture;
         if (currentNode) {
           addEdge(currentNode, decId);
-          flushPendingMergeEnds(decId);
         }
         decisionStack.push({
           type: 'decision',
@@ -22280,24 +22428,19 @@
           } else {
             decCtx2.elseEnd = currentNode;
           }
-          // Instead of creating a merge diamond, collect pending
-          // branch endpoints so the next node receives their edges.
+          // Defer the merge until a continuation actually needs it.
           var pendingEnds = [];
           if (decCtx2.thenEnd && !isFinalNode(decCtx2.thenEnd)) {
-            pendingEnds.push(decCtx2.thenEnd);
+            pendingEnds.push({ node: decCtx2.thenEnd, guard: '' });
           }
           if (decCtx2.elseEnd && !isFinalNode(decCtx2.elseEnd)) {
-            pendingEnds.push(decCtx2.elseEnd);
+            pendingEnds.push({ node: decCtx2.elseEnd, guard: '' });
           }
-          // Use the first pending end as currentNode (for the next
-          // transition line) and stash the rest to be connected later.
-          if (pendingEnds.length > 0) {
-            currentNode = pendingEnds[0];
-            for (var pe = 1; pe < pendingEnds.length; pe++) {
-              pendingMergeEnds.push(pendingEnds[pe]);
-            }
-          }
+          if (decCtx2.inThen) pendingEnds.push({ node: decCtx2.decisionId, guard: 'else' });
           decisionStack.splice(decIdx, 1);
+          var endpoint = pendingEnds.length > 1 ? { ends: pendingEnds, lane: currentLane }
+            : pendingEnds.length ? pendingEnds[0].node : null;
+          recordForkEndpoint(endpoint);
         }
         continue;
       }
@@ -22317,7 +22460,6 @@
         }
         if (currentNode) {
           addEdge(currentNode, genericTargetId, genericContLabel, relationParts.labelKind, i);
-          flushPendingMergeEnds(genericTargetId);
         }
         var genericTopCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
         if (genericTopCtx && genericTopCtx.type === 'fork') {
@@ -22342,7 +22484,13 @@
           if (actTexture) genericFullTargetNode.texture = actTexture;
         }
         addEdge(genericSourceId, genericFullTargetId, genericLabel, relationParts.labelKind, i);
-        currentNode = genericFullTargetId;
+        var fullFork = decisionStack[decisionStack.length - 1];
+        if (fullFork && fullFork.type === 'fork') {
+          var branchIndex = fullFork.branches.indexOf(genericSourceId);
+          if (branchIndex >= 0) fullFork.branches[branchIndex] = genericFullTargetId;
+          else fullFork.branches.push(genericFullTargetId);
+          currentNode = fullFork.forkId;
+        } else currentNode = genericFullTargetId;
         continue;
       }
 
@@ -22356,7 +22504,6 @@
         if (actTexture) targetNode.texture = actTexture;
         if (currentNode) {
           addEdge(currentNode, targetNode.id, guard);
-          flushPendingMergeEnds(targetNode.id);
         }
         // If inside a fork context, record branch endpoint
         var topCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
@@ -22379,7 +22526,6 @@
         nodes[fId].lane = currentLane;
         if (currentNode) {
           addEdge(currentNode, fId, fGuard);
-          flushPendingMergeEnds(fId);
         }
         // Inside fork, record branch endpoint
         var topCtx2 = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
@@ -22454,7 +22600,7 @@
   }
 
   function isFinalNode(id) {
-    return id && id.indexOf('__final__') === 0;
+    return typeof id === 'string' && id.indexOf('__final__') === 0;
   }
 
   // ─── Layout ───────────────────────────────────────────────────────
