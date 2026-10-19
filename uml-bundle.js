@@ -2156,7 +2156,7 @@
       text: get('--uml-text', '#222'),
       fill: get('--uml-fill', '#fdfcf8'),
       headerFill: get('--uml-header-fill', '#dbe8f8'),
-      line: get('--uml-line', '#444'),
+      line: get('--uml-line', '#000'),
       secondaryLine: get('--uml-secondary-line', '#657484'),
       secondaryFill: get('--uml-secondary-fill', '#eef4fa'),
       labelBg: get('--uml-label-fill', 'rgba(255,255,255,0.94)'),
@@ -28266,7 +28266,7 @@
     };
     return {
       stroke: get('--uml-stroke', '#4060a0'),
-      line: get('--uml-line', '#444'),
+      line: get('--uml-line', '#000'),
       fill: get('--uml-fill', '#fff'),
       headerFill: get('--uml-header-fill', '#d0ddef'),
       text: get('--uml-text', '#222'),
