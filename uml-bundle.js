@@ -7,7 +7,47 @@
   const NS = 'http://www.w3.org/2000/svg';
   const FONT_SIZE = 14;
   const LINE_HEIGHT = 20;
-  const PADDING = 12;
+  // Centres the cap height in each line box; descenders use the space below.
+  const BASELINE = 15;
+  const PADDING_X = 8;
+  const PADDING_Y = 5;
+  const CORNER_RADIUS = 3;
+  // The shortest pointer is about as long as it is wide, so it reads as the
+  // tail of its box rather than as a line that could be mistaken for UML.
+  const POINTER_LENGTH = 14;
+  const POINTER_WIDTH = 14;
+  // Longer pointers widen instead of thinning into needles. A narrower one is
+  // the fallback when the wide one would clip a nearby label or line.
+  const POINTER_ASPECTS = [2.5, 4, Infinity];
+  const NARROWING_COST = 0.5;
+  // A pointer that only touches the box edge antialiases a hairline gap.
+  const SEAM_OVERLAP = 2;
+  // The tip stops short of the notation so it never paints over the symbol.
+  const TIP_CLEARANCE = 4;
+  const MODEL_CLEARANCE = 6;
+  const CALLOUT_CLEARANCE = 8;
+  // Readable wrapping widths, default first. Narrow widths fit a gap beside a
+  // lifeline; a single long line fits a shallow gap between two boxes.
+  const WRAP_WIDTHS = [196, 260, 160, 330];
+  const SHORT_TEXT_WRAP_WIDTH = 80;
+  const SIDES = ['left', 'right', 'top', 'bottom'];
+  // Boxes are tried every few units along each side, and past the target's
+  // ends, where a pointer leaves the box corner diagonally.
+  const POSITION_STEP = 4;
+  const DIAGONAL_REACH = 40;
+  // When nothing nearby is clear, boxes may sit further out and further along.
+  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, [0, 12, 24, 36, 48, 64, 80, 100]]];
+  // Partial layouts kept, and distinct placements each tries per callout.
+  const BEAM_WIDTH = 6;
+  const BRANCHES = 4;
+  // A pointer crossing notation or another callout is the last resort.
+  const CROSSING_COST = 1000;
+  const FALLBACK_CANDIDATES = 600;
+  const ORDER_ATTEMPTS = 3;
+  // Placement costs are in units of pointer length.
+  const OTHER_SIDE_COST = 6;
+  const REWRAP_COST = 0.02;
+  const OFF_CENTRE_COST = 0.05;
   const pending = new WeakMap();
 
   function parseTarget(source) {
@@ -118,7 +158,7 @@
       textTarget(svg, { value: target.value, occurrence: 1 });
   }
 
-  function measure(text, maxWidth = 196) {
+  function measure(text, maxWidth) {
     const lines = [];
     let line = '';
     for (const word of text.split(/\s+/)) {
@@ -127,21 +167,95 @@
       else line = next;
     }
     if (line) lines.push(line);
-    return { lines, width: Math.max(...lines.map(value => UMLShared.textWidth(value, false, FONT_SIZE))) + PADDING * 2,
-      height: lines.length * LINE_HEIGHT + PADDING * 2 };
+    return { lines, maxWidth, width: Math.max(...lines.map(value => UMLShared.textWidth(value, false, FONT_SIZE))) + PADDING_X * 2,
+      height: lines.length * LINE_HEIGHT + PADDING_Y * 2 };
   }
 
-  function pointerVertices(box, target, side) {
-    const horizontal = side === 'left' || side === 'right';
-    const tx = target.x + target.width / 2, ty = target.y + target.height / 2;
-    const baseX = side === 'left' ? box.x + box.width : side === 'right' ? box.x : Math.max(box.x + 12, Math.min(tx, box.x + box.width - 12));
-    const baseY = side === 'top' ? box.y + box.height : side === 'bottom' ? box.y : Math.max(box.y + 12, Math.min(ty, box.y + box.height - 12));
-    // Stop just short of the notation so the tip never paints over the symbol.
-    const tipX = horizontal ? (side === 'left' ? target.x - 4 : target.x + target.width + 4) : tx;
-    const tipY = horizontal ? ty : (side === 'top' ? target.y - 4 : target.y + target.height + 4);
-    return horizontal
-      ? [{ x: baseX, y: baseY - 7 }, { x: tipX, y: tipY }, { x: baseX, y: baseY + 7 }]
-      : [{ x: baseX - 7, y: baseY }, { x: tipX, y: tipY }, { x: baseX + 7, y: baseY }];
+  /** One size per distinct line wrapping, the default wrapping first. */
+  function boxSizes(text) {
+    const widths = text.length < 40 ? WRAP_WIDTHS.concat(SHORT_TEXT_WRAP_WIDTH) : WRAP_WIDTHS;
+    const sizes = new Map();
+    for (const maxWidth of widths) {
+      const size = measure(text, maxWidth);
+      if (!sizes.has(size.lines.join('\n'))) sizes.set(size.lines.join('\n'), size);
+    }
+    return [...sizes.values()];
+  }
+
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+
+  /** Where a pointer from a box on this side ends, just outside the target. */
+  function tipFor(target, side, box) {
+    // A small symbol is pointed at its middle. A long label or a whole element
+    // may be pointed at anywhere in its middle half, so the pointer stays straight.
+    const cx = target.x + target.width / 2, cy = target.y + target.height / 2;
+    if (side === 'left' || side === 'right') {
+      return { x: side === 'left' ? target.x - TIP_CLEARANCE : target.x + target.width + TIP_CLEARANCE,
+        y: clamp(box.y + box.height / 2, cy - target.height / 4, cy + target.height / 4) };
+    }
+    return { x: clamp(box.x + box.width / 2, cx - target.width / 4, cx + target.width / 4),
+      y: side === 'top' ? target.y - TIP_CLEARANCE : target.y + target.height + TIP_CLEARANCE };
+  }
+
+  /**
+   * A triangle from the part of the box nearest the tip. Its base is at least
+   * POINTER_WIDTH across the pointer and widens with length, so neither a
+   * long pointer nor one leaving a corner thins into a needle.
+   */
+  function pointerShape(box, tip, aspect) {
+    const right = box.x + box.width, bottom = box.y + box.height;
+    const near = { x: clamp(tip.x, box.x, right), y: clamp(tip.y, box.y, bottom) };
+    const width = Math.max(POINTER_WIDTH, Math.hypot(tip.x - near.x, tip.y - near.y) / aspect);
+    const besideX = tip.x <= box.x || tip.x >= right, besideY = tip.y <= box.y || tip.y >= bottom;
+    if (besideX && besideY) {
+      // The base spans the corner, square to a diagonal pointer.
+      const reach = Math.min(width / Math.SQRT2, box.width - CORNER_RADIUS, box.height - CORNER_RADIUS);
+      const sx = near.x === box.x ? 1 : -1, sy = near.y === box.y ? 1 : -1;
+      return { base: near, width, edge: null,
+        points: [{ x: near.x + sx * reach, y: near.y }, tip, { x: near.x, y: near.y + sy * reach }] };
+    }
+    // The base sits on one edge, centred on the tip and clear of the rounded corners.
+    const vertical = besideY;
+    const start = vertical ? box.x : box.y, extent = vertical ? box.width : box.height;
+    const half = Math.min(width, extent - 2 * CORNER_RADIUS) / 2;
+    const middle = clamp(vertical ? tip.x : tip.y, start + CORNER_RADIUS + half, start + extent - CORNER_RADIUS - half);
+    const base = vertical ? { x: middle, y: near.y } : { x: near.x, y: middle };
+    const dx = vertical ? half : 0, dy = vertical ? 0 : half;
+    const edge = vertical ? (near.y === box.y ? 'top' : 'bottom') : (near.x === box.x ? 'left' : 'right');
+    return { base, width, edge, points: [{ x: base.x - dx, y: base.y - dy }, tip, { x: base.x + dx, y: base.y + dy }] };
+  }
+
+  /**
+   * One filled outline: rounded box plus pointer. Painting them as one path
+   * keeps the join interior, so it cannot antialias a hairline against the page.
+   */
+  function bubblePath(box, pointer, edge) {
+    const r = Math.min(CORNER_RADIUS, box.width / 2, box.height / 2);
+    const L = box.x, T = box.y, R = box.x + box.width, B = box.y + box.height;
+    const [a, tip, b] = pointer;
+    const rounded = `M${L + r},${T} H${R - r} A${r},${r} 0 0 1 ${R},${T + r} V${B - r} A${r},${r} 0 0 1 ${R - r},${B} H${L + r} A${r},${r} 0 0 1 ${L},${B - r} V${T + r} A${r},${r} 0 0 1 ${L + r},${T} Z`;
+    if (!edge) {
+      // A corner pointer straddles two edges; pull the base inside the box so
+      // the two subpaths overlap instead of meeting on a shared line.
+      const inward = p => ({ x: clamp(p.x, L + SEAM_OVERLAP, R - SEAM_OVERLAP),
+        y: clamp(p.y, T + SEAM_OVERLAP, B - SEAM_OVERLAP) });
+      const ia = inward(a), ib = inward(b);
+      return `${rounded} M${a.x},${a.y} L${tip.x},${tip.y} L${b.x},${b.y} L${ib.x},${ib.y} L${ia.x},${ia.y} Z`;
+    }
+    if (edge === 'top') {
+      const left = a.x < b.x ? a : b, right = a.x < b.x ? b : a;
+      return `M${L + r},${T} H${left.x} L${tip.x},${tip.y} L${right.x},${right.y} H${R - r} A${r},${r} 0 0 1 ${R},${T + r} V${B - r} A${r},${r} 0 0 1 ${R - r},${B} H${L + r} A${r},${r} 0 0 1 ${L},${B - r} V${T + r} A${r},${r} 0 0 1 ${L + r},${T} Z`;
+    }
+    if (edge === 'right') {
+      const top = a.y < b.y ? a : b, bottom = a.y < b.y ? b : a;
+      return `M${L + r},${T} H${R - r} A${r},${r} 0 0 1 ${R},${T + r} V${top.y} L${tip.x},${tip.y} L${bottom.x},${bottom.y} V${B - r} A${r},${r} 0 0 1 ${R - r},${B} H${L + r} A${r},${r} 0 0 1 ${L},${B - r} V${T + r} A${r},${r} 0 0 1 ${L + r},${T} Z`;
+    }
+    if (edge === 'bottom') {
+      const left = a.x < b.x ? a : b, right = a.x < b.x ? b : a;
+      return `M${L + r},${T} H${R - r} A${r},${r} 0 0 1 ${R},${T + r} V${B - r} A${r},${r} 0 0 1 ${R - r},${B} H${right.x} L${tip.x},${tip.y} L${left.x},${left.y} H${L + r} A${r},${r} 0 0 1 ${L},${B - r} V${T + r} A${r},${r} 0 0 1 ${L + r},${T} Z`;
+    }
+    const top = a.y < b.y ? a : b, bottom = a.y < b.y ? b : a;
+    return `M${L + r},${T} H${R - r} A${r},${r} 0 0 1 ${R},${T + r} V${B - r} A${r},${r} 0 0 1 ${R - r},${B} H${L + r} A${r},${r} 0 0 1 ${L},${B - r} V${bottom.y} L${tip.x},${tip.y} L${top.x},${top.y} V${T + r} A${r},${r} 0 0 1 ${L + r},${T} Z`;
   }
 
   function rectVertices(box, pad = 0) {
@@ -152,15 +266,26 @@
   // Separating-axis test: the whole triangular pointer must clear labels,
   // not just its centerline or bounding box.
   function polygonsOverlap(a, b) {
-    for (const polygon of [a, b]) {
+    const separated = polygon => {
       for (let index = 0; index < polygon.length; index++) {
-        const next = polygon[(index + 1) % polygon.length], point = polygon[index];
+        const point = polygon[index], next = polygon[index + 1] || polygon[0];
         const nx = next.y - point.y, ny = point.x - next.x;
-        const first = a.map(p => p.x * nx + p.y * ny), second = b.map(p => p.x * nx + p.y * ny);
-        if (Math.max(...first) <= Math.min(...second) || Math.max(...second) <= Math.min(...first)) return false;
+        let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+        for (let i = 0; i < a.length; i++) {
+          const d = a[i].x * nx + a[i].y * ny;
+          if (d < minA) minA = d;
+          if (d > maxA) maxA = d;
+        }
+        for (let i = 0; i < b.length; i++) {
+          const d = b[i].x * nx + b[i].y * ny;
+          if (d < minB) minB = d;
+          if (d > maxB) maxB = d;
+        }
+        if (maxA <= minB || maxB <= minA) return true;
       }
-    }
-    return true;
+      return false;
+    };
+    return !separated(a) && !separated(b);
   }
 
   function contains(outer, inner) {
@@ -168,7 +293,8 @@
       outer.x + outer.width >= inner.x + inner.width && outer.y + outer.height >= inner.y + inner.height;
   }
 
-  function strokePolygons(element, inverse) {
+  /** The straight runs of a stroked element, in SVG coordinates. */
+  function strokeSegments(element, inverse) {
     const transform = inverse.multiply(element.getScreenCTM());
     let points;
     if (element.tagName.toLowerCase() === 'line') {
@@ -179,24 +305,46 @@
       const length = element.getTotalLength(), steps = Math.max(1, Math.ceil(length / 12));
       points = Array.from({ length: steps + 1 }, (_, index) => element.getPointAtLength(length * index / steps));
     }
-    // Merge collinear samples so long straight routes stay cheap to test.
+    // Merge samples that continue straight on, so long routes stay cheap to
+    // test. A stroke that doubles back keeps its turning point.
     const corners = [];
     for (const point of points) {
       const next = new DOMPoint(point.x, point.y).matrixTransform(transform);
       while (corners.length > 1) {
         const a = corners[corners.length - 2], b = corners[corners.length - 1];
-        if (Math.abs((b.x - a.x) * (next.y - b.y) - (b.y - a.y) * (next.x - b.x)) > 0.01) break;
+        if (Math.abs((b.x - a.x) * (next.y - b.y) - (b.y - a.y) * (next.x - b.x)) > 0.01 ||
+          (b.x - a.x) * (next.x - b.x) + (b.y - a.y) * (next.y - b.y) < 0) break;
         corners.pop();
       }
       corners.push(next);
     }
-    return corners.slice(1).flatMap((end, index) => {
-      const start = corners[index], length = Math.hypot(end.x - start.x, end.y - start.y);
-      if (!length) return [];
-      const dx = (end.y - start.y) / length, dy = (start.x - end.x) / length;
-      return [[{ x: start.x + dx, y: start.y + dy }, { x: end.x + dx, y: end.y + dy },
-        { x: end.x - dx, y: end.y - dy }, { x: start.x - dx, y: start.y - dy }]];
-    });
+    return corners.slice(1).map((end, index) => ({ start: corners[index], end }))
+      .filter(({ start, end }) => start.x !== end.x || start.y !== end.y);
+  }
+
+  function segmentQuad({ start, end }) {
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    const dx = (end.y - start.y) / length, dy = (start.x - end.x) / length;
+    return [{ x: start.x + dx, y: start.y + dy }, { x: end.x + dx, y: end.y + dy },
+      { x: end.x - dx, y: end.y - dy }, { x: start.x - dx, y: start.y - dy }];
+  }
+
+  function bounds(points) {
+    const xs = points.map(point => point.x), ys = points.map(point => point.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+  }
+
+  const padded = (box, pad) => ({ left: box.x - pad, top: box.y - pad,
+    right: box.x + box.width + pad, bottom: box.y + box.height + pad });
+
+  // A diagonal run is split into short pieces, so the space beside it stays
+  // usable instead of disappearing into one large bounding box.
+  function segmentBlockers({ start, end }, pad) {
+    const diagonal = Math.abs(end.x - start.x) >= 1 && Math.abs(end.y - start.y) >= 1;
+    const pieces = diagonal ? Math.ceil(Math.hypot(end.x - start.x, end.y - start.y) / 8) : 1;
+    const at = fraction => ({ x: start.x + (end.x - start.x) * fraction, y: start.y + (end.y - start.y) * fraction });
+    return Array.from({ length: pieces }, (_, index) => padded(bounds([at(index / pieces), at((index + 1) / pieces)]), pad));
   }
 
   function boundsOverlap(a, b) {
@@ -210,72 +358,233 @@
     return { x: a.x, y: a.y, width: Math.max(1, b.x - a.x), height: Math.max(1, b.y - a.y) };
   }
 
-  function modelObstacles(svg) {
+  /**
+   * Padded rectangles that a callout box must clear, and exact outlines that
+   * a pointer must not cross. A connector reserves only its stroke, so the
+   * space inside its bends remains usable.
+   */
+  function modelGeometry(svg) {
     const inverse = svg.getScreenCTM().inverse();
-    return [...svg.querySelectorAll('text, rect, ellipse, circle, polygon, path, line, polyline')]
-      .filter(element => !element.closest('defs')).flatMap(element => {
-        // A line has zero geometric width or height, but its stroke still
-        // needs space. The shared node-bounds helper intentionally omits it.
-        const box = screenBox(element, inverse);
-        if (element.matches('rect[data-layout-fragment-id], [data-callout-frame]')) {
-          // Reserve only a frame's outline, leaving its empty interior usable.
-          return [{ ...box, height: 1 }, { ...box, y: box.y + box.height, height: 1 },
-            { ...box, width: 1 }, { ...box, x: box.x + box.width, width: 1 }];
+    const blockers = [], obstacles = [];
+    for (const element of svg.querySelectorAll('text, rect, ellipse, circle, polygon, path, line, polyline')) {
+      if (element.closest('defs')) continue;
+      const tag = element.tagName.toLowerCase();
+      // A line has zero geometric width or height, but its stroke still
+      // needs space. The shared node-bounds helper intentionally omits it.
+      const box = screenBox(element, inverse);
+      if (element.matches('rect[data-layout-fragment-id], [data-callout-frame]')) {
+        // Reserve only a frame's outline, leaving its empty interior usable.
+        for (const edge of [{ ...box, height: 0 }, { ...box, y: box.y + box.height, height: 0 },
+          { ...box, width: 0 }, { ...box, x: box.x + box.width, width: 0 }]) blockers.push(padded(edge, MODEL_CLEARANCE + 1));
+      } else if (tag === 'line' || (element.matches('path, polyline') && getComputedStyle(element).fill === 'none')) {
+        for (const segment of strokeSegments(element, inverse)) {
+          const polygon = segmentQuad(segment);
+          blockers.push(...segmentBlockers(segment, MODEL_CLEARANCE + 1));
+          obstacles.push({ element, kind: 'stroke', polygon, area: bounds(polygon) });
         }
-        return [{ ...box, element, text: element.tagName.toLowerCase() === 'text',
-          strokes: element.matches('path, line, polyline') ? strokePolygons(element, inverse) : null,
-          solid: ['rect', 'ellipse', 'circle', 'polygon'].includes(element.tagName.toLowerCase()) }];
-      });
-  }
-
-  function place(callout, target, obstacles, placed) {
-    // Labels always exclude pointers. A box containing the target does not:
-    // a pointer to a visibility marker must be able to reach inside its class.
-    const pointerObstacles = obstacles.filter(obstacle => obstacle.element !== target.element || !target.element)
-      .filter(obstacle => obstacle.text || callout.target.kind !== 'text' || !contains(obstacle, target))
-      .filter(obstacle => obstacle.solid || obstacle.text || obstacle.strokes)
-      .map(obstacle => ({ ...obstacle, polygons: obstacle.strokes || [rectVertices(obstacle, 1)] }));
-    const sides = [callout.side, ...['left', 'right', 'top', 'bottom'].filter(side => side !== callout.side)];
-    let best;
-    // Try a few readable widths to use nearby space without long pointers.
-    // Prefer the default width when rewrapping does not improve proximity.
-    // Short hints can use a narrow gap between a lifeline and a frame.
-    const widths = callout.text.length < 40 ? [196, 260, 160, 80] : [196, 260, 160];
-    for (const maxWidth of widths) {
-      const size = measure(callout.text, maxWidth);
-      for (const side of sides) {
-        const result = UMLShared.placeNoteRect(target, size, side, obstacles, placed.map(item => item.box), {
-          gap: 18, distanceLevels: 12, distanceStep: 12, maxSlides: 16, slideStep: 12,
-          sideDistanceCost: 1, sideSlideCost: 1,
-          candidatePenalty(rect) {
-            const box = { x: rect.x, y: rect.y, width: size.width, height: size.height };
-            const tail = pointerVertices(box, target, side);
-            const xs = tail.map(point => point.x), ys = tail.map(point => point.y);
-            const tailBounds = { x: Math.min(...xs), y: Math.min(...ys),
-              width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
-            const base = { x: (tail[0].x + tail[2].x) / 2, y: (tail[0].y + tail[2].y) / 2 };
-            const length = Math.hypot(base.x - tail[1].x, base.y - tail[1].y);
-            const crossings = pointerObstacles.filter(obstacle => boundsOverlap(tailBounds, obstacle) &&
-              obstacle.polygons.some(polygon => polygonsOverlap(tail, polygon))).length +
-              placed.filter(item => polygonsOverlap(tail, rectVertices(item.box, 3)) ||
-                polygonsOverlap(tail, item.tail) || polygonsOverlap(rectVertices(box, 3), item.tail)).length;
-            return crossings * 100000000 + length * 20 + (side === callout.side ? 0 : 12) + Math.abs(maxWidth - 196) * 0.5;
-          }
-        });
-        if (!best || result.score < best.score) best = { ...result, side, size };
+      } else {
+        const polygon = rectVertices(box, 1);
+        blockers.push(padded(box, MODEL_CLEARANCE));
+        obstacles.push({ element, kind: tag === 'text' ? 'text' : 'shape', box, polygon, area: bounds(polygon) });
       }
     }
-    return best;
+    return { blockers, obstacles };
   }
 
-  function draw(layer, callout, target, box, size, side) {
+  // Blockers in the order that a box sliding away from its target meets them.
+  const SLIDE_ORDER = {
+    left: (a, b) => b.right - a.right, right: (a, b) => a.left - b.left,
+    top: (a, b) => b.bottom - a.bottom, bottom: (a, b) => a.top - b.top,
+  };
+
+  /** Slide a box away from its target, on one side, until it clears every blocker. */
+  function slideClear(box, side, blockers) {
+    let { x, y } = box;
+    const { width, height } = box;
+    for (const b of blockers) {
+      if (side === 'left') {
+        if (b.right <= x) break;
+        if (b.left < x + width && b.top < y + height && b.bottom > y) x = b.left - width;
+      } else if (side === 'right') {
+        if (b.left >= x + width) break;
+        if (b.right > x && b.top < y + height && b.bottom > y) x = b.right;
+      } else if (side === 'top') {
+        if (b.bottom <= y) break;
+        if (b.top < y + height && b.left < x + width && b.right > x) y = b.top - height;
+      } else {
+        if (b.top >= y + height) break;
+        if (b.bottom > y && b.left < x + width && b.right > x) y = b.bottom;
+      }
+    }
+    return { x, y, width, height };
+  }
+
+  function pointerHits(pointer, area, obstacles, placed) {
+    for (let i = 0; i < obstacles.length; i++) {
+      const obstacle = obstacles[i];
+      if (boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon)) return true;
+    }
+    for (let i = 0; i < placed.length; i++) {
+      const item = placed[i];
+      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) return true;
+    }
+    return false;
+  }
+
+  function pointerCrossings(pointer, area, obstacles, placed) {
+    let count = 0;
+    for (let i = 0; i < obstacles.length; i++) {
+      const obstacle = obstacles[i];
+      if (boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon)) count++;
+    }
+    for (let i = 0; i < placed.length; i++) {
+      const item = placed[i];
+      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) count++;
+    }
+    return count;
+  }
+
+  /** Blockers that a box sliding away from the target on this side could meet. */
+  function sideBlockers(blockers, side, target, gap, low, high) {
+    const horizontal = side === 'left' || side === 'right';
+    const ahead = {
+      left: b => b.left < target.x - gap, right: b => b.right > target.x + target.width + gap,
+      top: b => b.top < target.y - gap, bottom: b => b.bottom > target.y + target.height + gap,
+    }[side];
+    return blockers.filter(b => ahead(b) && (horizontal ? b.bottom > low && b.top < high : b.right > low && b.left < high))
+      .sort(SLIDE_ORDER[side]);
+  }
+
+  /**
+   * Boxes all around the target, each as close as the blockers allow at the
+   * given extra distances, priced mostly by pointer length.
+   */
+  function candidates(callout, target, blockers, reach, depths) {
+    const gap = POINTER_LENGTH + TIP_CLEARANCE;
+    const result = [];
+    for (const size of boxSizes(callout.text)) {
+      for (const side of SIDES) {
+        const horizontal = side === 'left' || side === 'right';
+        const along = horizontal ? size.height : size.width;
+        const middle = horizontal ? target.y + target.height / 2 : target.x + target.width / 2;
+        const extent = (horizontal ? target.height : target.width) / 4 + reach;
+        const low = middle - extent - along, high = middle + extent;
+        const ordered = sideBlockers(blockers, side, target, gap, low, high + along);
+        for (let start = low; start <= high; start += POSITION_STEP) {
+          let previous = null;
+          for (const depth of depths) {
+            const distance = gap + depth;
+            const box = slideClear(horizontal
+              ? { x: side === 'left' ? target.x - distance - size.width : target.x + target.width + distance, y: start, width: size.width, height: size.height }
+              : { x: start, y: side === 'top' ? target.y - distance - size.height : target.y + target.height + distance, width: size.width, height: size.height },
+            side, ordered);
+            if (previous && previous.x === box.x && previous.y === box.y) continue;
+            previous = box;
+            const tip = tipFor(target, side, box);
+            const pointer = pointerShape(box, tip, POINTER_ASPECTS[0]);
+            const length = Math.hypot(tip.x - pointer.base.x, tip.y - pointer.base.y);
+            const offCentre = horizontal ? pointer.base.y - (box.y + box.height / 2) : pointer.base.x - (box.x + box.width / 2);
+            result.push({ box, size, length, tip, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
+              cost: length + (side === callout.side ? 0 : OTHER_SIDE_COST) +
+                Math.abs(size.maxWidth - WRAP_WIDTHS[0]) * REWRAP_COST + Math.abs(offCentre) * OFF_CENTRE_COST });
+          }
+        }
+      }
+    }
+    return result.sort((a, b) => a.cost - b.cost);
+  }
+
+  function overlapArea(a, b) {
+    return Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
+      Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  }
+
+  /**
+   * A few clearly different placements for one callout, given the callouts
+   * already placed. A placement whose pointer crosses anything is used only
+   * when no clear one exists, nearby or further away.
+   */
+  function options(callout, target, geometry, reserved, placed) {
+    const blockers = geometry.blockers.concat(reserved,
+      placed.flatMap(item => [padded(item.box, CALLOUT_CLEARANCE), padded(bounds(item.pointer), 3)]));
+    // Labels always exclude pointers. A shape containing the target does not:
+    // a pointer to a visibility marker must be able to reach inside its class.
+    const obstacles = geometry.obstacles.filter(obstacle => !(target.element && obstacle.element === target.element) &&
+      !(obstacle.kind === 'shape' && contains(obstacle.box, target)));
+    const narrow = (candidate, nearby) => {
+      for (let i = 1; i < POINTER_ASPECTS.length; i++) {
+        const pointer = pointerShape(candidate.box, candidate.tip, POINTER_ASPECTS[i]);
+        const next = { ...candidate, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
+          cost: candidate.cost + (Math.max(POINTER_WIDTH, candidate.length / POINTER_ASPECTS[0]) - pointer.width) * NARROWING_COST };
+        if (!pointerHits(next.pointer, next.area, nearby, placed)) return next;
+      }
+      return null;
+    };
+    let list;
+    for (const [reach, depths] of SEARCHES) {
+      list = candidates(callout, target, blockers, reach, depths);
+      const region = list.reduce((area, candidate) => union(area, candidate.box), target);
+      const nearby = obstacles.filter(obstacle => boundsOverlap(region, obstacle.area));
+      const chosen = [];
+      for (const candidate of list) {
+        // Near-copies of a chosen placement would crowd the alternatives out.
+        if (chosen.some(other => overlapArea(other.box, candidate.box) > candidate.box.width * candidate.box.height / 2)) continue;
+        const clear = pointerHits(candidate.pointer, candidate.area, nearby, placed) ? narrow(candidate, nearby) : candidate;
+        if (!clear) continue;
+        chosen.push(clear);
+        if (chosen.length === BRANCHES) break;
+      }
+      if (chosen.length) return chosen.map(item => ({ ...item, clearance: rectVertices(item.box, 3) }));
+    }
+    let fallback = null;
+    for (const candidate of list.slice(0, FALLBACK_CANDIDATES)) {
+      const cost = candidate.cost + pointerCrossings(candidate.pointer, candidate.area, obstacles, placed) * CROSSING_COST;
+      if (!fallback || cost < fallback.cost) fallback = { ...candidate, cost, forced: true, clearance: rectVertices(candidate.box, 3) };
+    }
+    return [fallback];
+  }
+
+  /**
+   * Place callouts one after another in the given order, keeping the cheapest
+   * few partial layouts, so an early callout can give way when its best spot
+   * would leave a later one nowhere clear to go.
+   */
+  function beamSearch(order, callouts, targets, geometry, reserved) {
+    let beam = [{ placed: [], cost: 0 }];
+    for (const index of order) {
+      beam = beam.flatMap(state => options(callouts[index], targets[index], geometry, reserved, state.placed)
+        .map(option => ({ placed: state.placed.concat(option), cost: state.cost + option.cost })))
+        .sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
+    }
+    const placements = [];
+    order.forEach((index, position) => { placements[index] = beam[0].placed[position]; });
+    return { placements, cost: beam[0].cost, forced: order.filter((index, position) => beam[0].placed[position].forced) };
+  }
+
+  function arrange(callouts, targets, geometry) {
+    // No box may cover what another callout points at.
+    const reserved = targets.map(target => padded(target, TIP_CLEARANCE));
+    let order = callouts.map((_, index) => index), best = null;
+    // A callout left with nowhere clear may have been crowded out by earlier
+    // ones; placing it first lets the others arrange around it instead.
+    for (let attempt = 0; attempt < ORDER_ATTEMPTS; attempt++) {
+      const result = beamSearch(order, callouts, targets, geometry, reserved);
+      if (!best || result.cost < best.cost) best = result;
+      if (!result.forced.length || result.forced.every((index, position) => order[position] === index)) break;
+      order = result.forced.concat(order.filter(index => !result.forced.includes(index)));
+    }
+    return best.placements;
+  }
+
+  function draw(layer, callout, { box, size, pointer, edge }) {
     const group = svgElement('g', { class: 'uml-callout', 'data-callout-target': callout.target.value || 'point' });
-    group.appendChild(svgElement('polygon', { class: 'uml-callout-pointer', points: pointerVertices(box, target, side).map(p => `${p.x},${p.y}`).join(' ') }));
-    group.appendChild(svgElement('rect', { class: 'uml-callout-box', x: box.x, y: box.y, width: box.width, height: box.height, rx: 3 }));
-    const text = svgElement('text', { x: box.x + PADDING, y: box.y + PADDING + FONT_SIZE,
+    group.appendChild(svgElement('polygon', { class: 'uml-callout-pointer', points: pointer.map(p => `${p.x},${p.y}`).join(' ') }));
+    group.appendChild(svgElement('rect', { class: 'uml-callout-box', x: box.x, y: box.y, width: box.width, height: box.height, rx: CORNER_RADIUS }));
+    group.appendChild(svgElement('path', { class: 'uml-callout-bubble', d: bubblePath(box, pointer, edge) }));
+    const text = svgElement('text', { x: box.x + PADDING_X, y: box.y + PADDING_Y + BASELINE,
       'font-size': FONT_SIZE, 'font-family': UMLShared.BASE_CFG.fontFamily });
     size.lines.forEach((line, index) => text.appendChild(svgElement('tspan', {
-      x: box.x + PADDING, dy: index ? LINE_HEIGHT : 0
+      x: box.x + PADDING_X, dy: index ? LINE_HEIGHT : 0
     }, line + (index < size.lines.length - 1 ? " " : ""))));
     group.appendChild(text);
     layer.appendChild(group);
@@ -307,7 +616,7 @@
       if (!target) throw new Error('Callout target not found at line ' + callout.line + ': ' + callout.target.value);
       return target;
     });
-    const obstacles = modelObstacles(svg);
+    const geometry = modelGeometry(svg);
     const content = svgElement('g', { class: 'uml-diagram-layers' });
     const model = svgElement('g', { class: 'uml-model-layer' });
     for (const child of [...svg.children]) {
@@ -318,14 +627,7 @@
     content.appendChild(layer);
     svg.appendChild(content);
     svg.classList.add('uml-with-callouts');
-    const placed = [];
-    callouts.forEach((callout, index) => {
-      const target = targets[index];
-      const position = place(callout, target, obstacles, placed), size = position.size;
-      const box = { ...position, width: size.width, height: size.height };
-      draw(layer, callout, target, box, size, position.side);
-      placed.push({ box, tail: pointerVertices(box, target, position.side) });
-    });
+    arrange(callouts, targets, geometry).forEach((placement, index) => draw(layer, callouts[index], placement));
     UMLShared.fitSVGToContent(container);
   }
 

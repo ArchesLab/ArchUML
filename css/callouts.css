@@ -7,9 +7,12 @@
 }
 
 .uml-callout-box,
-.uml-callout-pointer {
+.uml-callout-pointer,
+.uml-callout-bubble {
   fill: var(--uml-callout-fill);
-  stroke: none;
+  stroke: var(--uml-callout-fill);
+  stroke-width: 1;
+  stroke-linejoin: round;
 }
 
 .uml-callout text {

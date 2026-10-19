@@ -2529,7 +2529,7 @@ Load `css/callouts.css` from the ArchUML package alongside `uml-bundle.js`. SEBo
 callout <side> of <target> : <brief explanation>
 ```
 
-The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels and boxes, checks the triangular pointer for collisions, and favors short pointers. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
+The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, checks the triangular pointer for collisions, and favors short pointers. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
 
 | Target | Example | Meaning |
 | --- | --- | --- |
@@ -2557,7 +2557,7 @@ callout bottom of edge 1 end : The open arrow marks the navigable end.
 
 The default palette is **UCLA dark blue (`#003b5c`) with white text in light mode**, and **UCLA gold (`#ffd100`) with dark blue text in dark mode**. Print always uses the light palette. The UML model and callouts occupy separate SVG groups so the model's dark-mode filter does not invert callout colors.
 
-Stable CSS hooks are `.uml-with-callouts`, `.uml-model-layer`, `.uml-callouts`, `.uml-callout`, `.uml-callout-box`, and `.uml-callout-pointer`. Override `--uml-callout-fill` and `--uml-callout-text` in CSS when needed; keep their contrast accessible. SEBook includes the explanations in both the image's text alternative and its detailed accessible description.
+Stable CSS hooks are `.uml-with-callouts`, `.uml-model-layer`, `.uml-callouts`, `.uml-callout`, `.uml-callout-box`, `.uml-callout-pointer`, and `.uml-callout-bubble`. Override `--uml-callout-fill` and `--uml-callout-text` in CSS when needed; keep their contrast accessible. SEBook includes the explanations in both the image's text alternative and its detailed accessible description.
 
 Keep each explanation focused on what the notation means in this example. Use a few local annotations rather than a large legend. Check dense figures after changes: source-order edits can change `edge`, `shape`, and repeated-text occurrence targets.
 
