@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const CALLOUT_CSS = fs.readFileSync(path.join(__dirname, 'css', 'callouts.css'), 'utf8');
 const crypto = require('crypto');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -25,6 +26,7 @@ function rendererFingerprint(sources) {
 
 const RENDERER_HASH = rendererFingerprint({
     bundle: BUNDLE_JS,
+    callouts: CALLOUT_CSS,
     driver: fs.readFileSync(__filename, 'utf8'),
     gitGraph: GIT_GRAPH_JS,
 });
@@ -60,7 +62,7 @@ function cachePathFor(type, text) {
 // renderer in try/catch keeps one malformed diagram from rejecting the whole
 // page.evaluate and aborting a batch build.
 function renderInPage(page, type, text) {
-    return page.evaluate(async ({ type, text }) => {
+    return page.evaluate(async ({ type, text, calloutCss }) => {
         const RENDERERS = {
             class:         window.UMLClassDiagram,
             sequence:      window.UMLSequenceDiagram,
@@ -89,8 +91,13 @@ function renderInPage(page, type, text) {
             return 'Error: ' + (err && err.message ? err.message : String(err));
         }
         const svgEl = container.querySelector('svg');
+        if (svgEl && svgEl.classList.contains('uml-with-callouts')) {
+            const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+            style.textContent = calloutCss;
+            svgEl.prepend(style);
+        }
         return svgEl ? svgEl.outerHTML : 'Error: No SVG generated';
-    }, { type, text });
+    }, { type, text, calloutCss: CALLOUT_CSS });
 }
 
 // PLAYWRIGHT_CHROME_EXECUTABLE names an installed Chrome for machines where

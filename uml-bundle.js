@@ -1,4 +1,345 @@
 /**
+ * Teaching callouts. These overlays explain notation; they are not UML comments.
+ * Syntax and the stable SVG styling hooks are documented in REFERENCE.md.
+ */
+(function () {
+  'use strict';
+  const NS = 'http://www.w3.org/2000/svg';
+  const FONT_SIZE = 14;
+  const LINE_HEIGHT = 20;
+  const PADDING = 12;
+  const pending = new WeakMap();
+
+  function parseTarget(source) {
+    let match = source.match(/^text\s+("(?:[^"\\]|\\.)+")(?:\s+occurrence\s+([1-9]\d*))?$/);
+    if (match) return { kind: 'text', value: JSON.parse(match[1]), occurrence: Number(match[2] || 1) };
+    match = source.match(/^element\s+(\S+)$/);
+    if (match) return { kind: 'element', value: match[1] };
+    match = source.match(/^shape\s+(rect|circle|ellipse|polygon|path|line|polyline)(?:\s+occurrence\s+([1-9]\d*))?$/);
+    if (match) return { kind: 'shape', value: match[1], occurrence: Number(match[2] || 1) };
+    match = source.match(/^edge\s+([1-9]\d*)(?:\s+(start|middle|end))?$/);
+    if (match) return { kind: 'edge', value: Number(match[1]), anchor: match[2] || 'middle' };
+    match = source.match(/^point\s+(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+    if (match) return { kind: 'point', x: Number(match[1]), y: Number(match[2]) };
+    return null;
+  }
+
+  /** Remove single-line callout directives without changing model line numbers. */
+  function extract(source) {
+    const callouts = [];
+    let inNote = false;
+    const lines = String(source || '').split('\n').map((line, index) => {
+      const trimmed = line.trim();
+      if (/^end\s*note$/i.test(trimmed)) { inNote = false; return line; }
+      if (inNote) return line;
+      if (/^note\b[^:]*$/i.test(trimmed)) { inNote = true; return line; }
+      if (!/^callout\s/i.test(trimmed)) return line;
+      const match = trimmed.match(/^callout\s+(left|right|top|bottom)\s+of\s+(.+?)\s+:\s+(.+)$/);
+      // A quoted target may itself contain " : "; find the delimiter after it.
+      const quoted = trimmed.match(/^callout\s+(left|right|top|bottom)\s+of\s+(text\s+"(?:[^"\\]|\\.)+"(?:\s+occurrence\s+[1-9]\d*)?)\s+:\s+(.+)$/);
+      const parts = quoted || match;
+      const target = parts && parseTarget(parts[2]);
+      if (!target) throw new Error('Invalid callout at line ' + (index + 1) + '. See the teaching-callout syntax reference.');
+      callouts.push({ side: parts[1], target, text: parts[3], line: index + 1 });
+      return '';
+    });
+    return { source: lines.join('\n'), callouts };
+  }
+
+  function svgElement(tag, attributes, text) {
+    const element = document.createElementNS(NS, tag);
+    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+    if (text !== undefined) element.textContent = text;
+    return element;
+  }
+
+  function union(a, b) {
+    if (!a) return { x: b.x, y: b.y, width: b.width, height: b.height };
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x,
+      height: Math.max(a.y + a.height, b.y + b.height) - y };
+  }
+
+  function textTarget(svg, target) {
+    const labels = [...svg.querySelectorAll('text')].filter(label => !label.closest('defs, .uml-callouts'));
+    // SVG collapses indentation around text/tspan nodes; character geometry
+    // indexes the visible text, not those source-formatting newlines.
+    const visibleText = label => label.textContent.replace(/\s+/g, ' ').trim();
+    // Prefer a complete label before looking for a marker inside a longer label.
+    const exact = labels.filter(label => visibleText(label) === target.value);
+    const matches = exact.length ? exact : labels.filter(label => visibleText(label).includes(target.value));
+    const label = matches[target.occurrence - 1];
+    if (!label) return null;
+    if (exact.length) return UMLShared.renderedSvgBox(svg, label);
+    const start = visibleText(label).indexOf(target.value);
+    let box = null;
+    for (let index = start; index < start + target.value.length; index++) box = union(box, label.getExtentOfChar(index));
+    const transform = svg.getScreenCTM().inverse().multiply(label.getScreenCTM());
+    const a = new DOMPoint(box.x, box.y).matrixTransform(transform);
+    const b = new DOMPoint(box.x + box.width, box.y + box.height).matrixTransform(transform);
+    return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
+  }
+
+  function edgeTarget(svg, target) {
+    // Lifelines, compartment rules and activation bars are not message arrows.
+    const routes = UMLShared.collectEditableRoutes(svg).filter(route =>
+      route.element.hasAttribute('data-layout-route-id') && route.element.tagName.toLowerCase() !== 'rect');
+    const route = routes[target.value - 1];
+    if (!route) return null;
+    const points = route.points;
+    let point = target.anchor === 'start' ? points[0] : points[points.length - 1];
+    if (target.anchor === 'middle') {
+      const segments = points.slice(1).map((end, index) => ({ start: points[index], end,
+        length: Math.hypot(end.x - points[index].x, end.y - points[index].y) }));
+      let distance = segments.reduce((sum, segment) => sum + segment.length, 0) / 2;
+      for (const segment of segments) {
+        if (distance <= segment.length && segment.length > 0) {
+          const ratio = distance / segment.length;
+          point = { x: segment.start.x + ratio * (segment.end.x - segment.start.x),
+            y: segment.start.y + ratio * (segment.end.y - segment.start.y) };
+          break;
+        }
+        distance -= segment.length;
+      }
+    }
+    return { x: point.x - 3, y: point.y - 3, width: 6, height: 6, element: route.element };
+  }
+
+  function resolveTarget(svg, target) {
+    if (target.kind === 'text') return textTarget(svg, target);
+    if (target.kind === 'edge') return edgeTarget(svg, target);
+    if (target.kind === 'shape') {
+      const shapes = [...svg.querySelectorAll(target.value)].filter(shape => !shape.closest('defs, .uml-callouts'));
+      const shape = shapes[target.occurrence - 1];
+      return shape ? { ...screenBox(shape, svg.getScreenCTM().inverse()), element: shape } : null;
+    }
+    if (target.kind === 'point') return { x: target.x, y: target.y, width: 0, height: 0 };
+    return UMLShared.renderedLayoutBox(svg, target.value) ||
+      textTarget(svg, { value: target.value, occurrence: 1 });
+  }
+
+  function measure(text, maxWidth = 196) {
+    const lines = [];
+    let line = '';
+    for (const word of text.split(/\s+/)) {
+      const next = line ? line + ' ' + word : word;
+      if (line && UMLShared.textWidth(next, false, FONT_SIZE) > maxWidth) { lines.push(line); line = word; }
+      else line = next;
+    }
+    if (line) lines.push(line);
+    return { lines, width: Math.max(...lines.map(value => UMLShared.textWidth(value, false, FONT_SIZE))) + PADDING * 2,
+      height: lines.length * LINE_HEIGHT + PADDING * 2 };
+  }
+
+  function pointerVertices(box, target, side) {
+    const horizontal = side === 'left' || side === 'right';
+    const tx = target.x + target.width / 2, ty = target.y + target.height / 2;
+    const baseX = side === 'left' ? box.x + box.width : side === 'right' ? box.x : Math.max(box.x + 12, Math.min(tx, box.x + box.width - 12));
+    const baseY = side === 'top' ? box.y + box.height : side === 'bottom' ? box.y : Math.max(box.y + 12, Math.min(ty, box.y + box.height - 12));
+    // Stop just short of the notation so the tip never paints over the symbol.
+    const tipX = horizontal ? (side === 'left' ? target.x - 4 : target.x + target.width + 4) : tx;
+    const tipY = horizontal ? ty : (side === 'top' ? target.y - 4 : target.y + target.height + 4);
+    return horizontal
+      ? [{ x: baseX, y: baseY - 7 }, { x: tipX, y: tipY }, { x: baseX, y: baseY + 7 }]
+      : [{ x: baseX - 7, y: baseY }, { x: tipX, y: tipY }, { x: baseX + 7, y: baseY }];
+  }
+
+  function rectVertices(box, pad = 0) {
+    return [{ x: box.x - pad, y: box.y - pad }, { x: box.x + box.width + pad, y: box.y - pad },
+      { x: box.x + box.width + pad, y: box.y + box.height + pad }, { x: box.x - pad, y: box.y + box.height + pad }];
+  }
+
+  // Separating-axis test: the whole triangular pointer must clear labels,
+  // not just its centerline or bounding box.
+  function polygonsOverlap(a, b) {
+    for (const polygon of [a, b]) {
+      for (let index = 0; index < polygon.length; index++) {
+        const next = polygon[(index + 1) % polygon.length], point = polygon[index];
+        const nx = next.y - point.y, ny = point.x - next.x;
+        const first = a.map(p => p.x * nx + p.y * ny), second = b.map(p => p.x * nx + p.y * ny);
+        if (Math.max(...first) <= Math.min(...second) || Math.max(...second) <= Math.min(...first)) return false;
+      }
+    }
+    return true;
+  }
+
+  function contains(outer, inner) {
+    return outer.x <= inner.x && outer.y <= inner.y &&
+      outer.x + outer.width >= inner.x + inner.width && outer.y + outer.height >= inner.y + inner.height;
+  }
+
+  function strokePolygons(element, inverse) {
+    const transform = inverse.multiply(element.getScreenCTM());
+    let points;
+    if (element.tagName.toLowerCase() === 'line') {
+      points = [new DOMPoint(element.x1.baseVal.value, element.y1.baseVal.value),
+        new DOMPoint(element.x2.baseVal.value, element.y2.baseVal.value)];
+    } else if (element.points) points = [...element.points];
+    else {
+      const length = element.getTotalLength(), steps = Math.max(1, Math.ceil(length / 12));
+      points = Array.from({ length: steps + 1 }, (_, index) => element.getPointAtLength(length * index / steps));
+    }
+    // Merge collinear samples so long straight routes stay cheap to test.
+    const corners = [];
+    for (const point of points) {
+      const next = new DOMPoint(point.x, point.y).matrixTransform(transform);
+      while (corners.length > 1) {
+        const a = corners[corners.length - 2], b = corners[corners.length - 1];
+        if (Math.abs((b.x - a.x) * (next.y - b.y) - (b.y - a.y) * (next.x - b.x)) > 0.01) break;
+        corners.pop();
+      }
+      corners.push(next);
+    }
+    return corners.slice(1).flatMap((end, index) => {
+      const start = corners[index], length = Math.hypot(end.x - start.x, end.y - start.y);
+      if (!length) return [];
+      const dx = (end.y - start.y) / length, dy = (start.x - end.x) / length;
+      return [[{ x: start.x + dx, y: start.y + dy }, { x: end.x + dx, y: end.y + dy },
+        { x: end.x - dx, y: end.y - dy }, { x: start.x - dx, y: start.y - dy }]];
+    });
+  }
+
+  function boundsOverlap(a, b) {
+    return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+  }
+
+  function screenBox(element, inverse) {
+    const rect = element.getBoundingClientRect();
+    const a = new DOMPoint(rect.left, rect.top).matrixTransform(inverse);
+    const b = new DOMPoint(rect.right, rect.bottom).matrixTransform(inverse);
+    return { x: a.x, y: a.y, width: Math.max(1, b.x - a.x), height: Math.max(1, b.y - a.y) };
+  }
+
+  function modelObstacles(svg) {
+    const inverse = svg.getScreenCTM().inverse();
+    return [...svg.querySelectorAll('text, rect, ellipse, circle, polygon, path, line, polyline')]
+      .filter(element => !element.closest('defs')).flatMap(element => {
+        // A line has zero geometric width or height, but its stroke still
+        // needs space. The shared node-bounds helper intentionally omits it.
+        const box = screenBox(element, inverse);
+        if (element.matches('rect[data-layout-fragment-id], [data-callout-frame]')) {
+          // Reserve only a frame's outline, leaving its empty interior usable.
+          return [{ ...box, height: 1 }, { ...box, y: box.y + box.height, height: 1 },
+            { ...box, width: 1 }, { ...box, x: box.x + box.width, width: 1 }];
+        }
+        return [{ ...box, element, text: element.tagName.toLowerCase() === 'text',
+          strokes: element.matches('path, line, polyline') ? strokePolygons(element, inverse) : null,
+          solid: ['rect', 'ellipse', 'circle', 'polygon'].includes(element.tagName.toLowerCase()) }];
+      });
+  }
+
+  function place(callout, target, obstacles, placed) {
+    // Labels always exclude pointers. A box containing the target does not:
+    // a pointer to a visibility marker must be able to reach inside its class.
+    const pointerObstacles = obstacles.filter(obstacle => obstacle.element !== target.element || !target.element)
+      .filter(obstacle => obstacle.text || callout.target.kind !== 'text' || !contains(obstacle, target))
+      .filter(obstacle => obstacle.solid || obstacle.text || obstacle.strokes)
+      .map(obstacle => ({ ...obstacle, polygons: obstacle.strokes || [rectVertices(obstacle, 1)] }));
+    const sides = [callout.side, ...['left', 'right', 'top', 'bottom'].filter(side => side !== callout.side)];
+    let best;
+    // Try a few readable widths to use nearby space without long pointers.
+    // Prefer the default width when rewrapping does not improve proximity.
+    // Short hints can use a narrow gap between a lifeline and a frame.
+    const widths = callout.text.length < 40 ? [196, 260, 160, 80] : [196, 260, 160];
+    for (const maxWidth of widths) {
+      const size = measure(callout.text, maxWidth);
+      for (const side of sides) {
+        const result = UMLShared.placeNoteRect(target, size, side, obstacles, placed.map(item => item.box), {
+          gap: 18, distanceLevels: 12, distanceStep: 12, maxSlides: 16, slideStep: 12,
+          sideDistanceCost: 1, sideSlideCost: 1,
+          candidatePenalty(rect) {
+            const box = { x: rect.x, y: rect.y, width: size.width, height: size.height };
+            const tail = pointerVertices(box, target, side);
+            const xs = tail.map(point => point.x), ys = tail.map(point => point.y);
+            const tailBounds = { x: Math.min(...xs), y: Math.min(...ys),
+              width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+            const base = { x: (tail[0].x + tail[2].x) / 2, y: (tail[0].y + tail[2].y) / 2 };
+            const length = Math.hypot(base.x - tail[1].x, base.y - tail[1].y);
+            const crossings = pointerObstacles.filter(obstacle => boundsOverlap(tailBounds, obstacle) &&
+              obstacle.polygons.some(polygon => polygonsOverlap(tail, polygon))).length +
+              placed.filter(item => polygonsOverlap(tail, rectVertices(item.box, 3)) ||
+                polygonsOverlap(tail, item.tail) || polygonsOverlap(rectVertices(box, 3), item.tail)).length;
+            return crossings * 100000000 + length * 20 + (side === callout.side ? 0 : 12) + Math.abs(maxWidth - 196) * 0.5;
+          }
+        });
+        if (!best || result.score < best.score) best = { ...result, side, size };
+      }
+    }
+    return best;
+  }
+
+  function draw(layer, callout, target, box, size, side) {
+    const group = svgElement('g', { class: 'uml-callout', 'data-callout-target': callout.target.value || 'point' });
+    group.appendChild(svgElement('polygon', { class: 'uml-callout-pointer', points: pointerVertices(box, target, side).map(p => `${p.x},${p.y}`).join(' ') }));
+    group.appendChild(svgElement('rect', { class: 'uml-callout-box', x: box.x, y: box.y, width: box.width, height: box.height, rx: 3 }));
+    const text = svgElement('text', { x: box.x + PADDING, y: box.y + PADDING + FONT_SIZE,
+      'font-size': FONT_SIZE, 'font-family': UMLShared.BASE_CFG.fontFamily });
+    size.lines.forEach((line, index) => text.appendChild(svgElement('tspan', {
+      x: box.x + PADDING, dy: index ? LINE_HEIGHT : 0
+    }, line + (index < size.lines.length - 1 ? " " : ""))));
+    group.appendChild(text);
+    layer.appendChild(group);
+  }
+
+  /** Apply overlays after model layout, preserving every model position. */
+  function render(container, callouts) {
+    if (!callouts || !callouts.length) return;
+    const svg = container.querySelector('svg');
+    if (!svg) {
+      // DOM-free workers serialize the model first. Preserve annotations for
+      // the ordinary auto-fit pass after the SVG reaches a real document.
+      if (typeof container.innerHTML === 'string' && container.innerHTML.includes('<svg')) {
+        container.innerHTML = container.innerHTML.replace('<svg', '<svg data-uml-callouts="' +
+          UMLShared.escapeXml(JSON.stringify(callouts)) + '"');
+      }
+      return;
+    }
+    // Character geometry is unavailable inside closed details/hidden tabs.
+    // Reuse the shared visibility/refit scheduler instead of guessing bounds.
+    if (!svg.getBoundingClientRect().width || !svg.getBoundingClientRect().height) {
+      pending.set(svg, callouts);
+      return;
+    }
+    pending.delete(svg);
+    svg.removeAttribute('data-uml-callouts');
+    const targets = callouts.map(callout => {
+      const target = resolveTarget(svg, callout.target);
+      if (!target) throw new Error('Callout target not found at line ' + callout.line + ': ' + callout.target.value);
+      return target;
+    });
+    const obstacles = modelObstacles(svg);
+    const content = svgElement('g', { class: 'uml-diagram-layers' });
+    const model = svgElement('g', { class: 'uml-model-layer' });
+    for (const child of [...svg.children]) {
+      if (!['defs', 'title', 'desc'].includes(child.tagName.toLowerCase())) model.appendChild(child);
+    }
+    content.appendChild(model);
+    const layer = svgElement('g', { class: 'uml-callouts' });
+    content.appendChild(layer);
+    svg.appendChild(content);
+    svg.classList.add('uml-with-callouts');
+    const placed = [];
+    callouts.forEach((callout, index) => {
+      const target = targets[index];
+      const position = place(callout, target, obstacles, placed), size = position.size;
+      const box = { ...position, width: size.width, height: size.height };
+      draw(layer, callout, target, box, size, position.side);
+      placed.push({ box, tail: pointerVertices(box, target, position.side) });
+    });
+    UMLShared.fitSVGToContent(container);
+  }
+
+  function flush(container) {
+    const svg = container.querySelector('svg');
+    if (!svg) return;
+    const annotations = pending.get(svg) || JSON.parse(svg.getAttribute('data-uml-callouts') || 'null');
+    if (annotations) render(container, annotations);
+  }
+
+  window.UMLCallouts = { extract, render, flush };
+})();
+
+/**
  * UML Shared Utilities
  *
  * Common functions and configuration shared across all UML diagram renderers.
@@ -372,9 +713,10 @@
   }
 
   function extractLayoutMetadata(text) {
-    var source = String(text || '');
+    var annotations = window.UMLCallouts.extract(text);
+    var source = annotations.source;
     var lines = source.split('\n');
-    var layout = { schema: 1, positions: createStringMap(), routes: createStringMap() };
+    var layout = { schema: 1, positions: createStringMap(), routes: createStringMap(), callouts: annotations.callouts };
     var out = [];
     var inLayout = false;
 
@@ -2700,6 +3042,7 @@
   }
 
   function autoFitSVG(container, pad) {
+    window.UMLCallouts.flush(container);
     applyAutoFitSVG(container, pad);
     sizeDiagramForReadability(container);
     var svg = container && container.querySelector ? container.querySelector('svg') : null;
@@ -2881,7 +3224,9 @@
           overlapArea += rectOverlapArea(rect, allPlaced[pi], overlapPad + 2);
         }
       }
-      return overlapCount * 100000000 + overlapArea + travelCost;
+      var extra = !overlapCount && opts.candidatePenalty ? opts.candidatePenalty(rect) : 0;
+      var overlapCost = opts.candidatePenalty ? 1000000000 : 100000000;
+      return overlapCount * overlapCost + overlapArea + travelCost + extra;
     }
 
     var best = null;
@@ -2947,7 +3292,7 @@
       }
     }
 
-    return best ? { x: best.x, y: best.y } : { x: target.x, y: target.y };
+    return best ? { x: best.x, y: best.y, score: best.score } : { x: target.x, y: target.y, score: Infinity };
   }
 
   function computeAnchoredNotes(notes, entries, extraObstacles, options) {
@@ -9852,7 +10197,7 @@
       }
 
       // Overall border
-      svg.push('<rect x="' + x + '" y="' + y + '" width="' + box.width + '" height="' + box.height +
+      svg.push('<rect data-layout-bounds-id="' + UMLShared.escapeXml(en) + '" x="' + x + '" y="' + y + '" width="' + box.width + '" height="' + box.height +
         '" fill="none" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' + boxDash + '/>');
 
       // Compartment dividers (only between non-empty sections)
@@ -11186,6 +11531,7 @@
     var svgStr = rendered;
     container.innerHTML = svgStr;
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -11621,6 +11967,7 @@
     var svg = generateSequenceSVG(parsed, colors);
     container.innerHTML = svg;
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -14467,6 +14814,7 @@
     UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -20278,6 +20626,7 @@
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     adjustRenderedComponentLabels(container);
     UMLShared.applyRenderedPositions(container, componentLabelLayout(parsed.layout));
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     // Compact: trim the auto-fit padding so the final viewBox sits closer
     // to the actual content. The layout itself (node positions, edge
     // routes) is untouched — this only shrinks the margin that autoFit
@@ -21300,6 +21649,7 @@
     var layout = computeLayout(parsed);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     // Protocol labels and manual routes can extend beyond the node envelope.
     UMLShared.fitSVGToContent(container, CFG.svgPad);
   }
@@ -22254,7 +22604,7 @@
       var sbox = systemBoxes[sbi2];
       svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.id) +
         '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.id) + '">');
-      svg.push('<rect x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
+      svg.push('<rect data-callout-frame="true" x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
         '" rx="' + CFG.sysRx + '" ry="' + CFG.sysRx +
         '" fill="' + colors.secondaryFill + '" fill-opacity="0.7" stroke="' + colors.secondaryLine + '" stroke-width="1.2"/>');
       // System title
@@ -22299,6 +22649,7 @@
 
       var isDashed = rel.type === 'dependency';
       var dashAttr = isDashed ? ' stroke-dasharray="6,4"' : '';
+      var routeAttrs = ' data-layout-route-id="usecase:' + ri + '"';
       var lineColor = isDashed ? colors.secondaryLine : colors.line;
 
       // Route around intermediate use case ellipses
@@ -22325,7 +22676,7 @@
           pathParts.push(allPts[pi].x + ',' + allPts[pi].y);
         }
         svg.push('<polyline points="' + pathParts.join(' ') +
-          '" fill="none" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+          '" fill="none" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + routeAttrs + '/>');
 
         // Arrowhead direction from last segment
         var adx = p2.x - allPts[lastIdx - 1].x, ady = p2.y - allPts[lastIdx - 1].y;
@@ -22334,7 +22685,7 @@
         var p1 = clipToElement(fromE, fromCx, fromCy, toCx, toCy);
         var p2 = clipToElement(toE, toCx, toCy, fromCx, fromCy);
         svg.push('<line x1="' + p1.x + '" y1="' + p1.y + '" x2="' + p2.x + '" y2="' + p2.y +
-          '" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+          '" stroke="' + lineColor + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + routeAttrs + '/>');
         var adx = p2.x - p1.x, ady = p2.y - p1.y;
       }
 
@@ -22390,7 +22741,7 @@
       var rx = e.box.width / 2;
       var ry = e.box.height / 2;
       var ucFills = UMLShared.highlightFills(colors, e.data.highlight, e.data.texture);
-      svg.push('<ellipse filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
+      svg.push('<ellipse data-layout-bounds-id="' + UMLShared.escapeXml(eid) + '" filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
         '" fill="' + ucFills.fill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
       if (ucFills.textureUrl) {
         svg.push('<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + rx + '" ry="' + ry +
@@ -22407,12 +22758,14 @@
       if (e2.type !== 'actor') continue;
       var aCx = e2.x + e2.box.width / 2;
       var aTopY = e2.y;
+      svg.push('<g data-layout-bounds-id="' + UMLShared.escapeXml(eid2) + '">');
       UMLShared.drawActorStickFigure(svg, aCx, aTopY, colors, CFG.strokeWidth, e2.data.highlight);
       // Label below stick figure
       var labelY = aTopY + UMLShared.ACTOR_H + CFG.actorLabelGap + CFG.fontSize * 0.75;
       svg.push('<text x="' + aCx + '" y="' + labelY +
         '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(e2.data.name) + '</text>');
+      svg.push('</g>');
     }
 
     // ── Draw actor inheritance (tree-style, like class diagrams) ──
@@ -22712,6 +23065,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -23999,6 +24353,7 @@
     UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -24566,6 +24921,7 @@
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -25074,6 +25430,7 @@
     var colors = UMLShared.getThemeColors(container);
     container.innerHTML = generateSVG(parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -26353,6 +26710,7 @@
     UMLShared.autoFitSVG(container);
     UMLShared.applyRenderedPositions(container, parsed.layout);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -27338,6 +27696,7 @@
     var colors = UMLShared.getThemeColors(container);
     container.innerHTML = generateSVG(parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 

@@ -23,9 +23,10 @@ ArchUML supports a subset of UML notation. The visual editor retains incomplete 
 11. [Activity Diagrams](#activity-diagrams)
 12. [Freeform Diagrams](#freeform-diagrams)
 13. [Git Commit Graphs](#git-commit-graphs)
-14. [Notes & Annotations](#notes--annotations)
-15. [CSS Theming](#css-theming)
-16. [CLI / Node.js API](#cli--nodejs-api)
+14. [Teaching Callouts](#teaching-callouts)
+15. [Notes & Annotations](#notes--annotations)
+16. [CSS Theming](#css-theming)
+17. [CLI / Node.js API](#cli--nodejs-api)
 
 ---
 
@@ -2515,6 +2516,50 @@ Attributes radiate outward from their host entity or relationship. Directions po
 - Entity and relationship names can be quoted — `entity "Library Branch" { ... }` — for names with spaces.
 - Entities referenced on a connection line without being declared are auto-created as plain entities, which is helpful for quick sketches. Declare them explicitly to control their attributes.
 - `title <text>` adds a heading above the diagram. `layout shadows on|off` toggles drop shadows; other `layout` directives are ignored.
+
+---
+
+## Teaching Callouts
+
+Teaching callouts are colored explanation boxes with triangular pointers. They are an authoring overlay, **not UML notation** and not UML's folded-corner `note`. Use them to explain the meaning of a particular symbol, relationship, or label. All seven UML diagram renderers support them.
+
+Load `css/callouts.css` from the ArchUML package alongside `uml-bundle.js`. SEBook already imports it through its shared diagram stylesheet. The Node SVG renderers embed this stylesheet in standalone output.
+
+```text
+callout <side> of <target> : <brief explanation>
+```
+
+The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels and boxes, checks the triangular pointer for collisions, and favors short pointers. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
+
+| Target | Example | Meaning |
+| --- | --- | --- |
+| Visible text | `text "«interface»"` | A whole label, or a substring such as a stereotype, visibility marker, guard, or member name. Exact labels take precedence over substring matches. |
+| Repeated text | `text "+" occurrence 2` | The second rendered label containing that text. Occurrences are one-based, in SVG drawing order. |
+| Named element | `element Account` | The bounds of an element by its model identifier or alias; visible-name lookup is a fallback. Component ports use `element Service.api`. |
+| Relationship/message | `edge 1 end` | The first individually identified rendered route. Choose `start`, `middle` (default), or `end`; lifelines, compartment dividers, and decorative strokes are excluded. Rendering order need not equal source order. |
+| Symbol shape | `shape polygon occurrence 1` | A rendered SVG shape, excluding definitions. Useful for hollow triangles on shared inheritance trees, which do not have one route per relationship. Shapes: `rect`, `circle`, `ellipse`, `polygon`, `path`, `line`, `polyline`. |
+| Coordinate | `point 120,80` | A fallback for an otherwise unnamed detail, in the final SVG's coordinate system. Prefer semantic targets so annotations follow layout changes. |
+
+Text targets use double-quoted strings with JSON escapes. Explanations are plain text, automatically wrapped, and must fit on one source line. In an HTML attribute, escape `<`, `>` and `&` as usual. An unresolved or malformed target produces an authoring error rather than silently omitting the explanation. A `callout` line inside a multiline UML `note` remains note content.
+
+```text
+@startuml
+interface Account {
+  + balance(): Money
+}
+class Money
+Account --> Money
+callout left of text "+" : Public: any client can access this operation.
+callout top of text "«interface»" : This keyword identifies an interface contract.
+callout bottom of edge 1 end : The open arrow marks the navigable end.
+@enduml
+```
+
+The default palette is **UCLA dark blue (`#003b5c`) with white text in light mode**, and **UCLA gold (`#ffd100`) with dark blue text in dark mode**. Print always uses the light palette. The UML model and callouts occupy separate SVG groups so the model's dark-mode filter does not invert callout colors.
+
+Stable CSS hooks are `.uml-with-callouts`, `.uml-model-layer`, `.uml-callouts`, `.uml-callout`, `.uml-callout-box`, and `.uml-callout-pointer`. Override `--uml-callout-fill` and `--uml-callout-text` in CSS when needed; keep their contrast accessible. SEBook includes the explanations in both the image's text alternative and its detailed accessible description.
+
+Keep each explanation focused on what the notation means in this example. Use a few local annotations rather than a large legend. Check dense figures after changes: source-order edits can change `edge`, `shape`, and repeated-text occurrence targets.
 
 ---
 

@@ -14,6 +14,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const CALLOUT_CSS = fs.readFileSync(path.join(__dirname, 'css', 'callouts.css'), 'utf8');
 
 const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er', 'crc'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
@@ -50,7 +51,7 @@ async function main() {
   const page    = await browser.newPage(); page.on("console", msg => console.log(msg.text()));
   await page.setContent(html);
 
-  const result = await page.evaluate(async ({ type, spec }) => {
+  const result = await page.evaluate(async ({ type, spec, calloutCss }) => {
     const RENDERERS = {
       class:      window.UMLClassDiagram,
       sequence:   window.UMLSequenceDiagram,
@@ -73,8 +74,13 @@ async function main() {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const svgEl = container.querySelector('svg');
     if (!svgEl) return { error: 'Renderer produced no SVG' };
+    if (svgEl.classList.contains('uml-with-callouts')) {
+      const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+      style.textContent = calloutCss;
+      svgEl.prepend(style);
+    }
     return { svg: svgEl.outerHTML };
-  }, { type, spec });
+  }, { type, spec, calloutCss: CALLOUT_CSS });
 
   await browser.close();
 

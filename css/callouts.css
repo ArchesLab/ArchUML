@@ -1,0 +1,44 @@
+/* Teaching overlays are distinct from UML's folded-corner comments. These
+   classes are also the SVG export styling hooks (ArchUML REFERENCE.md).
+   Keep the model's inversion inside its own layer so UCLA colors stay exact. */
+.uml-callouts {
+  --uml-callout-fill: #003b5c;
+  --uml-callout-text: #fff;
+}
+
+.uml-callout-box,
+.uml-callout-pointer {
+  fill: var(--uml-callout-fill);
+  stroke: none;
+}
+
+.uml-callout text {
+  fill: var(--uml-callout-text);
+}
+
+html.dark-mode svg.uml-with-callouts {
+  filter: none;
+}
+
+html.dark-mode .uml-with-callouts .uml-model-layer {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+html.dark-mode .uml-callouts {
+  --uml-callout-fill: #ffd100;
+  --uml-callout-text: #003b5c;
+}
+
+@media print {
+  .uml-callouts,
+  html.dark-mode .uml-callouts {
+    --uml-callout-fill: #003b5c;
+    --uml-callout-text: #fff;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  html.dark-mode .uml-with-callouts .uml-model-layer {
+    filter: none;
+  }
+}
