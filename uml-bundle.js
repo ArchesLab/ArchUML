@@ -31,12 +31,16 @@
   // ─── Text Measurement ───────────────────────────────────────────
 
   var _ctx = null;
-  function textWidth(text, bold, fontSize, fontFamily) {
+  function textMetrics(text, bold, fontSize, fontFamily, italic) {
     if (!_ctx) _ctx = document.createElement('canvas').getContext('2d');
     var fs = fontSize || BASE_CFG.fontSize;
     var ff = fontFamily || BASE_CFG.fontFamily;
-    _ctx.font = (bold ? 'bold ' : '') + fs + 'px ' + ff;
-    return _ctx.measureText(text).width;
+    _ctx.font = (italic ? 'italic ' : '') + (bold ? 'bold ' : '') + fs + 'px ' + ff;
+    return _ctx.measureText(text);
+  }
+
+  function textWidth(text, bold, fontSize, fontFamily) {
+    return textMetrics(text, bold, fontSize, fontFamily).width;
   }
 
   // ─── XML Escaping ───────────────────────────────────────────────
@@ -293,6 +297,9 @@
     var clean = String(line || '').trim();
     if (!clean) return null;
 
+    var cardAliasMatch = clean.match(/^card\s+(?:"(?:[^"\\]|\\.)*"|\S+)\s+as\s+("(?:[^"\\]|\\.)*")\s*\{?\s*$/i);
+    if (cardAliasMatch) return unquoteLayoutId(cardAliasMatch[1]);
+
     var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
     if (aliasMatch) return aliasMatch[1];
 
@@ -302,7 +309,7 @@
     var participantMatch = clean.match(/^(?:participant|actor)\s+(\S+)/i);
     if (participantMatch) return participantMatch[1];
 
-    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
+    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
     if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
 
     var bareMatch = clean.match(/^([A-Za-z0-9_.:-]+)(?:\s+merge\s+\S+|\s+"(?:[^"\\]|\\.)*"|\s*)$/);
@@ -389,7 +396,8 @@
         continue;
       }
 
-      var inlinePos = raw.match(/\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/i);
+      var inlinePos = /^(?:responsibility|collaborator)\s*:/i.test(trimmed) ? null :
+        raw.match(/\s+@pos\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/i);
       if (inlinePos) {
         var before = raw.slice(0, inlinePos.index);
         var after = raw.slice(inlinePos.index + inlinePos[0].length);
@@ -444,7 +452,7 @@
       var height = entry.box && entry.box.height ? entry.box.height : 0;
       var half = port.kind === 'require'
         ? 8
-        : (port.kind === 'provide' ? 7 : 6);
+        : (port.kind === 'provide' ? 7 : port.cx - port.x);
       var inset = Math.max(8, half + 2);
       var left = entry.x;
       var right = entry.x + width;
@@ -597,7 +605,9 @@
 
   function layoutRoutePointsToString(points) {
     return (points || []).map(function(p) {
-      return p.x + ',' + p.y;
+      // Route endpoints may lie on fractional node coordinates. Saving an
+      // edited bend must not move those anchors onto an integer grid.
+      return Number(p.x) + ',' + Number(p.y);
     }).join(' ');
   }
 
@@ -1877,7 +1887,8 @@
     gitgraph: 'uml-gitgraph-diagram-container',
     'folder-tree': 'uml-folder-tree-diagram-container',
     venn: 'uml-venn-diagram-container',
-    er: 'uml-er-diagram-container'
+    er: 'uml-er-diagram-container',
+    crc: 'uml-crc-diagram-container'
   };
 
   function prepareDiagramContainer(container, type) {
@@ -1889,6 +1900,7 @@
       }
     }
     container.classList.add(targetClass);
+    container.setAttribute('data-uml-scroll-label', fallbackArchUmlCaption(type));
     if (container.hidden) container.hidden = false;
     container.style.setProperty('display', 'block', 'important');
     return targetClass;
@@ -1906,7 +1918,8 @@
     gitgraph: 'Git graph diagram',
     'folder-tree': 'Folder tree diagram',
     venn: 'Venn diagram',
-    er: 'Entity-relationship diagram'
+    er: 'Entity-relationship diagram',
+    crc: 'Class-responsibility-collaborator cards'
   };
 
   function normalizeDiagramType(type) {
@@ -2018,6 +2031,108 @@
     };
   }
 
+  // ─── Auto-Fit Scheduling ───────────────────────────────────────
+
+  // Diagrams rendered while hidden keep a placeholder size until they can be
+  // measured. Every refit pass covers all containers, so one scheduler serves
+  // all diagram types instead of each type repeating the same document scans.
+  var DIAGRAM_CONTAINER_SELECTOR =
+    '.uml-class-diagram-container,' +
+    '.uml-sequence-diagram-container,' +
+    '.uml-state-diagram-container,' +
+    '.uml-component-diagram-container,' +
+    '.uml-deployment-diagram-container,' +
+    '.uml-usecase-diagram-container,' +
+    '.uml-activity-diagram-container,' +
+    '.uml-freeform-diagram-container,' +
+    '.uml-gitgraph-diagram-container,' +
+    '.uml-folder-tree-diagram-container,' +
+    '.uml-venn-diagram-container,' +
+    '.uml-er-diagram-container,' +
+    '.uml-crc-diagram-container';
+  var refitQueued = false;
+  var settleTimer = null;
+  var settlePasses = 0;
+  var visibilityMutationObserver = null;
+  var visibilityObserver = typeof IntersectionObserver === 'function'
+    ? new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          if (!entries[i].isIntersecting) continue;
+          autoFitSVG(entries[i].target);
+          var svg = entries[i].target.querySelector('svg');
+          if (!isPlaceholderAutoFit(svg)) visibilityObserver.unobserve(entries[i].target);
+        }
+      }, { rootMargin: '200px 0px' })
+    : null;
+
+  function getDiagramContainers() {
+    return document.querySelectorAll(DIAGRAM_CONTAINER_SELECTOR);
+  }
+
+  function startSettleLoop() {
+    if (settleTimer) return;
+    settlePasses = 0;
+    settleTimer = setInterval(function () {
+      settlePasses++;
+      var remaining = 0;
+      var containers = getDiagramContainers();
+      for (var d = 0; d < containers.length; d++) {
+        var container = containers[d];
+        if (!container || !container.isConnected) continue;
+        autoFitSVG(container);
+        var svg = container.querySelector('svg');
+        if (isPlaceholderAutoFit(svg)) remaining++;
+      }
+      if (remaining === 0 || settlePasses >= 8) {
+        clearInterval(settleTimer);
+        settleTimer = null;
+      }
+    }, 400);
+  }
+
+  function refitAll() {
+    refitQueued = false;
+    var containers = getDiagramContainers();
+    for (var d = 0; d < containers.length; d++) {
+      if (containers[d] && containers[d].isConnected) {
+        autoFitSVG(containers[d]);
+      }
+    }
+  }
+
+  function queueRefitAll() {
+    if (refitQueued || typeof window === 'undefined') return;
+    refitQueued = true;
+    var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
+    raf(function () {
+      raf(refitAll);
+    });
+  }
+
+  // Only an attribute change on a diagram or one of its ancestors can reveal
+  // it. Animations and widgets elsewhere must not trigger document-wide scans.
+  function mayRevealDiagram(mutation) {
+    var target = mutation.target;
+    return !!target.matches && (target.matches(DIAGRAM_CONTAINER_SELECTOR) ||
+      !!target.querySelector(DIAGRAM_CONTAINER_SELECTOR));
+  }
+
+  function watchDiagramVisibility() {
+    if (visibilityMutationObserver || !document.body) return;
+    visibilityMutationObserver = new MutationObserver(function (mutations) {
+      if (!mutations.some(mayRevealDiagram)) return;
+      setTimeout(function () {
+        queueRefitAll();
+        startSettleLoop();
+      }, 60);
+    });
+    visibilityMutationObserver.observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'open', 'hidden']
+    });
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -2031,75 +2146,6 @@
   function createAutoInit(selector, renderFn, opts) {
     var diagrams = [];
     var extractText = (opts && opts.extractText) || function (el) { return el.textContent; };
-    var refitQueued = false;
-    var settleTimer = null;
-    var settlePasses = 0;
-    var visibilityMutationObserver = null;
-    var visibilityObserver = typeof IntersectionObserver === 'function'
-      ? new IntersectionObserver(function (entries) {
-          for (var i = 0; i < entries.length; i++) {
-            if (!entries[i].isIntersecting) continue;
-            autoFitSVG(entries[i].target);
-            var svg = entries[i].target.querySelector('svg');
-            if (!isPlaceholderAutoFit(svg)) visibilityObserver.unobserve(entries[i].target);
-          }
-        }, { rootMargin: '200px 0px' })
-      : null;
-
-    function getDiagramContainers() {
-      return document.querySelectorAll(
-        '.uml-class-diagram-container,' +
-        '.uml-sequence-diagram-container,' +
-        '.uml-state-diagram-container,' +
-        '.uml-component-diagram-container,' +
-        '.uml-deployment-diagram-container,' +
-        '.uml-usecase-diagram-container,' +
-        '.uml-activity-diagram-container,' +
-        '.uml-freeform-diagram-container,' +
-        '.uml-gitgraph-diagram-container,' +
-        '.uml-folder-tree-diagram-container'
-      );
-    }
-
-    function startSettleLoop() {
-      if (settleTimer) return;
-      settlePasses = 0;
-      settleTimer = setInterval(function () {
-        settlePasses++;
-        var remaining = 0;
-        var containers = getDiagramContainers();
-        for (var d = 0; d < containers.length; d++) {
-          var container = containers[d];
-          if (!container || !container.isConnected) continue;
-          autoFitSVG(container);
-          var svg = container.querySelector('svg');
-          if (isPlaceholderAutoFit(svg)) remaining++;
-        }
-        if (remaining === 0 || settlePasses >= 8) {
-          clearInterval(settleTimer);
-          settleTimer = null;
-        }
-      }, 400);
-    }
-
-    function refitAll() {
-      refitQueued = false;
-      var containers = getDiagramContainers();
-      for (var d = 0; d < containers.length; d++) {
-        if (containers[d] && containers[d].isConnected) {
-          autoFitSVG(containers[d]);
-        }
-      }
-    }
-
-    function queueRefitAll() {
-      if (refitQueued || typeof window === 'undefined') return;
-      refitQueued = true;
-      var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
-      raf(function () {
-        raf(refitAll);
-      });
-    }
 
     function init() {
       var blocks = document.querySelectorAll(selector);
@@ -2121,20 +2167,7 @@
         document.fonts.ready.then(queueRefitAll).catch(function () {});
       }
       window.addEventListener('load', queueRefitAll, { once: true });
-
-      if (!visibilityMutationObserver && document.body) {
-        visibilityMutationObserver = new MutationObserver(function () {
-          setTimeout(function () {
-            queueRefitAll();
-            startSettleLoop();
-          }, 60);
-        });
-        visibilityMutationObserver.observe(document.body, {
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['class', 'style', 'open', 'hidden']
-        });
-      }
+      watchDiagramVisibility();
 
       var observer = new MutationObserver(function (mutations) {
         for (var m = 0; m < mutations.length; m++) {
@@ -2556,6 +2589,71 @@
 
   // ─── SVG Auto-Fit ───────────────────────────────────────────
 
+  // Only overflowing figures enter the tab order. ResizeObserver also covers
+  // figures revealed in quizzes and changes to the surrounding text size.
+  function updateDiagramScrollability(container) {
+    var overflowing = container.clientWidth > 0 &&
+      (container.scrollWidth > container.clientWidth + 1 ||
+       container.scrollHeight > container.clientHeight + 1);
+    var managed = container.hasAttribute('data-uml-scroll-tabindex');
+    if (overflowing && (!container.hasAttribute('tabindex') || managed)) {
+      if (container.getAttribute('tabindex') !== '0') container.setAttribute('tabindex', '0');
+      if (!managed) container.setAttribute('data-uml-scroll-tabindex', 'true');
+      if (!container.hasAttribute('role')) {
+        var svg = container.querySelector('svg');
+        // Live editors own their SVG's interactive semantics. The scrolling
+        // viewport is a region; only authored figure wrappers own img roles.
+        container.setAttribute('role', 'region');
+        container.setAttribute('aria-label', (svg && svg.getAttribute('aria-label')) ||
+          container.getAttribute('data-uml-scroll-label') || 'Diagram');
+      }
+    } else if (!overflowing && managed && container.hasAttribute('tabindex')) {
+      container.removeAttribute('tabindex');
+    }
+  }
+
+  var diagramScrollObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.target.isConnected) updateDiagramScrollability(entry.target);
+          else diagramScrollObserver.unobserve(entry.target);
+        });
+      })
+    : null;
+
+  function sizeDiagramForReadability(container) {
+    var svg = container && container.querySelector('svg');
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    var width = svg.viewBox.baseVal.width;
+    var smallestFont = Infinity;
+    var labels = svg.querySelectorAll('text, tspan');
+    // Use one shared screen coordinate space. In Firefox, the outer SVG's
+    // getCTM() omits its viewBox scale while a descendant's includes it.
+    // Mixing those spaces makes repeated fitting alternate between two sizes.
+    var svgMatrix = svg.getScreenCTM();
+    for (var i = 0; i < labels.length; i++) {
+      if (!labels[i].textContent.trim()) continue;
+      var font = parseFloat(getComputedStyle(labels[i]).fontSize);
+      var labelMatrix = labels[i].getScreenCTM();
+      if (svgMatrix && labelMatrix) {
+        var local = svgMatrix.inverse().multiply(labelMatrix);
+        var scale = Math.hypot(local.c, local.d);
+        if (isFinite(scale) && scale > 0) font *= scale;
+      }
+      if (isFinite(font) && font > 0) smallestFont = Math.min(smallestFont, font);
+    }
+    // Preserve all relative geometry. An em width lets the same serialized
+    // SVG follow the page's paragraph size, including without JavaScript.
+    var readableWidth = isFinite(smallestFont)
+      ? 'max(' + width + 'px, ' + (width / smallestFont) + 'em)'
+      : width + 'px';
+    if (svg.style.getPropertyValue('--uml-readable-width') !== readableWidth) {
+      svg.style.setProperty('--uml-readable-width', readableWidth);
+    }
+    updateDiagramScrollability(container);
+    if (diagramScrollObserver) diagramScrollObserver.observe(container);
+  }
+
   /**
    * After rendering SVG into a container, expand the viewBox to fit all content.
    * Call this after setting container.innerHTML = svgString.
@@ -2601,66 +2699,9 @@
     return false;
   }
 
-  function setReadableDiagramWidth(container) {
-    const svg = container.querySelector('svg');
-    if (!svg) return;
-    const width = svg.getBoundingClientRect().width;
-    if (!width) return;
-    let smallestLabel = Infinity;
-    for (const label of svg.querySelectorAll('text')) {
-      if (!label.textContent.trim() || !label.getScreenCTM) continue;
-      const matrix = label.getScreenCTM();
-      if (!matrix) continue;
-      const style = getComputedStyle(label);
-      if (style.display === 'none' || style.visibility === 'hidden') continue;
-      const size = parseFloat(style.fontSize) * Math.hypot(matrix.c, matrix.d);
-      if (size > 0) smallestLabel = Math.min(smallestLabel, size);
-    }
-    if (!Number.isFinite(smallestLabel)) return;
-    // An em width scales the entire drawing with the surrounding paragraph,
-    // including after text zoom and when a serialized SVG is read without JS.
-    svg.style.setProperty('--uml-readable-width', Math.ceil(width / smallestLabel * 1000) / 1000 + 'em');
-  }
-
-  let diagramScrollObserver = null;
-
-  function updateDiagramScrollFocus(container) {
-    const managed = container.hasAttribute('data-uml-scroll-tabindex');
-    // Preserve focus policies supplied by an editor or another caller.
-    if (container.hasAttribute('tabindex') && !managed) return;
-    const overflowing = container.clientWidth > 0 &&
-      (container.scrollWidth > container.clientWidth + 1 ||
-       container.scrollHeight > container.clientHeight + 1);
-    if (overflowing) {
-      container.setAttribute('tabindex', '0');
-      container.setAttribute('data-uml-scroll-tabindex', 'true');
-    } else if (managed) {
-      container.removeAttribute('tabindex');
-      container.removeAttribute('data-uml-scroll-tabindex');
-    }
-  }
-
-  function observeDiagramScrollFocus(container) {
-    // Read-only figure wrappers own the image role; editor SVGs keep their
-    // own interactive descendants and focus management.
-    if (!container || !container.getAttribute || container.getAttribute('role') !== 'img') return;
-    updateDiagramScrollFocus(container);
-    if (typeof ResizeObserver !== 'function') return;
-    if (!diagramScrollObserver) {
-      diagramScrollObserver = new ResizeObserver(entries => {
-        for (const { target } of entries) {
-          if (target.isConnected) updateDiagramScrollFocus(target);
-          else diagramScrollObserver.unobserve(target);
-        }
-      });
-    }
-    diagramScrollObserver.observe(container);
-  }
-
   function autoFitSVG(container, pad) {
     applyAutoFitSVG(container, pad);
-    setReadableDiagramWidth(container);
-    observeDiagramScrollFocus(container);
+    sizeDiagramForReadability(container);
     var svg = container && container.querySelector ? container.querySelector('svg') : null;
     if (!isPlaceholderAutoFit(svg)) {
       if (container && container.removeAttribute) container.removeAttribute('data-uml-autofit-retries');
@@ -2673,8 +2714,7 @@
     container.setAttribute('data-uml-autofit-retries', String(retries + 1));
     setTimeout(function () {
       applyAutoFitSVG(container, pad);
-      setReadableDiagramWidth(container);
-      observeDiagramScrollFocus(container);
+      sizeDiagramForReadability(container);
       var retriedSvg = container.querySelector('svg');
       if (isPlaceholderAutoFit(retriedSvg)) {
         autoFitSVG(container, pad);
@@ -2685,8 +2725,8 @@
   }
 
   function fitSVGToContent(container, pad) {
-    const fitted = applyAutoFitSVG(container, pad, true);
-    setReadableDiagramWidth(container);
+    var fitted = applyAutoFitSVG(container, pad, true);
+    sizeDiagramForReadability(container);
     return fitted;
   }
 
@@ -3159,6 +3199,60 @@
     return fractions;
   }
 
+  function nearestClearHorizontalOffset(intervals) {
+    intervals.sort((a, b) => a.left - b.left || a.right - b.right);
+    let right = 0;
+    for (const interval of intervals) {
+      if (interval.left < right && interval.right > right) right = interval.right;
+    }
+    let left = 0;
+    for (let i = intervals.length - 1; i >= 0; i--) {
+      if (intervals[i].left < left && intervals[i].right > left) left = intervals[i].left;
+    }
+    return -left < right ? left : right;
+  }
+
+  /** Find the nearest clear translation of a finite label rectangle.
+   * Exclusions are {rect, pad}; input geometry is never mutated. Obstacle
+   * boundary rows cover every change in free space, so the search terminates
+   * without an arbitrary radius cap or an overlapping last resort.
+   */
+  function findClearLabelPlacement(rect, exclusions) {
+    const base = normalizeRect(rect);
+    const expanded = exclusions.map((exclusion) => {
+      const bounds = normalizeRect(exclusion.rect);
+      const gap = (exclusion.pad || 0) + 0.25;
+      return {
+        left: bounds.left - gap, right: bounds.right + gap,
+        top: bounds.top - gap, bottom: bounds.bottom + gap
+      };
+    });
+    const rows = new Set([0]);
+    for (const obstacle of expanded) {
+      rows.add(obstacle.top - base.bottom);
+      rows.add(obstacle.bottom - base.top);
+    }
+    let best = { dx: 0, dy: 0, distance: Infinity };
+    const orderedRows = Array.from(rows).sort((a, b) => Math.abs(a) - Math.abs(b) || a - b);
+    for (const dy of orderedRows) {
+      if (Math.abs(dy) >= best.distance) break;
+      const intervals = [];
+      for (const obstacle of expanded) {
+        if (base.bottom + dy > obstacle.top && base.top + dy < obstacle.bottom) {
+          intervals.push({ left: obstacle.left - base.right, right: obstacle.right - base.left });
+        }
+      }
+      const dx = nearestClearHorizontalOffset(intervals);
+      const distance = Math.abs(dx) + Math.abs(dy);
+      if (distance < best.distance) best = { dx: dx, dy: dy, distance: distance };
+    }
+    return {
+      dx: best.dx,
+      dy: best.dy,
+      rect: makeRect(base.left + best.dx, base.top + best.dy, base.w, base.h)
+    };
+  }
+
   function placeOrthogonalLabel(label, points, obstacles, placedLabels, options) {
     var opts = options || {};
     var fontSize = opts.fontSize || 14;
@@ -3177,7 +3271,6 @@
     });
 
     var best = null;
-    var bestSoft = null;
     var preferredGap = opts.preferredGap || 7;
     var maxComfortGap = opts.maxComfortGap || 18;
     var preferredPoint = opts.preferredPoint || polylinePointAtFraction(points, 0.5);
@@ -3267,10 +3360,7 @@
               score: score
             };
 
-            if (hitsSegments) {
-              candidate.score -= 40;
-              if (!bestSoft || candidate.score > bestSoft.score) bestSoft = candidate;
-            } else if (!best || candidate.score > best.score) {
+            if (!hitsSegments && (!best || candidate.score > best.score)) {
               best = candidate;
             }
           }
@@ -3280,50 +3370,20 @@
 
     if (best) return best;
 
-    // Fallback: no position cleanly avoided obstacles. Try progressively
-    // larger offsets away from the segment until we find one that DOES
-    // clear every obstacle. Previously the fallback ignored obstacles and
-    // just placed the label at the segment midpoint — which could place
-    // a transition label right on top of an adjacent state box.
+    // Exhaustive fallback preserves readability even when every local sample
+    // is crowded. Its exclusions include route shafts as well as boxes/text.
     var fallbackSeg = segments[0];
     var fallbackAnchor = fallbackSeg.isH ? 'middle' : 'start';
-    var fallbackBaseX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x;
-    var fallbackBaseY = fallbackSeg.isH ? fallbackSeg.y : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
-    var tryOffsets = [];
-    for (var step = 1; step <= 6; step++) {
-      var d = step * (labelH + 6);
-      if (fallbackSeg.isH) {
-        tryOffsets.push({ dx: 0, dy: -d });
-        tryOffsets.push({ dx: 0, dy: d });
-      } else {
-        tryOffsets.push({ dx: d, dy: 0, anchor: 'start' });
-        tryOffsets.push({ dx: -d, dy: 0, anchor: 'end' });
-      }
-    }
-    var obstaclePadStrict = opts.obstaclePad || 6;
-    for (var toi = 0; toi < tryOffsets.length; toi++) {
-      var off = tryOffsets[toi];
-      var fx = fallbackBaseX + off.dx;
-      var fy = fallbackBaseY + off.dy;
-      var fa = off.anchor || fallbackAnchor;
-      var fr = makeLabelRect(fx, fy, labelW, labelH, fa);
-      if (!labelRectHitsObstacles(fr, obstacles, obstaclePadStrict) &&
-          !labelRectHitsPlacedLabels(fr, placedLabels, opts.labelPad || 8) &&
-          !labelRectHitsSegments(fr, segments, null, opts.segmentPad || 3) &&
-          !labelRectHitsSegments(fr, otherSegments, null, opts.segmentPad || 3)) {
-        return { x: fx, y: fy, anchor: fa, rect: fr, score: -Infinity };
-      }
-    }
-    if (bestSoft) return bestSoft;
-    // Last resort — preserve previous behavior (place at segment center,
-    // may overlap an obstacle). Still better than rendering no label at all.
-    var fallbackX = fallbackSeg.isH ? fallbackBaseX : fallbackSeg.x + 10;
-    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 10 : fallbackBaseY;
+    var fallbackX = fallbackSeg.isH ? (fallbackSeg.x1 + fallbackSeg.x2) / 2 : fallbackSeg.x + 8;
+    var fallbackY = fallbackSeg.isH ? fallbackSeg.y - 8 : (fallbackSeg.y1 + fallbackSeg.y2) / 2;
+    var clearPlacement = findClearLabelPlacement(
+      makeLabelRect(fallbackX, fallbackY, labelW, labelH, fallbackAnchor), exclusions
+    );
     return {
-      x: fallbackX,
-      y: fallbackY,
+      x: fallbackX + clearPlacement.dx,
+      y: fallbackY + clearPlacement.dy,
       anchor: fallbackAnchor,
-      rect: makeLabelRect(fallbackX, fallbackY, labelW, labelH, fallbackAnchor),
+      rect: clearPlacement.rect,
       score: -Infinity
     };
   }
@@ -4144,6 +4204,7 @@
     BASE_CFG: BASE_CFG,
     NOTE_CFG: NOTE_CFG,
     textWidth: textWidth,
+    textMetrics: textMetrics,
     escapeXml: escapeXml,
     parseLabelDirectionCue: parseLabelDirectionCue,
     labelDirectionPlacementText: labelDirectionPlacementText,
@@ -4191,6 +4252,7 @@
     fitSVGToContent: fitSVGToContent,
     buildOrthogonalSegments: buildOrthogonalSegments,
     placeOrthogonalLabel: placeOrthogonalLabel,
+    findClearLabelPlacement: findClearLabelPlacement,
     simplifyOrthogonalPath: simplifyOrthogonalPath,
     measureOrthogonalRoute: measureOrthogonalRoute,
     countOrthogonalBends: countOrthogonalBends,
@@ -4299,6 +4361,7 @@
         'folder-tree': function () { return window.UMLFolderTreeDiagram; },
         venn:       function () { return window.UMLVennDiagram; },
         er:         function () { return window.UMLERDiagram; },
+        crc:        function () { return window.UMLCRCDiagram; },
       };
 
       // 1. Process data-uml-type attributes
@@ -4340,6 +4403,7 @@
         'folder-tree': 'pre > code.diagram-folder-tree, pre > code.language-folder-tree',
         venn:       'pre > code.diagram-venn, pre > code.language-venn',
         er:         'pre > code.diagram-er, pre > code.language-er',
+        crc:        'pre > code.diagram-crc, pre > code.language-crc',
       };
       for (var key in RENDERERS) {
         var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
@@ -6841,6 +6905,18 @@
 
   // Relationship patterns ordered by specificity
   var REL_PATTERNS = [
+    { token: '*x-->', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '*x--x', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'non-navigable' },
+    { token: '*x--', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'unspecified' },
+    { token: '*<--x', type: 'composition', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+    { token: '*<--', type: 'composition', fromNavigability: 'navigable', toNavigability: 'unspecified' },
+    { token: 'ox-->', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: 'ox--x', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'non-navigable' },
+    { token: 'ox--', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'unspecified' },
+    { token: 'o<--x', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
+    { token: 'o<--', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'unspecified' },
+    { token: 'x-->', type: 'association', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
+    { token: '<--x', type: 'association', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
     { token: '--|>', type: 'generalization' },
     { token: '<|--', type: 'generalization', reverse: true },
     { token: '..|>', type: 'realization' },
@@ -6855,12 +6931,6 @@
     { token: 'o-->', type: 'aggregation', navigability: 'navigable' },
     { token: 'o--x', type: 'aggregation', navigability: 'non-navigable' },
     { token: 'o--', type: 'aggregation', navigability: 'unspecified' },
-
-    // Navigation belongs to each association end, independently of a diamond.
-    { token: '*x-->', type: 'composition', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
-    { token: 'ox-->', type: 'aggregation', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
-    { token: '*<--x', type: 'composition', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
-    { token: 'o<--x', type: 'aggregation', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
 
     // Reverse aliases (diamond at target side)
     { token: '<-->*', type: 'composition', navigability: 'bidirectional', reverse: true },
@@ -6878,8 +6948,6 @@
     // Association / Dependency
     { token: '<-->', type: 'association', navigability: 'bidirectional' },
     { token: 'x--x', type: 'association', navigability: 'non-navigable-both' },
-    { token: 'x-->', type: 'association', fromNavigability: 'non-navigable', toNavigability: 'navigable' },
-    { token: '<--x', type: 'association', fromNavigability: 'navigable', toNavigability: 'non-navigable' },
     { token: '-->', type: 'navigable' },
     { token: '<--', type: 'navigable', reverse: true },
     { token: '--x', type: 'association', navigability: 'non-navigable' },
@@ -6958,21 +7026,13 @@
         toMult = tmpMult;
       }
 
-      var navigability = pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified');
-      var fromNavigability = pat.fromNavigability ||
-        (navigability === 'bidirectional' ? 'navigable' :
-          navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
-      var toNavigability = pat.toNavigability ||
-        (navigability === 'bidirectional' || navigability === 'navigable' ? 'navigable' :
-          navigability === 'non-navigable' || navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
-
       return {
         from: fromName,
         to: toName,
         type: pat.type,
-        navigability: navigability,
-        fromNavigability: fromNavigability,
-        toNavigability: toNavigability,
+        navigability: pat.navigability || (pat.type === 'navigable' ? 'navigable' : 'unspecified'),
+        fromNavigability: pat.fromNavigability || (pat.navigability === 'bidirectional' ? 'navigable' : pat.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified'),
+        toNavigability: pat.toNavigability || (pat.type === 'navigable' || pat.navigability === 'navigable' || pat.navigability === 'bidirectional' ? 'navigable' : pat.navigability === 'non-navigable' || pat.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified'),
         label: label,
         labelDirection: labelDirection,
         fromMult: fromMult,
@@ -7802,8 +7862,8 @@
 
     alignContextEntriesToHierarchyMedians(result.direction || effectiveDirection);
 
-    function packCompactHierarchyFamilies(direction) {
-      if (layoutPreference !== 'compact' || !hasHierarchyEdges) return;
+    function packHierarchyFamilies(direction) {
+      if ((layoutPreference !== 'compact' && layoutPreference !== 'landscape') || !hasHierarchyEdges) return;
       if ((direction || 'TB') !== 'TB') return;
 
       var hAdj = {};
@@ -7852,14 +7912,53 @@
       }
       if (families.length < 2) return;
 
+      // A landscape forest has independent inheritance families. Shared row
+      // heights and association-label gaps make every short family pay for
+      // the largest unrelated class/label. Lay each family out at its own
+      // measured size, preserving the forest order from the global pass.
+      // Free classes retain the global layout because they may bridge families.
+      var localFamilyLayout = layoutPreference === 'landscape' && classes.every(function(cls) {
+        return !!hNames[cls.name];
+      });
+      if (layoutPreference === 'landscape' && !localFamilyLayout) return;
+      if (localFamilyLayout) {
+        for (var lfi = 0; lfi < families.length; lfi++) {
+          var localFamily = families[lfi];
+          var memberSet = {};
+          localFamily.names.forEach(function(name) { memberSet[name] = true; });
+          var familyNodes = layoutNodes.filter(function(node) { return !!memberSet[node.id]; });
+          var familyEdges = layoutEdges.filter(function(edge) {
+            return memberSet[edge.source] && memberSet[edge.target];
+          });
+          var familySizes = classEdgeSizes.filter(function(edge) {
+            return memberSet[edge.source] && memberSet[edge.target];
+          });
+          var familyLayout = window.UMLAdvancedLayout.compute(familyNodes, familyEdges, {
+            gapX: CFG.gapX,
+            gapY: effectiveGapY,
+            direction: 'TB',
+            directionLocked: true,
+            edgeSizes: familySizes
+          });
+          var familyBounds = window.UMLLayoutCore.boundsOf(familyLayout.nodes);
+          for (var lp = 0; lp < localFamily.names.length; lp++) {
+            var memberName = localFamily.names[lp];
+            var position = familyLayout.nodes[memberName];
+            entries[memberName].x = localFamily.minX + position.x - familyBounds.minX;
+            entries[memberName].y = position.y - familyBounds.minY;
+          }
+          localFamily.maxX = localFamily.minX + familyBounds.width;
+        }
+      }
+
       families.sort(function(a, b) { return a.minX - b.minX; });
       var familyGap = Math.max(18, Math.round(effectiveGapX * 0.52));
       var cursorRight = families[0].maxX;
       for (var fi = 1; fi < families.length; fi++) {
         var family = families[fi];
         var desiredMin = cursorRight + familyGap;
-        var shift = Math.min(0, desiredMin - family.minX);
-        if (shift < -0.5) {
+        var shift = localFamilyLayout ? desiredMin - family.minX : Math.min(0, desiredMin - family.minX);
+        if (Math.abs(shift) > 0.5) {
           for (var fmni = 0; fmni < family.names.length; fmni++) {
             entries[family.names[fmni]].x += shift;
           }
@@ -7870,7 +7969,7 @@
       }
     }
 
-    packCompactHierarchyFamilies(result.direction || effectiveDirection);
+    packHierarchyFamilies(result.direction || effectiveDirection);
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (var n2 in entries) {
@@ -8215,6 +8314,18 @@
         w: (maxX - minX) + gap * 2,
         h: (maxY - minY) + gap * 2
       };
+    }
+
+    function wholePartMarkerIsClear(points, relation, sourceEntry) {
+      if (relation.type !== 'composition' && relation.type !== 'aggregation') return true;
+      var side = classEdgeForPoint(points[0], sourceEntry, null);
+      var vector = classSideVector(side);
+      var tip = wholePartDiamondTip(points[0], vector);
+      var bounds = diamondMarkerObstacleRect(tip.x, tip.y, vector.x, vector.y, CFG.strokeWidth / 2);
+      if (classTextPlacementHitsSegments(bounds, classOccupiedSegments, CFG.strokeWidth / 2)) return false;
+      return !noteMarkerObstacles.some(function(obstacle) {
+        return classRectsOverlap(bounds, obstacle, 0);
+      });
     }
 
     function classTextRect(text, x, y, anchor, fontSize) {
@@ -9224,7 +9335,6 @@
     // lines, including inheritance fanouts, are soft constraints handled by
     // route scoring and visible bridge drawing; treating them as walls causes
     // large, low-readability detours in State/Command-style hierarchies.
-    var hierarchyRouteObstacles = [];
     var entryCount = Object.keys(entries).length;
     var useSmallClassRouteBudget = parsed.layoutPreference !== 'compact' &&
       (!parsed.notes || parsed.notes.length === 0) &&
@@ -9298,34 +9408,80 @@
       }
     }
 
-    var selfRouteCounts = Object.create(null);
-    function routeRecursiveAssociation(entry, rel) {
-      var ordinal = selfRouteCounts[rel.from] || 0;
-      selfRouteCounts[rel.from] = ordinal + 1;
-      var extent = Math.max(56, classRelationLabelWidth(rel, CFG.fontSizeStereotype) / 2 + 16) + ordinal * 28;
-      var cx = entry.x + entry.box.width / 2;
-      var cy = entry.y + entry.box.height / 2;
-      var skipNames = {};
-      skipNames[rel.from] = true;
-      var best = null;
-      // Adjacent sides give distinct ports and two full marker stubs. Evaluate
-      // every corner so a neighbouring class does not force a hidden loop.
-      [[1, -1], [1, 1], [-1, -1], [-1, 1]].forEach(function (corner) {
-        var edgeX = corner[0] > 0 ? entry.x + entry.box.width : entry.x;
-        var edgeY = corner[1] > 0 ? entry.y + entry.box.height : entry.y;
-        var laneX = edgeX + corner[0] * extent;
-        var laneY = edgeY + corner[1] * extent;
-        var points = [
-          { x: edgeX, y: cy }, { x: laneX, y: cy },
-          { x: laneX, y: laneY }, { x: cx, y: laneY },
-          { x: cx, y: edgeY }
-        ];
-        var penalty = (UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null) ? 1000000 : 0) +
-          UMLShared.routeTrackOverlapLength(points, associationOccupiedSegments) * 10 +
-          UMLShared.countRouteCrossings(points, associationOccupiedSegments) * 100;
-        if (!best || penalty < best.penalty) best = { points: points, penalty: penalty };
+    // A recursive association has two distinct ends on the same classifier.
+    // Keep its outside loop separate from the distinct-node simplifiers, which
+    // correctly collapse unnecessary U bends but would erase this relationship.
+    var selfRelationCounts = {};
+    function classSelfRoute(entry, relation) {
+      var index = selfRelationCounts[relation.from] || 0;
+      selfRelationCounts[relation.from] = index + 1;
+      var reach = Math.max(70, UMLShared.textWidth(relation.label || '', false, CFG.fontSize) + 28) + index * 26;
+      var x = entry.x, y = entry.y, w = entry.box.width, h = entry.box.height;
+      var candidates = [
+        [{x:x+w,y:y+h*.25},{x:x+w+reach,y:y+h*.25},{x:x+w+reach,y:y+h*.75},{x:x+w,y:y+h*.75}],
+        [{x:x,y:y+h*.25},{x:x-reach,y:y+h*.25},{x:x-reach,y:y+h*.75},{x:x,y:y+h*.75}],
+        [{x:x+w*.25,y:y},{x:x+w*.25,y:y-reach},{x:x+w*.75,y:y-reach},{x:x+w*.75,y:y}],
+        [{x:x+w*.25,y:y+h},{x:x+w*.25,y:y+h+reach},{x:x+w*.75,y:y+h+reach},{x:x+w*.75,y:y+h}]
+      ];
+      var markerObstacles = noteMarkerObstacles.map(function(marker) {
+        return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
       });
-      return best;
+      var skip = {}; skip[relation.from] = true;
+      var best = null, fallback = null;
+      function lowerSelfRouteScore(score, other) {
+        if (!other) return true;
+        for (var i = 0; i < score.length; i++) {
+          if (score[i] !== other.score[i]) return score[i] < other.score[i];
+        }
+        return false;
+      }
+      function considerSelfRoute(points, preference) {
+        var occlusions = wholePartMarkerIsClear(points, relation, entry) ? 0 : 1;
+        markerObstacles.forEach(function(obstacle) {
+          if (UMLShared.routeHitsObstacle(points, [obstacle], null, null)) occlusions++;
+        });
+        classObstacles.forEach(function(obstacle) {
+          if (UMLShared.routeHitsObstacle(points, [obstacle], skip, null)) occlusions++;
+        });
+        var score = [occlusions,
+          UMLShared.routeTrackOverlapLength(points, classOccupiedSegments),
+          UMLShared.countRouteCrossings(points, classOccupiedSegments),
+          UMLShared.measureOrthogonalRoute(points), preference];
+        var candidate = { points: points, score: score };
+        if (lowerSelfRouteScore(score, fallback)) fallback = candidate;
+        if (!occlusions && lowerSelfRouteScore(score, best)) best = candidate;
+      }
+      candidates.forEach(considerSelfRoute);
+      if (best && !best.score[1]) return { points: best.points };
+
+      // Several recursive relations need different attachment pairs, not
+      // merely different outside lanes with identical endpoint symbols. Bound
+      // the samples by loop count and usable slots, even for very wide boxes.
+      ['right', 'left', 'top', 'bottom'].forEach(function(side) {
+        var horizontal = side === 'top' || side === 'bottom';
+        var near = (horizontal ? x : y) + 8;
+        var far = (horizontal ? x + w : y + h) - 8;
+        var positions = [];
+        var spacing = CFG.diamondW + 6;
+        var slotCount = Math.min(18, Math.max(4, (index + 1) * 2), Math.floor((far - near) / spacing) + 1);
+        for (var slot = 0; slot < slotCount; slot++) positions.push(near + (far - near) * slot / Math.max(1, slotCount - 1));
+        for (var first = 0; first < positions.length; first++) {
+          for (var last = first + 1; last < positions.length; last++) {
+            if (positions[last] - positions[first] < spacing) continue;
+            var a = positions[first], b = positions[last];
+            var points;
+            if (side === 'right') points = [{x:x+w,y:a},{x:x+w+reach,y:a},{x:x+w+reach,y:b},{x:x+w,y:b}];
+            else if (side === 'left') points = [{x:x,y:a},{x:x-reach,y:a},{x:x-reach,y:b},{x:x,y:b}];
+            else if (side === 'top') points = [{x:a,y:y},{x:a,y:y-reach},{x:b,y:y-reach},{x:b,y:y}];
+            else points = [{x:a,y:y+h},{x:a,y:y+h+reach},{x:b,y:y+h+reach},{x:b,y:y+h}];
+            considerSelfRoute(points, 4);
+          }
+        }
+      });
+      // Impossible fixed geometry must not erase the relationship. Keep the
+      // least-conflicting visible loop, prioritizing marker/node occlusion
+      // before shaft overlap, crossings, and length.
+      return { points: (best || fallback).points };
     }
 
     // Draw other relationships with orthogonal (right-angle) routing
@@ -9361,8 +9517,16 @@
       // router explore all sides so it can avoid crossings and obstacles.
       var restrictSourceSide = forceCompactDependencyBelowSource;
 
-      var isRecursive = orel.from === orel.to;
-      var route = isRecursive ? routeRecursiveAssociation(fromE, orel) : computeOrthogonalRoute(
+      // Reserve visible endpoint decorations, not just their route centers.
+      // In particular, sliding two shafts a few pixels apart must not merge
+      // the filled and hollow diamonds that distinguish their semantics.
+      var markerRouteObstacles = noteMarkerObstacles.map(function(marker) {
+        return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
+      });
+      var markerIsClear = function(points) { return wholePartMarkerIsClear(points, orel, fromE); };
+
+      var isSelfRelation = orel.from === orel.to;
+      var route = isSelfRelation ? classSelfRoute(fromE, orel) : computeOrthogonalRoute(
         fromE,
         toE,
         hasInheritAtBottom[orel.from],
@@ -9377,91 +9541,93 @@
         hasInheritAtTop[orel.from],
         hasInheritAtBottom[orel.to],
         classOccupiedSegments,
-        hierarchyRouteObstacles,
+        markerRouteObstacles,
         restrictSourceSide,
         classNoteSidePressure[orel.to],
         {
           fastScore: useSmallClassRouteBudget,
           maxSourceCandidates: 6,
           maxTargetCandidates: 6,
-          occupiedAssociations: associationOccupiedSegments
+          occupiedAssociations: associationOccupiedSegments,
+          acceptRoute: markerIsClear
         }
       );
       var pathPoints = route.points; // array of {x,y}
       var safePathPoints = cloneClassRoutePoints(pathPoints);
-      // Ordinary endpoint sliding can collapse a self-loop back onto its box.
-      if (!isRecursive) {
-        // Apply reanchor only when route actually exits from top/bottom
-        if ((orel.type === 'composition' || orel.type === 'aggregation') && pathPoints.length >= 2) {
-          var actualExitSide = classEdgeForPoint(pathPoints[0], fromE, sourceSide);
-          if (actualExitSide === 'top' || actualExitSide === 'bottom') {
-            pathPoints = reanchorWholePartRouteStart(pathPoints, fromE, actualExitSide);
-          }
+      if (!isSelfRelation) {
+      // Apply reanchor only when route actually exits from top/bottom
+      if ((orel.type === 'composition' || orel.type === 'aggregation') && pathPoints.length >= 2) {
+        var actualExitSide = classEdgeForPoint(pathPoints[0], fromE, sourceSide);
+        if (actualExitSide === 'top' || actualExitSide === 'bottom') {
+          pathPoints = reanchorWholePartRouteStart(pathPoints, fromE, actualExitSide);
         }
-        // Eliminate unnecessary detours/corners by simplifying U-shaped bends
-        pathPoints = eliminateUnnecessaryCorners(pathPoints, classObstacles, fromE, toE);
-        if (pathPoints.length >= 4) {
-          var classSkipNames = {};
-          classSkipNames[orel.from] = true;
-          classSkipNames[orel.to] = true;
-          pathPoints = UMLShared.optimizeEndpointSlides(
-            pathPoints,
-            buildClassEndpointSlideAnchor(fromE, pathPoints[0], sourceSide),
-            buildClassEndpointSlideAnchor(toE, pathPoints[pathPoints.length - 1], tgtSide),
-            classObstacles,
-            classSkipNames,
-            classOccupiedSegments
-          );
-        }
+      }
+      // Eliminate unnecessary detours/corners by simplifying U-shaped bends
+      pathPoints = eliminateUnnecessaryCorners(pathPoints, classObstacles, fromE, toE);
+      if (pathPoints.length >= 4) {
+        var classSkipNames = {};
+        classSkipNames[orel.from] = true;
+        classSkipNames[orel.to] = true;
+        pathPoints = UMLShared.optimizeEndpointSlides(
+          pathPoints,
+          buildClassEndpointSlideAnchor(fromE, pathPoints[0], sourceSide),
+          buildClassEndpointSlideAnchor(toE, pathPoints[pathPoints.length - 1], tgtSide),
+          classObstacles,
+          classSkipNames,
+          classOccupiedSegments
+        );
+      }
 
-        // Eliminate tiny H-V-H doglegs: when the middle segment is small,
-        // snap the shorter end to the longer end's coordinate for a cleaner look.
-        if (pathPoints.length === 4) {
-          var cdg0 = pathPoints[0], cdg1 = pathPoints[1], cdg2 = pathPoints[2], cdg3 = pathPoints[3];
-          var cdgH1 = Math.abs(cdg1.y - cdg0.y) < 1;
-          var cdgV  = Math.abs(cdg2.x - cdg1.x) < 1;
-          var cdgH2 = Math.abs(cdg3.y - cdg2.y) < 1;
-          var cdgVLen = Math.abs(cdg2.y - cdg1.y);
-          if (cdgH1 && cdgV && cdgH2 && cdgVLen > 0.3 && cdgVLen <= 8) {
-            // Snap to the Y of the longer horizontal segment
-            var cdgFirstLen = Math.abs(cdg1.x - cdg0.x);
-            var cdgThirdLen = Math.abs(cdg3.x - cdg2.x);
-            var cdgSnapY = cdgFirstLen >= cdgThirdLen ? cdg0.y : cdg3.y;
-            pathPoints = [{ x: cdg0.x, y: cdgSnapY }, { x: cdg3.x, y: cdgSnapY }];
-          }
-          // V-H-V pattern
-          var cdgV1 = Math.abs(cdg1.x - cdg0.x) < 1;
-          var cdgH  = Math.abs(cdg2.y - cdg1.y) < 1;
-          var cdgV2 = Math.abs(cdg3.x - cdg2.x) < 1;
-          var cdgHLen = Math.abs(cdg2.x - cdg1.x);
-          if (cdgV1 && cdgH && cdgV2 && cdgHLen > 0.3 && cdgHLen <= 8) {
-            var cdgFirstVLen = Math.abs(cdg1.y - cdg0.y);
-            var cdgThirdVLen = Math.abs(cdg3.y - cdg2.y);
-            var cdgSnapX = cdgFirstVLen >= cdgThirdVLen ? cdg0.x : cdg3.x;
-            pathPoints = [{ x: cdgSnapX, y: cdg0.y }, { x: cdgSnapX, y: cdg3.y }];
-          }
+      // Eliminate tiny H-V-H doglegs: when the middle segment is small,
+      // snap the shorter end to the longer end's coordinate for a cleaner look.
+      if (pathPoints.length === 4) {
+        var cdg0 = pathPoints[0], cdg1 = pathPoints[1], cdg2 = pathPoints[2], cdg3 = pathPoints[3];
+        var cdgH1 = Math.abs(cdg1.y - cdg0.y) < 1;
+        var cdgV  = Math.abs(cdg2.x - cdg1.x) < 1;
+        var cdgH2 = Math.abs(cdg3.y - cdg2.y) < 1;
+        var cdgVLen = Math.abs(cdg2.y - cdg1.y);
+        if (cdgH1 && cdgV && cdgH2 && cdgVLen > 0.3 && cdgVLen <= 8) {
+          // Snap to the Y of the longer horizontal segment
+          var cdgFirstLen = Math.abs(cdg1.x - cdg0.x);
+          var cdgThirdLen = Math.abs(cdg3.x - cdg2.x);
+          var cdgSnapY = cdgFirstLen >= cdgThirdLen ? cdg0.y : cdg3.y;
+          pathPoints = [{ x: cdg0.x, y: cdgSnapY }, { x: cdg3.x, y: cdgSnapY }];
         }
-
-        pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
-        pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
-        pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
-        pathPoints = ensureWholePartMarkerStub(pathPoints, orel, fromE);
-        if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
-            safePathPoints.length >= 2 &&
-            !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
-          pathPoints = safePathPoints;
-        }
-        // Local cosmetic simplifications may move an endpoint or lane back onto
-        // another relationship. Keep the routed path when that loses separation.
-        if (UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
-            UMLShared.routeTrackOverlapLength(pathPoints, associationOccupiedSegments) >
-            UMLShared.routeTrackOverlapLength(safePathPoints, associationOccupiedSegments) ||
-            UMLShared.countRouteCrossings(pathPoints, associationOccupiedSegments) >
-            UMLShared.countRouteCrossings(safePathPoints, associationOccupiedSegments)) {
-          pathPoints = safePathPoints;
+        // V-H-V pattern
+        var cdgV1 = Math.abs(cdg1.x - cdg0.x) < 1;
+        var cdgH  = Math.abs(cdg2.y - cdg1.y) < 1;
+        var cdgV2 = Math.abs(cdg3.x - cdg2.x) < 1;
+        var cdgHLen = Math.abs(cdg2.x - cdg1.x);
+        if (cdgV1 && cdgH && cdgV2 && cdgHLen > 0.3 && cdgHLen <= 8) {
+          var cdgFirstVLen = Math.abs(cdg1.y - cdg0.y);
+          var cdgThirdVLen = Math.abs(cdg3.y - cdg2.y);
+          var cdgSnapX = cdgFirstVLen >= cdgThirdVLen ? cdg0.x : cdg3.x;
+          pathPoints = [{ x: cdgSnapX, y: cdg0.y }, { x: cdgSnapX, y: cdg3.y }];
         }
       }
 
+      pathPoints = enforceOrthogonalEndpointApproach(pathPoints, fromE, toE, sourceSide, tgtSide);
+      pathPoints = enforceCompactDependencySourcePort(pathPoints, orel, fromE, sourceSide, srcCentered);
+      pathPoints = adjustCompactDependencyLane(pathPoints, orel, orel.from, orel.to, srcCentered, tgtCentered);
+      pathPoints = ensureWholePartMarkerStub(pathPoints, orel, fromE);
+      if (classRouteHitsNonEndpointClass(pathPoints, orel.from, orel.to) &&
+          safePathPoints.length >= 2 &&
+          !classRouteHitsNonEndpointClass(safePathPoints, orel.from, orel.to)) {
+        pathPoints = safePathPoints;
+      }
+      // Local cosmetic simplifications may move an endpoint or lane back onto
+      // another relationship. Keep the routed path when that loses separation.
+      if (!markerIsClear(pathPoints) ||
+          UMLShared.routeHitsObstacle(pathPoints, markerRouteObstacles, null, null) ||
+          UMLShared.routeHitsObstacle(pathPoints, classEndpointObstacles(fromE, toE), null, null) ||
+          UMLShared.routeTrackOverlapLength(pathPoints, associationOccupiedSegments) >
+          UMLShared.routeTrackOverlapLength(safePathPoints, associationOccupiedSegments) ||
+          UMLShared.countRouteCrossings(pathPoints, associationOccupiedSegments) >
+          UMLShared.countRouteCrossings(safePathPoints, associationOccupiedSegments)) {
+        pathPoints = safePathPoints;
+      }
+
+      }
       var markerPathPoints = pathPoints;
       var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
       var pLast = markerPathPoints[markerPathPoints.length - 1], pPrev = markerPathPoints[markerPathPoints.length - 2];
@@ -9528,23 +9694,23 @@
         sourceMarkerObstacles.push(sourceAggregationObstacle);
       }
 
-      var fromNavigation = orel.fromNavigability ||
-        (orel.navigability === 'bidirectional' ? 'navigable' :
-          orel.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
-      var toNavigation = orel.toNavigability ||
-        (orel.navigability === 'navigable' || orel.navigability === 'bidirectional' || orel.type === 'navigable' ? 'navigable' :
-          orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both' ? 'non-navigable' : 'unspecified');
-      var sourceNavigationOffset = sourceDiamondTip ? CFG.diamondClassGap + CFG.diamondH * 1.12 + 4 : 0;
-      var sourceArrowX = p0.x + startDx * sourceNavigationOffset;
-      var sourceArrowY = p0.y + startDy * sourceNavigationOffset;
-      if (fromNavigation === 'navigable') {
+      if (orel.fromNavigability === 'navigable' || orel.navigability === 'bidirectional') {
+        var sourceArrowX = p0.x;
+        var sourceArrowY = p0.y;
+        if (orel.type === 'composition' || orel.type === 'aggregation') {
+          var markerOffset = 16;
+          sourceArrowX += startDx * markerOffset;
+          sourceArrowY += startDy * markerOffset;
+        }
         var sourceArrow = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, sourceArrow.x, sourceArrow.y, startDx, startDy, colors.line);
         var sourceArrowObstacle = pointObstacleRect(sourceArrow.x, sourceArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceArrowObstacle);
         sourceMarkerObstacles.push(sourceArrowObstacle);
-      } else if (fromNavigation === 'non-navigable') {
-        var sourceCross = offsetClassMarkerPoint(sourceArrowX, sourceArrowY, startDx, startDy, 'cross');
+      } else if (orel.fromNavigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
+        var sourceCrossGap = (orel.type === 'composition' || orel.type === 'aggregation')
+          ? CFG.diamondClassGap + CFG.diamondH * 1.12 + 8 : 0;
+        var sourceCross = offsetClassMarkerPoint(p0.x + startDx * sourceCrossGap, p0.y + startDy * sourceCrossGap, startDx, startDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, sourceCross.x, sourceCross.y, startDx, startDy, colors.line);
         var sourceCrossObstacle = pointObstacleRect(sourceCross.x, sourceCross.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(sourceCrossObstacle);
@@ -9552,13 +9718,13 @@
       }
 
       // Target decorations (deferred to draw on top of class boxes)
-      if (orel.type === 'dependency' || toNavigation === 'navigable') {
+      if (orel.type === 'dependency' || orel.toNavigability === 'navigable' || orel.type === 'navigable' || orel.navigability === 'navigable' || orel.navigability === 'bidirectional') {
         var targetArrow = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'open-arrow');
         UMLShared.drawOpenArrow(decorSvg, targetArrow.x, targetArrow.y, endDx, endDy, colors.line);
         var targetArrowObstacle = pointObstacleRect(targetArrow.x, targetArrow.y, CFG.arrowSize + 6);
         noteMarkerObstacles.push(targetArrowObstacle);
         targetMarkerObstacles.push(targetArrowObstacle);
-      } else if (toNavigation === 'non-navigable') {
+      } else if (orel.toNavigability === 'non-navigable' || orel.navigability === 'non-navigable' || orel.navigability === 'non-navigable-both') {
         var targetCross = offsetClassMarkerPoint(pLast.x, pLast.y, endDx, endDy, 'cross');
         UMLShared.drawCrossMarker(decorSvg, targetCross.x, targetCross.y, endDx, endDy, colors.line);
         var targetCrossObstacle = pointObstacleRect(targetCross.x, targetCross.y, CFG.arrowSize + 6);
@@ -9890,6 +10056,7 @@
       function scoreNoteConnectorCandidate(candidate) {
         var points = UMLShared.simplifyOrthogonalPath(candidate);
         if (!points || points.length < 2) return null;
+        if (noteConnectorRetraces(points)) return null;
         if (!noteMemberApproachIsValid(points)) return null;
         if (UMLShared.routeHitsObstacle(points, hardModelObstacles, noteOnlySkipNames, null)) return null;
         var labelHit = UMLShared.routeHitsObstacle(points, placedLabels.concat(noteMarkerObstacles), null, null) ? 1 : 0;
@@ -9904,6 +10071,17 @@
             UMLShared.measureOrthogonalRoute(points) +
             UMLShared.countOrthogonalBends(points) * 28
         };
+      }
+
+      function noteConnectorRetraces(points) {
+        for (let i = 1; i < points.length - 1; i++) {
+          const before = points[i - 1], point = points[i], after = points[i + 1];
+          const firstX = point.x - before.x, firstY = point.y - before.y;
+          const nextX = after.x - point.x, nextY = after.y - point.y;
+          if (Math.abs(firstX * nextY - firstY * nextX) < 0.001 &&
+              firstX * nextX + firstY * nextY < -0.001) return true;
+        }
+        return false;
       }
 
       function noteMemberApproachIsValid(points) {
@@ -10099,7 +10277,11 @@
         connTo = slideNoteTargetEndpointOffMarkers(connTo, np2, 'x');
         connFrom.x = clampNote(connTo.x, np2.x + 8, np2.x + np2.w - 8);
       }
-      return { from: connFrom, to: connTo };
+      return {
+        from: connFrom,
+        to: connTo,
+        targetSide: memberTargetInset ? np2.note.position : null
+      };
     }
 
     var noteConnectorRoutes = [];
@@ -10475,6 +10657,7 @@
           points = UMLShared.simplifyOrthogonalPath(points);
 
           if (UMLShared.routeHitsObstacle(points, obstacles, skipNames, null)) continue;
+          if (routeOptions && routeOptions.acceptRoute && !routeOptions.acceptRoute(points)) continue;
 
           var crosses = UMLShared.countRouteCrossings(points, occupiedSegments);
           var associationCrosses = UMLShared.countRouteCrossings(points, associationTracks);
@@ -10531,6 +10714,14 @@
         bestCompact.length + 24 < best.length &&
         bestCompact.associationCrosses <= best.associationCrosses && bestCompact.overlap <= best.overlap) {
       best = bestCompact;
+    }
+
+    if (!best && routeOptions && routeOptions.fastScore && routeOptions.acceptRoute) {
+      // The small-diagram budget is an optimization, not permission to reuse
+      // a blocked attachment. Try every face before the generic fallback.
+      var retryArgs = Array.prototype.slice.call(arguments);
+      retryArgs[retryArgs.length - 1] = Object.assign({}, routeOptions, { fastScore: false });
+      return computeOrthogonalRoute.apply(null, retryArgs);
     }
 
     if (!best) {
@@ -12409,11 +12600,12 @@
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
     fontSize: 20,
-    fontSizeBold: 22,
+    fontSizeBold: 20,
     fontSizeAction: 20,
     lineHeight: 28,
+    actionLineHeight: 28,
     padX: 20,
-    padY: 14,
+    padY: 10,
     stateMinW: 120,
     stateRx: 12,
     initialR: 8,
@@ -12431,40 +12623,72 @@
 
   // ─── Parser ───────────────────────────────────────────────────────
 
-  // Split compact state declarations without treating action code or note text
-  // as region delimiters. Actions retain their braces, strings, and semicolons.
-  function stateStatements(text) {
-    const statements = [];
+  // Expand compact declarations while keeping note text and action code
+  // literal. Only declaration separators and region braces are structural.
+  function stateSourceLines(text) {
+    const result = [];
     let inNote = false;
-    for (const rawLine of text.split('\n')) {
-      let remaining = rawLine.trim();
-      if (inNote || /^note\b/i.test(remaining)) {
-        statements.push(rawLine);
-        if (/^end\s*note$/i.test(remaining)) inNote = false;
-        else if (/^note\b/i.test(remaining) && !remaining.includes(':')) inNote = true;
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (inNote || /^note\b/i.test(trimmed)) {
+        result.push(line);
+        if (/^end\s*note$/i.test(trimmed)) inNote = false;
+        else if (/^note\b/i.test(trimmed) && !trimmed.includes(':')) inNote = true;
         continue;
       }
-      while (remaining) {
-        if (remaining[0] === '}') {
-          statements.push('}');
-          remaining = remaining.slice(1).replace(/^\s*;?\s*/, '');
+      if (!/^(?:state\b|})/i.test(trimmed)) { result.push(line); continue; }
+      let statement = '';
+      let quote = null;
+      let escaped = false;
+      let expressionDepth = 0;
+      const flush = function () {
+        if (statement.trim()) result.push(statement.trim());
+        statement = '';
+      };
+      for (let index = 0; index < line.length; index++) {
+        const ch = line[index];
+        if (escaped) { statement += ch; escaped = false; continue; }
+        if (ch === '\\' && quote) { statement += ch; escaped = true; continue; }
+        if (quote) {
+          statement += ch;
+          if (ch === quote) quote = null;
           continue;
         }
-        const declaration = remaining.match(/^state\s+[^{};]+(?:\{|;|(?=\})|$)/i);
-        if (!declaration) {
-          statements.push(remaining);
-          break;
+        if (ch === '"' || ch === "'" || ch === '`') { quote = ch; statement += ch; continue; }
+        if (ch === '{' && /^\s*state\b/i.test(statement)) {
+          statement += ch;
+          flush();
+          continue;
         }
-        statements.push(declaration[0].replace(/;$/, '').trim());
-        remaining = remaining.slice(declaration[0].length).trim();
+        if (ch === '{') expressionDepth++;
+        if (ch === '}' && expressionDepth > 0) expressionDepth--;
+        else if (ch === '}' && expressionDepth === 0) {
+          flush();
+          result.push('}');
+          continue;
+        }
+        if (ch === ';' && expressionDepth === 0) {
+          if (/^\s*state\b/i.test(statement) || !statement.trim()) { flush(); continue; }
+          // An action's semicolon remains part of its code, including when
+          // another declaration or action follows on this compact source row.
+          const remainder = line.slice(index + 1);
+          if (/^\s*(?:state\b|(?:\S+\s*:\s*)?(?:entry|exit|do)\s*\/)/i.test(remainder)) {
+            statement += ch;
+            flush();
+            continue;
+          }
+        }
+        statement += ch;
       }
+      flush();
     }
-    return statements;
+    return result;
   }
 
   function parse(text) {
-    const lines = stateStatements(text);
+    const lines = stateSourceLines(text);
     const states = Object.create(null);
+    const declaredStates = new Set();
     const stateStack = [];
     var transitions = [];
     var notes = [];
@@ -12475,12 +12699,18 @@
     function ensureState(name, parent, explicit) {
       if (!states[name]) {
         states[name] = { name: name, type: name === '[*]' ? 'pseudo' : 'state',
-          entryAction: '', exitAction: '', doActivity: '', parent: parent || null };
+          entryAction: '', exitAction: '', doActivity: '', parent: null };
       }
-      // Declarations own containment. A transition merely references its ends.
-      if (explicit) {
-        states[name].parent = parent || null;
+      // Explicit declarations own containment even when referenced earlier.
+      // An undeclared reference can acquire its first containing region.
+      if (explicit) declaredStates.add(name);
+      if (!explicit && (declaredStates.has(name) || states[name].parent)) return states[name];
+      let ancestor = parent;
+      while (ancestor) {
+        if (ancestor === name) return states[name];
+        ancestor = states[ancestor] && states[ancestor].parent;
       }
+      states[name].parent = parent || null;
       return states[name];
     }
 
@@ -12524,12 +12754,15 @@
       }
 
       var stateHl = UMLShared.parseHighlightColor(line);
-      const declaration = stateHl.stripped.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
+      // A texture keyword may itself be a state identifier.
+      const hasStateHighlight = /^state\s+\S/i.test(stateHl.stripped);
+      const declarationText = hasStateHighlight ? stateHl.stripped : line;
+      const declaration = declarationText.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
       if (declaration) {
         const state = ensureState(declaration[1], parent, true);
-        if (/<<choice>>/.test(stateHl.stripped)) state.type = 'choice';
-        if (stateHl.highlight) state.highlight = stateHl.highlight;
-        if (stateHl.texture) state.texture = stateHl.texture;
+        if (/<<choice>>/i.test(declarationText)) state.type = 'choice';
+        if (hasStateHighlight && stateHl.highlight) state.highlight = stateHl.highlight;
+        if (hasStateHighlight && stateHl.texture) state.texture = stateHl.texture;
         if (declaration[2]) stateStack.push(state.name);
         continue;
       }
@@ -12646,7 +12879,7 @@
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
     var height = CFG.padY * 2 + CFG.lineHeight;
-    if (hasActions) height += 4 + actionLines * CFG.lineHeight; // divider + action lines
+    if (hasActions) height += 4 + actionLines * CFG.actionLineHeight;
 
     return { width: Math.ceil(width), height: Math.ceil(height), hasActions: hasActions, actionLines: actionLines };
   }
@@ -12728,6 +12961,37 @@
     }
   }
 
+  function computeStateLayout(nodes, edges, options) {
+    var result = window.UMLAdvancedLayout.compute(nodes, edges, options);
+    if (result.direction !== 'TB') return result;
+
+    // Branch labels need horizontal room between sibling paths as well as
+    // vertical room between ranks. A clear label placed outside the whole
+    // drawing would otherwise appear to describe an unrelated transition.
+    var branches = {};
+    edges.forEach(function(edge) {
+      var from = result.nodes[edge.source], to = result.nodes[edge.target];
+      if (!from || !to || to.y <= from.y) return;
+      if (!branches[edge.source]) branches[edge.source] = [];
+      branches[edge.source].push(edge);
+    });
+    var gap = options.gapX;
+    Object.keys(branches).forEach(function(source) {
+      if (branches[source].length < 2) return;
+      branches[source].forEach(function(edge) {
+        var transition = edge.data || {};
+        if (!transition.label) return;
+        gap = Math.max(gap, UMLShared.labelDirectionTextWidth(
+          transition.label, transition.labelDirection, CFG.fontSize
+        ) + CFG.fontSize * 2);
+      });
+    });
+    if (gap <= options.gapX) return result;
+    return window.UMLAdvancedLayout.compute(nodes, edges, Object.assign({}, options, {
+      gapX: gap, direction: result.direction, directionLocked: true
+    }));
+  }
+
   function computeLayout(parsed, colors) {
     var stateList = parsed.states;
     var transitions = parsed.transitions;
@@ -12753,13 +13017,16 @@
       entries[s.name] = { state: s, box: box, x: 0, y: 0 };
     }
 
-    // For composite states, run sub-layout to compute their size
+    // Size descendants before their parents, then position parents before
+    // descendants. A child's full region must contribute to its parent's box.
+    var compositeNames = Object.keys(compositeChildren).sort(function(a, b) {
+      return stateAncestorIds(entries, b).length - stateAncestorIds(entries, a).length;
+    });
     var compositePad = 20;
-    const compositeOrder = Object.keys(compositeChildren).sort((left, right) =>
-      stateAncestorIds(entries, right).length - stateAncestorIds(entries, left).length);
-    for (const pName of compositeOrder) {
-      const headerBox = measureState(entries[pName].state);
-      const compositeHeaderH = headerBox.height + 4;
+    for (var parentIndex = 0; parentIndex < compositeNames.length; parentIndex++) {
+      var pName = compositeNames[parentIndex];
+      var parentHeader = measureState(entries[pName].state);
+      var compositeHeaderH = parentHeader.height + 4;
       var kids = compositeChildren[pName];
       var subNodes = [], subEdges = [];
       for (var ki = 0; ki < kids.length; ki++) {
@@ -12789,7 +13056,7 @@
             });
           } catch (e) { /* keep default */ }
         }
-        var subResult = window.UMLAdvancedLayout.compute(subNodes, subEdges, {
+        var subResult = computeStateLayout(subNodes, subEdges, {
           gapX: Math.max(subFloor.minX, 14, Math.round(CFG.gapX * subGapScale)),
           gapY: Math.max(subFloor.minY, 14, Math.round(CFG.gapY * subGapScale)),
           direction: parsed.direction || 'TB',
@@ -12854,9 +13121,10 @@
         }
         var subW = sMaxX - sMinX + compositePad * 2;
         var subH = sMaxY - sMinY + compositePad * 2;
-        var compositeW = Math.max(subW, headerBox.width);
+        var compositeW = Math.max(subW, parentHeader.width);
         var compositeH = compositeHeaderH + subH;
-        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: headerBox.hasActions, actionLines: headerBox.actionLines };
+        entries[pName].box = { width: Math.ceil(compositeW), height: Math.ceil(compositeH), hasActions: parentHeader.hasActions, actionLines: parentHeader.actionLines };
+        entries[pName].headerHeight = compositeHeaderH;
         entries[pName].subLayout = subResult;
         entries[pName].subOffset = { x: -sMinX + compositePad, y: compositeHeaderH - sMinY + compositePad };
         entries[pName].subBounds = { w: subW, h: subH };
@@ -12906,7 +13174,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var result = computeStateLayout(layoutNodes, layoutEdges, {
       gapX: stateGapX,
       gapY: stateGapY,
       direction: parsed.direction || 'TB',
@@ -12932,9 +13200,18 @@
     }
 
     // Position children inside their composite parents
-    for (const pn of compositeOrder.slice().reverse()) {
+    for (var positionIndex = compositeNames.length - 1; positionIndex >= 0; positionIndex--) {
+      var pn = compositeNames[positionIndex];
       var pe = entries[pn];
       if (!pe.subLayout) continue;
+      // Saved coordinates are absolute. Apply each ancestor before deriving
+      // unsaved child positions; a nested parent's own position takes priority
+      // over the position inherited from its enclosing region.
+      var savedParentPosition = UMLShared.findLayoutPosition(parsed.layout, pn);
+      if (savedParentPosition) {
+        if (savedParentPosition.x !== undefined) pe.x = savedParentPosition.x;
+        if (savedParentPosition.y !== undefined) pe.y = savedParentPosition.y;
+      }
       var off = pe.subOffset;
       var ckids = compositeChildren[pn];
       for (var cki = 0; cki < ckids.length; cki++) {
@@ -12962,6 +13239,22 @@
   function stateLayoutAttrs(id) {
     return ' data-layout-id="' + UMLShared.escapeXml(id) + '"' +
       ' data-layout-bounds-id="' + UMLShared.escapeXml(id) + '"';
+  }
+
+  function drawStateActions(svg, entry, colors) {
+    if (!entry.box.hasActions) return;
+    var attrs = stateLayoutAttrs(entry.state.name);
+    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
+    svg.push('<line' + attrs + ' x1="' + entry.x + '" y1="' + dividerY + '" x2="' + (entry.x + entry.box.width) + '" y2="' + dividerY +
+      '" stroke="' + colors.stroke + '" stroke-width="1"/>');
+    var actionY = dividerY + CFG.fontSizeAction;
+    [['entry', entry.state.entryAction], ['exit', entry.state.exitAction], ['do', entry.state.doActivity]].forEach(function(action) {
+      if (!action[1]) return;
+      svg.push('<text' + attrs + ' x="' + (entry.x + CFG.padX / 2) + '" y="' + actionY +
+        '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">' + action[0] + ' / ' +
+        UMLShared.escapeXml(action[1]) + '</text>');
+      actionY += CFG.actionLineHeight;
+    });
   }
 
   function stateTransitionsInScope(parsed, parent) {
@@ -13118,14 +13411,18 @@
     backEdgeList.sort(function(a, b) { return (a.far - a.near) - (b.far - b.near) || a.ti - b.ti; });
     for (var bri = 0; bri < backEdgeList.length; bri++) {
       var backRoute = backEdgeList[bri];
-      backRoute.lane = 0;
+      var margin = routeMargin;
       for (var previous = 0; previous < bri; previous++) {
         var occupiedRoute = backEdgeList[previous];
         if (backRoute.near < occupiedRoute.far && backRoute.far > occupiedRoute.near) {
-          backRoute.lane = Math.max(backRoute.lane, occupiedRoute.lane + 1);
+          var occupiedTransition = transitions[occupiedRoute.ti];
+          var labelSpace = occupiedTransition.label
+            ? (isTB ? UMLShared.labelDirectionTextWidth(occupiedTransition.label, occupiedTransition.labelDirection, CFG.fontSize) : CFG.fontSize + 6)
+            : 0;
+          margin = Math.max(margin, backEdgeMargin[occupiedRoute.ti] + Math.max(laneStep, labelSpace + 20));
         }
       }
-      backEdgeMargin[backRoute.ti] = routeMargin + backRoute.lane * laneStep;
+      backEdgeMargin[backRoute.ti] = margin;
     }
     var customTransitionTargets = {};
     function transitionTargetSide(ti) {
@@ -13208,6 +13505,88 @@
           }
         }
       }
+    })();
+
+    // Independently distributed exits/entries can differ by only a few pixels.
+    // Slide automatic attachments along their shared face range before routing,
+    // while retaining the order and clearance of neighboring transitions.
+    (function alignForwardStateAttachments() {
+      var attachments = [];
+      var obstacles = [];
+      for (var name in entries) {
+        var entry = entries[name];
+        if (!entry.state.isComposite) obstacles.push({
+          entry: entry,
+          x1: entry.x, y1: entry.y, x2: entry.x + entry.box.width, y2: entry.y + entry.box.height
+        });
+      }
+      for (var ti = 0; ti < transitions.length; ti++) {
+        var transition = transitions[ti];
+        var source = entries[transition.from], target = entries[transition.to];
+        if (!source || !target) continue;
+        if (transitionTargetSide(ti) !== (isTB ? 'top' : 'left')) continue;
+        var exit = customExits[ti], entrance = customTransitionTargets[ti];
+        attachments.push({ ti: ti, source: source, target: target,
+          canAlign: primNear(target) > primFar(source),
+          from: exit ? (isTB ? exit.x : exit.y) : secCenter(source),
+          to: entrance ? (isTB ? entrance.x : entrance.y) : secCenter(target) });
+      }
+
+      function freeFaceInterval(attachment, end) {
+        var entry = end === 'from' ? attachment.source : attachment.target;
+        var coordinate = attachment[end];
+        var inset = CFG.stateRx + CFG.strokeWidth;
+        var interval = { near: secNear(entry) + inset, far: secFar(entry) - inset };
+        attachments.forEach(function(other) {
+          if (other === attachment || (end === 'from' ? other.source : other.target) !== entry) return;
+          var gap = Math.min(CFG.arrowSize + CFG.strokeWidth * 2, Math.abs(other[end] - coordinate));
+          if (other[end] < coordinate) interval.near = Math.max(interval.near, other[end] + gap);
+          else interval.far = Math.min(interval.far, other[end] - gap);
+        });
+        return interval;
+      }
+
+      attachments.forEach(function(attachment) {
+        // A nearby branch may need a bend, but its attachment still reserves
+        // space on the same source/target face as a straightenable transition.
+        if (!attachment.canAlign) return;
+        if (attachment.source.state.type !== 'state' || attachment.target.state.type !== 'state') return;
+        var transition = transitions[attachment.ti];
+        if (parsed.layout && parsed.layout.routes && parsed.layout.routes['edge-' + transition.routeIndex]) return;
+        var sourceRange = freeFaceInterval(attachment, 'from');
+        var targetRange = freeFaceInterval(attachment, 'to');
+        var near = Math.max(sourceRange.near, targetRange.near);
+        var far = Math.min(sourceRange.far, targetRange.far);
+        if (near > far) return;
+        // Unrelated outlines are visible obstacles too. Endpoint faces remain
+        // unpadded so the straight segment can attach to its own states.
+        var routeObstacles = obstacles.map(function(obstacle) {
+          if (obstacle.entry === attachment.source || obstacle.entry === attachment.target) return obstacle;
+          return { x1: obstacle.x1 - CFG.strokeWidth, y1: obstacle.y1 - CFG.strokeWidth,
+            x2: obstacle.x2 + CFG.strokeWidth, y2: obstacle.y2 + CFG.strokeWidth };
+        });
+        var candidates = [attachment.from, attachment.to, (attachment.from + attachment.to) / 2, near, far];
+        routeObstacles.forEach(function(obstacle) {
+          candidates.push((isTB ? obstacle.x1 : obstacle.y1) - 1,
+            (isTB ? obstacle.x2 : obstacle.y2) + 1);
+        });
+        candidates.sort(function(a, b) {
+          return Math.abs(a - attachment.from) + Math.abs(a - attachment.to) -
+            Math.abs(b - attachment.from) - Math.abs(b - attachment.to);
+        });
+        for (var ci = 0; ci < candidates.length; ci++) {
+          var coordinate = Math.max(near, Math.min(far, candidates[ci]));
+          var fromPoint = mkPt(primFar(attachment.source), coordinate);
+          var toPoint = mkPt(primNear(attachment.target), coordinate);
+          if (UMLShared.routeHitsObstacle([fromPoint, toPoint], routeObstacles, null, null)) continue;
+          attachment.from = coordinate;
+          attachment.to = coordinate;
+          customExits[attachment.ti] = fromPoint;
+          toPoint.side = isTB ? 'top' : 'left';
+          customTransitionTargets[attachment.ti] = toPoint;
+          break;
+        }
+      });
     })();
 
     var labelSvg = []; // Transition labels rendered after states so they appear on top
@@ -13765,28 +14144,12 @@
     };
   }
 
-  function drawStateActions(svg, entry, colors) {
-    const state = entry.state;
-    if (!entry.box.hasActions) return;
-    const dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
-    svg.push('<line x1="' + entry.x + '" y1="' + dividerY + '" x2="' +
-      (entry.x + entry.box.width) + '" y2="' + dividerY +
-      '" stroke="' + colors.stroke + '" stroke-width="1"/>');
-    let actionY = dividerY + CFG.lineHeight * 0.85;
-    for (const [label, value] of [['entry', state.entryAction], ['exit', state.exitAction], ['do', state.doActivity]]) {
-      if (!value) continue;
-      svg.push('<text x="' + (entry.x + CFG.padX / 2) + '" y="' + actionY +
-        '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">' +
-        label + ' / ' + UMLShared.escapeXml(value) + '</text>');
-      actionY += CFG.lineHeight;
-    }
-  }
-
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var drawing = routeStateTransitions(layout, {
       transitions: stateTransitionsInScope(parsed, null),
-      direction: parsed.direction
+      direction: parsed.direction,
+      layout: parsed.layout
     }, colors);
     var routeSvg = drawing.routes;
     var labelSvg = drawing.labels;
@@ -13808,7 +14171,8 @@
         layoutResult: parent.subLayout
       }, {
         transitions: stateTransitionsInScope(parsed, parentId),
-        direction: parsed.direction
+        direction: parsed.direction,
+        layout: parsed.layout
       }, colors);
       compositeDrawings.push(compositeDrawing);
       placedLabels = placedLabels.concat(compositeDrawing.labelBounds);
@@ -13852,6 +14216,94 @@
       distanceStep: 22,
       overlapPad: 8
     });
+    function stateNoteAnchors(rect, preferredSide, canSlide) {
+      var sides = [preferredSide, 'left', 'right', 'top', 'bottom'].filter(function(side, index, all) {
+        return all.indexOf(side) === index;
+      });
+      var anchors = [];
+      sides.forEach(function(side, sideIndex) {
+        var vertical = side === 'left' || side === 'right';
+        var start = vertical ? rect.y : rect.x, size = vertical ? rect.h : rect.w;
+        var inset = Math.min(CFG.stateRx + 2, size / 3);
+        var coordinate = start + size / 2;
+        anchors.push({ side: side, stub: 8, penalty: sideIndex * 6,
+          slideMin: canSlide ? start + inset : undefined,
+          slideMax: canSlide ? start + size - inset : undefined,
+          x: vertical ? (side === 'left' ? rect.x : rect.x + rect.w) : coordinate,
+          y: vertical ? coordinate : (side === 'top' ? rect.y : rect.y + rect.h) });
+      });
+      return anchors;
+    }
+
+    function routeStateNoteLeader(note, obstacles, transitionObstacles) {
+      var opposite = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
+      var targetRect = { x: note.tx, y: note.ty, w: note.tw, h: note.th };
+      var targetState = entries[note.note.target];
+      var stateNoteObstacles = obstacles.map(function(obstacle) {
+        if (!obstacle.stateId || obstacle.stateId === note.note.target) return obstacle;
+        // Reserve the visible outline as well as the state interior. The
+        // actual target keeps its boundary available for the attachment.
+        var pad = CFG.strokeWidth;
+        return { x: obstacle.x - pad, y: obstacle.y - pad,
+          w: obstacle.w + pad * 2, h: obstacle.h + pad * 2 };
+      });
+      var sources = stateNoteAnchors(note, opposite[note.note.position], true);
+      var targets = stateNoteAnchors(targetRect, note.note.position,
+        targetState && targetState.state.type === 'state');
+      function anchorDistance(source, target) {
+        return ['x', 'y'].reduce(function(distance, axis) {
+          function range(anchor) {
+            var slideAxis = anchor.side === 'left' || anchor.side === 'right' ? 'y' : 'x';
+            return axis === slideAxis && anchor.slideMin != null
+              ? [anchor.slideMin, anchor.slideMax] : [anchor[axis], anchor[axis]];
+          }
+          var sourceRange = range(source), targetRange = range(target);
+          return distance + Math.max(0, sourceRange[0] - targetRange[1], targetRange[0] - sourceRange[1]);
+        }, 0);
+      }
+      // A transition cycle can surround one face of a state. Trying its other
+      // faces avoids crossing that cycle while retaining the note's placement.
+      // Route once per face pair; the shared slide optimizer removes endpoint
+      // jogs without rebuilding a routing grid for each attachment coordinate.
+      for (var pass = 0; pass < 2; pass++) {
+        var routeObstacles = pass === 0 ? stateNoteObstacles.concat(transitionObstacles) : stateNoteObstacles;
+        var best = null;
+        sources.forEach(function(source) {
+          targets.forEach(function(target) {
+            var preference = source.penalty + target.penalty;
+            if (best && anchorDistance(source, target) + preference >= best.score) return;
+            var route = UMLShared.routeOrthogonalConnector(source, target, routeObstacles, {
+              stub: 8, clearance: 6, bendPenalty: 26
+            });
+            var points = UMLShared.optimizeEndpointSlides(route.points, source, target, routeObstacles, null, null);
+            if (UMLShared.routeHitsObstacle(points, routeObstacles, null, null)) return;
+            var score = UMLShared.measureOrthogonalRoute(points) + UMLShared.countOrthogonalBends(points) * 26 + preference;
+            if (!best || score < best.score) best = { points: points, score: score };
+          });
+        });
+        if (best) return best.points;
+      }
+      return [sources[0], targets[0]];
+    }
+
+    var noteLeaderObstacles = placedLabels.map(function(label) {
+      return { left: label.left - 3, top: label.top - 3, right: label.right + 3, bottom: label.bottom + 3 };
+    }).concat(notePositions);
+    for (var noteStateId in entries) {
+      var noteState = entries[noteStateId];
+      if (!noteState.state.isComposite) noteLeaderObstacles.push({ stateId: noteStateId, x: noteState.x, y: noteState.y,
+        w: noteState.box.width, h: noteState.box.height });
+    }
+    var transitionLeaderObstacles = placedRouteSegments.map(function(segment) {
+      return stateRouteSegmentObstacle(segment, 3);
+    }).concat(curveBounds);
+    var noteLeaderRoutes = notePositions.map(function(note) {
+      var points = routeStateNoteLeader(note, noteLeaderObstacles, transitionLeaderObstacles);
+      UMLShared.buildOrthogonalSegments(points).forEach(function(segment) {
+        transitionLeaderObstacles.push(stateRouteSegmentObstacle(segment, 3));
+      });
+      return points;
+    });
     function includeStateExtraRect(rect, extras) {
       if (!rect) return;
       var left = typeof rect.left === 'number' ? rect.left : rect.x;
@@ -13875,6 +14327,9 @@
     for (var nbi = 0; nbi < notePositions.length; nbi++) {
       var npb = notePositions[nbi];
       includeStateExtraRect(npb, stateExtras);
+      noteLeaderRoutes[nbi].forEach(function(point) {
+        includeStateExtraRect({ x: point.x - 4, y: point.y - 4, w: 8, h: 8 }, stateExtras);
+      });
     }
 
     var ox = layout.offsetX + CFG.svgPad + stateExtras.left;
@@ -13887,9 +14342,12 @@
     svg = finalSvg;
 
     // ── Draw composite state backgrounds first ──
-    const paintOrder = Object.keys(entries).sort((left, right) =>
-      stateAncestorIds(entries, left).length - stateAncestorIds(entries, right).length);
-    for (const cen of paintOrder) {
+    var compositePaintOrder = Object.keys(entries).filter(function(id) { return entries[id].state.isComposite; });
+    compositePaintOrder.sort(function(a, b) {
+      return stateAncestorIds(entries, a).length - stateAncestorIds(entries, b).length;
+    });
+    for (var compositeIndex = 0; compositeIndex < compositePaintOrder.length; compositeIndex++) {
+      var cen = compositePaintOrder[compositeIndex];
       var ce = entries[cen];
       if (!ce.state.isComposite) continue;
       var cFills = UMLShared.highlightFills(colors, ce.state.highlight, ce.state.texture);
@@ -13908,9 +14366,9 @@
       svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + chY +
         '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(ce.state.name) + '</text>');
-      // Divider line
       drawStateActions(svg, ce, colors);
-      var cdY = ce.y + measureState(ce.state).height;
+      // Separate the state's own behavior from its child region.
+      var cdY = ce.y + (ce.headerHeight || ce.box.height) - 4;
       svg.push('<line x1="' + ce.x + '" y1="' + cdY + '" x2="' + (ce.x + ce.box.width) + '" y2="' + cdY +
         '" stroke="' + colors.stroke + '" stroke-width="1"/>');
       svg.push('</g>');
@@ -13981,36 +14439,14 @@
 
     // ── Draw notes (using pre-computed positions) ──
     for (var ni = 0; ni < notePositions.length; ni++) {
-      var np2 = notePositions[ni]; var cF, cT;
-      if (np2.note.position === 'right') { cF = { x: np2.x, y: np2.y + np2.h / 2 }; cT = { x: np2.tx + np2.tw, y: np2.ty + np2.th / 2 }; }
-      else if (np2.note.position === 'left') { cF = { x: np2.x + np2.w, y: np2.y + np2.h / 2 }; cT = { x: np2.tx, y: np2.ty + np2.th / 2 }; }
-      else if (np2.note.position === 'top') { cF = { x: np2.x + np2.w / 2, y: np2.y + np2.h }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty }; }
-      else { cF = { x: np2.x + np2.w / 2, y: np2.y }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty + np2.th }; }
-      UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors, { fromX: cF.x, fromY: cF.y, toX: cT.x, toY: cT.y });
+      var np2 = notePositions[ni];
+      UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors, { points: noteLeaderRoutes[ni] });
     }
 
     svg.push(UMLShared.svgClose());
     return svg.join('\n');
   }
 
-
-  function applyStateLayoutPositions(layout, metadata) {
-    if (!metadata || !metadata.positions) return;
-    const before = Object.fromEntries(Object.entries(layout.entries).map(([id, entry]) =>
-      [id, { x: entry.x, y: entry.y }]));
-    UMLShared.applyLayoutPositions(layout, metadata);
-    const ordered = Object.keys(layout.entries).sort((left, right) =>
-      stateAncestorIds(layout.entries, left).length - stateAncestorIds(layout.entries, right).length);
-    for (const id of ordered) {
-      const entry = layout.entries[id];
-      const parent = entry.state.parent;
-      if (!parent || metadata.positions[id]) continue;
-      entry.x += layout.entries[parent].x - before[parent].x;
-      entry.y += layout.entries[parent].y - before[parent].y;
-    }
-    // Recompute the viewport after moving descendants; saved nodes stay fixed.
-    UMLShared.applyLayoutPositions(layout, metadata);
-  }
 
   // ─── Public API ───────────────────────────────────────────────────
 
@@ -14028,7 +14464,7 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
     var layout = computeLayout(parsed, colors);
-    applyStateLayoutPositions(layout, parsed.layout);
+    UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     UMLShared.autoFitSVG(container);
@@ -14101,6 +14537,14 @@
   };
   var COMPONENT_CONNECTOR_LABEL_MAX_WIDTH = 180;
   var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
+
+  function componentPortBottomInset() {
+    var fontSize = CFG.fontSize - 1;
+    var label = UMLShared.labelTextRect('', 0, fontSize * 0.35, 'start', fontSize);
+    // Port labels share the square's center but extend farther downward.
+    // Leave the same four-pixel border clearance for both rendered shapes.
+    return Math.max(CFG.portSize / 2, label.bottom) + 4;
+  }
 
   // ─── Parser ───────────────────────────────────────────────────────
 
@@ -14663,7 +15107,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var layoutOptions = {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: parsed.direction || 'LR',
@@ -14672,8 +15116,32 @@
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
       edgeSizes: compEdgeSizes
-    });
-    var actualDirection = parsed.direction || result.direction || 'LR';
+    };
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, layoutOptions);
+
+    // Reserve parallel label lanes against the actual neighbor positions:
+    // container fit can choose a different orientation than the source asks
+    // for. Reflow once with that orientation held steady, so the reservation
+    // changes spacing without restarting the orientation decision.
+    var resizedForLabels = false;
+    for (const node of layoutNodes) {
+      const entry = entries[node.id];
+      if (entry.hasPorts || entry.standalonePort) continue;
+      const span = parallelComponentLabelSpan(node.id, connectors, result.nodes);
+      const width = Math.max(node.width, span.width);
+      const height = Math.max(node.height, span.height);
+      if (width === node.width && height === node.height) continue;
+      node.width = entry.box.width = width;
+      node.height = entry.box.height = height;
+      resizedForLabels = true;
+    }
+    if (resizedForLabels) {
+      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, Object.assign({}, layoutOptions, {
+        direction: result.direction || layoutOptions.direction,
+        directionLocked: true
+      }));
+    }
+    var actualDirection = result.direction || parsed.direction || 'LR';
 
     for (var n in result.nodes) {
       if (!entries[n]) continue;
@@ -15122,7 +15590,7 @@
       var centers = {};
       if (!sidePorts.length) return centers;
       var lower = portTop + portHalf + 4;
-      var upper = portTop + portAreaH - portHalf - 4;
+      var upper = portTop + portAreaH - componentPortBottomInset();
       if (sidePorts.length === 1) {
         var onlyKey = portKey(entry.comp.name, sidePorts[0]);
         var onlyDesiredY = averagePortY(onlyKey);
@@ -16164,8 +16632,9 @@
   }
 
   function buildComponentSideAnchors(connectors, entries) {
-    var exitGroups = {};
-    var entryGroups = {};
+    // Incoming and outgoing relationships share the same component face.
+    // Allocate them together so reciprocal links cannot reserve the same lane.
+    const sideGroups = {};
 
     function pushGroup(groupMap, key, item) {
       if (!groupMap[key]) groupMap[key] = [];
@@ -16181,7 +16650,7 @@
     }
 
     function assignAnchors(groupMap) {
-      var assigned = {};
+      const assigned = { exits: {}, entries: {} };
 
       for (var key in groupMap) {
         var splitAt = key.lastIndexOf(':');
@@ -16212,7 +16681,7 @@
             pos = axisStart + span * (i / (items.length - 1));
           }
 
-          assigned[items[i].index] = isVerticalSide
+          assigned[items[i].role][items[i].index] = isVerticalSide
             ? {
                 x: side === 'left' ? compEntry.x : compEntry.x + compEntry.box.width,
                 y: pos,
@@ -16244,18 +16713,15 @@
 
       if (!conn.fromPort) {
         var exitKey = conn.from + ':' + pref.fromSide;
-        pushGroup(exitGroups, exitKey, { index: ci, primary: exitPrimary, secondary: exitSecondary });
+        pushGroup(sideGroups, exitKey, { index: ci, role: 'exits', primary: exitPrimary, secondary: exitSecondary });
       }
       if (!conn.toPort) {
         var entryKey = conn.to + ':' + pref.toSide;
-        pushGroup(entryGroups, entryKey, { index: ci, primary: entryPrimary, secondary: entrySecondary });
+        pushGroup(sideGroups, entryKey, { index: ci, role: 'entries', primary: entryPrimary, secondary: entrySecondary });
       }
     }
 
-    return {
-      exits: assignAnchors(exitGroups),
-      entries: assignAnchors(entryGroups)
-    };
+    return assignAnchors(sideGroups);
   }
 
   function makeLabelRect(x, y, labelW, labelH, anchor) {
@@ -16266,6 +16732,36 @@
       top: y - labelH,
       bottom: y + 4
     };
+  }
+
+  function parallelComponentLabelSpan(componentName, connectors, positions) {
+    const groups = new Map();
+    for (const connector of connectors) {
+      if (connector.fromPort || connector.toPort || connector.from === connector.to) continue;
+      if (connector.from !== componentName && connector.to !== componentName) continue;
+      const peer = connector.from === componentName ? connector.to : connector.from;
+      const group = groups.get(peer) || { count: 0, width: 0, height: 0 };
+      group.count++;
+      if (connector.label) {
+        const metrics = componentLabelMetrics(connector.label, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+        group.width = Math.max(group.width, metrics.width);
+        group.height = Math.max(group.height, metrics.height);
+      }
+      groups.set(peer, group);
+    }
+    const span = { width: 0, height: 0 };
+    const component = positions[componentName];
+    if (!component) return span;
+    for (const [peerName, group] of groups) {
+      const peer = positions[peerName];
+      if (!peer || group.count < 2 || !group.width) continue;
+      // Match the side choice used for component relationship anchors.
+      const dx = peer.x + peer.width / 2 - component.x - component.width / 2;
+      const dimension = Math.abs(dx) > 5 ? 'height' : 'width';
+      const laneGap = group[dimension] + CFG.fontSize * 2 + 4;
+      span[dimension] = Math.max(span[dimension], Math.ceil((group.count - 1) * laneGap + COMPONENT_SIDE_ANCHOR_PAD * 2));
+    }
+    return span;
   }
 
   function componentLabelTokens(label, fontSize, maxWidth) {
@@ -16281,10 +16777,12 @@
 
       if (token.indexOf('/') >= 0) {
         var parts = token.split('/').filter(Boolean);
-        for (var pi = 0; pi < parts.length; pi++) {
-          pushSizedToken('/' + parts[pi]);
+        if (parts.length > 1) {
+          for (var pi = 0; pi < parts.length; pi++) {
+            tokens.push('/' + parts[pi]);
+          }
+          return;
         }
-        return;
       }
 
       // A single identifier is more readable slightly over budget than split
@@ -16555,7 +17053,6 @@
 
     var fractions = [0.5, 0.35, 0.65, 0.22, 0.78];
     var best = null;
-    var bestSoft = null;
 
     for (var gi = 0; gi < segments.length; gi++) {
       var segment = segments[gi];
@@ -16607,11 +17104,7 @@
             lines: metrics.lines
           };
 
-          // Prefer a clear label on any segment over an overlapping label on
-          // a longer segment. Keep the latter only when no clear candidate exists.
-          if (hitsSegments) {
-            if (!bestSoft || candidate.score > bestSoft.score) bestSoft = candidate;
-          } else if (!best || candidate.score > best.score) {
+          if (!hitsSegments && (!best || candidate.score > best.score)) {
             best = candidate;
           }
         }
@@ -16619,7 +17112,6 @@
     }
 
     if (best) return best;
-    if (bestSoft) return bestSoft;
     if (!segments.length) return null;
 
     var fallbackSeg = segments[0];
@@ -16628,11 +17120,25 @@
     var fallbackY = fallbackSeg.isH
       ? (opts.preferredVerticalSide === 'below' ? fallbackSeg.y + cfg.fontSize + 12 : fallbackSeg.y - 10 - (metrics.lines.length - 1) * metrics.lineHeight)
       : (fallbackSeg.y1 + fallbackSeg.y2) / 2 - ((metrics.lines.length - 1) * metrics.lineHeight) / 2;
+    // Crowded parallel routes can exhaust the preferred slots. Reserve the
+    // complete multiline box before looking beyond them; never return a
+    // midpoint that covers another label, component, or connector.
+    const exclusions = obstacles.map(function(obstacle) {
+      return { rect: componentObstacleRect(obstacle), pad: 6 };
+    }).filter(function(exclusion) { return exclusion.rect; });
+    placedLabels.forEach(function(rect) { exclusions.push({ rect: rect, pad: 8 }); });
+    routeSegments.forEach(function(segment) {
+      exclusions.push({ rect: segment.isH
+        ? { left: segment.x1, right: segment.x2, top: segment.y, bottom: segment.y }
+        : { left: segment.x, right: segment.x, top: segment.y1, bottom: segment.y2 }, pad: 3 });
+    });
+    const clear = UMLShared.findClearLabelPlacement(
+      makeComponentLabelRect(fallbackX, fallbackY, metrics, fallbackAnchor), exclusions);
     return {
-      x: fallbackX,
-      y: fallbackY,
+      x: fallbackX + clear.dx,
+      y: fallbackY + clear.dy,
       anchor: fallbackAnchor,
-      rect: makeComponentLabelRect(fallbackX, fallbackY, metrics, fallbackAnchor),
+      rect: clear.rect,
       score: -Infinity,
       lines: metrics.lines
     };
@@ -17127,7 +17633,22 @@
       var portAreaH = entry.box.height - (entry.hasPorts ? headerHeight : 0);
       var halfPort = CFG.portSize / 2;
       var lower = portTop + halfPort + 4;
-      var upper = portTop + portAreaH - halfPort - 4;
+      if (entry.hasPorts) {
+        // The initial row pitch is deliberately generous. Endpoint alignment
+        // may use its spare padding, but must keep the title and label font
+        // boxes apart (including ascenders and descenders in the chosen font).
+        var headerMetrics = UMLShared.textMetrics(entry.comp.name, true, CFG.fontSizeBold, CFG.fontFamily);
+        var labelFontSize = CFG.fontSize - 1;
+        var labelMetrics = UMLShared.textMetrics(pos.label || alias, false, labelFontSize, CFG.fontFamily, true);
+        var headerDescent = isFinite(headerMetrics.fontBoundingBoxDescent) ? headerMetrics.fontBoundingBoxDescent : 4;
+        var labelAscent = isFinite(labelMetrics.fontBoundingBoxAscent) ? labelMetrics.fontBoundingBoxAscent : labelFontSize + 6;
+        var titleBottom = CFG.padY + CFG.fontSizeBold * 0.35 + 2 + headerDescent;
+        var labelAboveCenter = labelAscent - labelFontSize * 0.35;
+        if (isFinite(titleBottom) && isFinite(labelAboveCenter)) {
+          lower = entry.y + titleBottom + 4 + Math.max(halfPort, labelAboveCenter);
+        }
+      }
+      var upper = portTop + portAreaH - componentPortBottomInset();
       var minGap = Math.max(CFG.portSize + 8, CFG.portPad * 0.72);
 
       if (portIdx > 0) {
@@ -18099,6 +18620,43 @@
       }
     })();
 
+    // Align local port pairs before reserving routes. Moving one pair can free
+    // a neighbor's spacing bound; routing first would freeze that neighbor's
+    // now-avoidable dogleg. Each successful pair stays aligned, so at most one
+    // pass per connector is needed to propagate the newly available room.
+    function alignFacingComponentPorts(conn) {
+      if (!conn.fromPort || !conn.toPort) return false;
+      const sourceEntry = entries[conn.from];
+      const targetEntry = entries[conn.to];
+      const sourceBounds = getPortMovementBounds(sourceEntry, conn.fromPort);
+      const targetBounds = getPortMovementBounds(targetEntry, conn.toPort);
+      if (!sourceBounds || !targetBounds) return false;
+      const source = sourceBounds.pos;
+      const target = targetBounds.pos;
+      if (source.standalone || target.standalone ||
+          Math.abs(source.cy - target.cy) < 0.75) return false;
+      const facesRight = source.side === 'right' && target.side === 'left' && source.connX < target.connX;
+      const facesLeft = source.side === 'left' && target.side === 'right' && source.connX > target.connX;
+      if (!facesRight && !facesLeft) return false;
+      const lower = Math.max(sourceBounds.lower, targetBounds.lower);
+      const upper = Math.min(sourceBounds.upper, targetBounds.upper);
+      if (lower > upper) return false;
+      const laneY = Math.max(lower, Math.min(upper, source.cy));
+      const route = [{ x: source.connX, y: laneY }, { x: target.connX, y: laneY }];
+      const skipNames = { [conn.from]: true, [conn.to]: true };
+      if (routeHitsObstacle(route, obstacles, skipNames, null)) return false;
+      const movedSource = movePortPositionToY(sourceEntry, conn.fromPort, laneY);
+      const movedTarget = movePortPositionToY(targetEntry, conn.toPort, laneY);
+      return !!(movedSource || movedTarget);
+    }
+    for (let pass = 0; pass < connectors.length; pass++) {
+      let moved = false;
+      for (const connector of connectors) {
+        if (alignFacingComponentPorts(connector)) moved = true;
+      }
+      if (!moved) break;
+    }
+
     var connectorPortSlotYs = {};
     var sharedPortSlotGroups = [];
     (function buildSharedPortSlots() {
@@ -18650,8 +19208,9 @@
           if (snapEntry && snapAlias && snapEntry.portPositions && snapEntry.portPositions[snapAlias]) {
             var snapPos = snapEntry.portPositions[snapAlias];
             var snapBounds = getPortMovementBounds(snapEntry, snapAlias);
-            // Allow snap if within bounds OR if the dogleg is tiny (cosmetic jog ≤ 6px)
-            var canSnap = dgVLen <= 6 || (snapBounds && snapY >= snapBounds.lower && snapY <= snapBounds.upper);
+            // Cosmetic cleanup obeys the same fixed-position and spacing
+            // bounds as every other port movement.
+            var canSnap = snapBounds && snapY >= snapBounds.lower && snapY <= snapBounds.upper;
             if (canSnap) {
               var straightLine = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
               if (!routeHitsObstacle(straightLine, obstacles, skipN, null)) {
@@ -19072,9 +19631,8 @@
         var targetRouteId = 'edge-' + renderedRouteCount++;
         routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false }, sourceRouteId);
         routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true }, targetRouteId);
-        // Prefer the longest horizontal segment that has room for the full
-        // symbol. A clear shaft can still run too close to a component to hold
-        // its socket; consider clear positions on the other segments as well.
+        // Keep the joined symbol beside one of its component interfaces.
+        // Search every clear shaft because labels can occupy the nearest one.
         var ballR = CFG.ifaceRadius;
         var socketR = CFG.ifaceSocketRadius;
         var bsPad = Math.max(ballR, socketR) + CFG.strokeWidth / 2 + 2;
@@ -19085,21 +19643,23 @@
         }).concat(placedLabels.map(function(rect) {
           return { x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom };
         }));
-        var bsSi = 0, bsSLen = 0, bsFoundH = false;
+        var bsSi = 0, bsFallbackLength = 0, bsFallbackHorizontal = false;
         var bsPlacement = null;
+        var bsRouteLength = UMLShared.measureOrthogonalRoute(points);
+        var bsDistanceFromStart = 0;
         for (var bsi = 0; bsi < points.length - 1; bsi++) {
           var bsSegIsH = Math.abs(points[bsi+1].y - points[bsi].y) < 1;
           var bsl = Math.abs(points[bsi+1].x - points[bsi].x) + Math.abs(points[bsi+1].y - points[bsi].y);
-          if (bsSegIsH && (!bsFoundH || bsl > bsSLen)) {
-            bsSi = bsi; bsSLen = bsl; bsFoundH = true;
-          } else if (!bsFoundH && bsl > bsSLen) {
-            bsSi = bsi; bsSLen = bsl;
+          if ((bsSegIsH && !bsFallbackHorizontal) ||
+              (bsSegIsH === bsFallbackHorizontal && bsl > bsFallbackLength)) {
+            bsSi = bsi;
+            bsFallbackLength = bsl;
+            bsFallbackHorizontal = bsSegIsH;
           }
           var bsAxis = bsSegIsH ? 'x' : 'y';
           var bsFixed = bsSegIsH ? points[bsi].y : points[bsi].x;
           var bsLow = Math.min(points[bsi][bsAxis], points[bsi+1][bsAxis]) + bsPad;
           var bsHigh = Math.max(points[bsi][bsAxis], points[bsi+1][bsAxis]) - bsPad;
-          var bsMid = (points[bsi][bsAxis] + points[bsi+1][bsAxis]) / 2;
           var bsIntervals = bsLow <= bsHigh ? [[bsLow, bsHigh]] : [];
           bsObstacles.forEach(function(rect) {
             var acrossLow = (bsSegIsH ? rect.y1 : rect.x1) - bsPad;
@@ -19118,15 +19678,17 @@
             bsIntervals = remaining;
           });
           bsIntervals.forEach(function(interval) {
-            var position = Math.max(interval[0], Math.min(interval[1], bsMid));
-            var displacement = Math.abs(position - bsMid);
-            if (!bsPlacement || (bsSegIsH && !bsPlacement.isH) ||
-                (bsSegIsH === bsPlacement.isH && (bsl > bsPlacement.length ||
-                  (bsl === bsPlacement.length && displacement < bsPlacement.displacement)))) {
-              bsPlacement = { index: bsi, isH: bsSegIsH, length: bsl, displacement: displacement,
-                x: bsSegIsH ? position : bsFixed, y: bsSegIsH ? bsFixed : position };
-            }
+            [interval[0], interval[1]].forEach(function(position) {
+              var distanceAlongRoute = bsDistanceFromStart + Math.abs(position - points[bsi][bsAxis]);
+              var interfaceDistance = Math.min(distanceAlongRoute, bsRouteLength - distanceAlongRoute);
+              var placementScore = interfaceDistance + (bsSegIsH ? 0 : 4);
+              if (!bsPlacement || placementScore < bsPlacement.score) {
+                bsPlacement = { index: bsi, score: placementScore,
+                  x: bsSegIsH ? position : bsFixed, y: bsSegIsH ? bsFixed : position };
+              }
+            });
           });
+          bsDistanceFromStart += bsl;
         }
         if (bsPlacement) bsSi = bsPlacement.index;
         var bsSeg0 = points[bsSi], bsSeg1 = points[bsSi + 1];
@@ -19770,15 +20332,15 @@
   var CFG = {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
     fontSize: 20,
-    fontSizeBold: 22,
+    fontSizeBold: 20,
     fontSizeComp: 20,
     lineHeight: 28,
     nodePadX: 20,
     nodePadY: 14,
-    nodeMinW: 160,
-    nodeMinH: 60,
+    nodeMinW: 180,
+    nodeMinH: 70,
     node3dDepth: 12,
-    compH: 26,
+    compH: 36,
     compPadX: 10,
     compIconW: 14,
     compIconH: 10,
@@ -19873,8 +20435,10 @@
         continue;
       }
 
+      // Notes and comments are literal content, including any braces in them.
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
+      if (/^(?:\/\/|'|#)/.test(line)) continue;
 
       var statements = splitStatements(line);
       var declaredNode = null;
@@ -19918,7 +20482,7 @@
           links.push({
             from: unquote(linkMatch[1]), to: unquote(linkMatch[3]),
             type: arrow === '..>' ? 'dependency' : 'link', arrow: arrow,
-            dashed: arrow === '..>' || !!linkMatch[4], sourceLine: i,
+            dashed: arrow === '..>' || !!linkMatch[4], sourceLine: i, sourceIndex: i,
             label: labelInfo.text, labelDirection: labelInfo.hasDirection
           });
         }
@@ -19937,7 +20501,7 @@
       }
     }
 
-    return { nodes: nodes, elements: elements, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
+    return { nodes: nodes, elements: elements, elementMap: elementMap, links: links, notes: notes, direction: direction, layoutPreference: layoutPreference };
   }
 
   // ─── Layout ───────────────────────────────────────────────────────
@@ -19969,7 +20533,8 @@
     const iconSpace = element.kind === 'node' ? 0 : CFG.compIconW + CFG.compPadX;
     const width = Math.max(CFG.nodeMinW, labelWidth + CFG.nodePadX * 2 + iconSpace);
     const headerHeight = CFG.nodePadY * 2 + lines.length * CFG.lineHeight;
-    return { width: Math.ceil(width), height: Math.ceil(headerHeight), headerHeight: headerHeight };
+    const height = Math.max(headerHeight, element.parentId ? CFG.compH : CFG.nodeMinH);
+    return { width: Math.ceil(width), height: Math.ceil(height), headerHeight: headerHeight };
   }
 
   function computeLayout(parsed) {
@@ -20291,10 +20856,11 @@
     var obstacles = [];
     for (var obn in entries) {
       var obe = entries[obn];
+      var obstacleDepth = obe.node.kind === 'node' ? CFG.node3dDepth : 0;
       obstacles.push({
         x1: obe.x - obPad,
-        y1: obe.y - CFG.node3dDepth - obPad,
-        x2: obe.x + obe.box.width + CFG.node3dDepth + obPad,
+        y1: obe.y - obstacleDepth - obPad,
+        x2: obe.x + obe.box.width + obstacleDepth + obPad,
         y2: obe.y + obe.box.height + obPad,
         name: obn
       });
@@ -20445,6 +21011,40 @@
       };
     }
 
+    function deploymentEndpointObstacle(entry, side) {
+      // Keep endpoint interiors blocked even though their padded routing
+      // obstacles are skipped. During grid search reserve the outer approach
+      // too, so the path cannot reach a stub through its own node and retrace
+      // the final arrow segment.
+      var approach = 18;
+      return {
+        x1: entry.x - (side === 'left' ? approach : 0),
+        y1: entry.y - (side === 'top' ? approach : 0),
+        x2: entry.x + entry.box.width + (side === 'right' ? approach : 0),
+        y2: entry.y + entry.box.height + (side === 'bottom' ? approach : 0)
+      };
+    }
+
+    function deploymentEndpointObstacles(fromEntry, toEntry, sourceSide, targetSide) {
+      var endpointObstacles = [];
+      // An endpoint containing the other endpoint is permeable, including
+      // nested deployment nodes. The addressed descendant remains blocked.
+      if (!deploymentAncestors(entries, toEntry.node.name).includes(fromEntry.node.name)) {
+        endpointObstacles.push(deploymentEndpointObstacle(fromEntry, sourceSide));
+      }
+      if (!deploymentAncestors(entries, fromEntry.node.name).includes(toEntry.node.name)) {
+        endpointObstacles.push(deploymentEndpointObstacle(toEntry, targetSide));
+      }
+      return endpointObstacles;
+    }
+
+    function deploymentRouteFitsContainer(points, container) {
+      return !container || points.every(function(point) {
+        return point.x >= container.x && point.x <= container.x + container.box.width &&
+          point.y >= container.y && point.y <= container.y + container.box.height;
+      });
+    }
+
     const paintOrder = Object.keys(entries).sort((left, right) =>
       deploymentAncestors(entries, left).length - deploymentAncestors(entries, right).length);
     for (const id of paintOrder) drawDeploymentElement(svg, entries[id], colors);
@@ -20468,7 +21068,12 @@
       skipN[lk.from] = true;
       skipN[lk.to] = true;
       // A contained element's route must be able to leave its enclosing node.
-      for (const parent of deploymentAncestors(entries, lk.from).concat(deploymentAncestors(entries, lk.to))) skipN[parent] = true;
+      const sourceAncestors = deploymentAncestors(entries, lk.from);
+      const targetAncestors = deploymentAncestors(entries, lk.to);
+      const containingEndpoint = targetAncestors.includes(lk.from) ? fromE
+        : sourceAncestors.includes(lk.to) ? toE : null;
+      for (const parent of sourceAncestors.concat(targetAncestors)) skipN[parent] = true;
+      var routeObstacles = obstacles.concat(deploymentEndpointObstacles(fromE, toE));
 
       var sourceSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, true);
       var targetSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, false);
@@ -20489,6 +21094,7 @@
           (sourceSide === 'top' || sourceSide === 'bottom') ? sourcePreferredX : sourcePreferredY
         );
         for (var sai = 0; sai < sourceAnchors.length; sai++) {
+          sourceAnchors[sai].stub = targetAncestors.includes(lk.from) ? 0 : 18;
           sourceCandidates.push({ anchor: sourceAnchors[sai], sideRank: ssi, anchorRank: sai });
         }
       }
@@ -20501,6 +21107,7 @@
           (targetSide === 'top' || targetSide === 'bottom') ? targetPreferredX : targetPreferredY
         );
         for (var tai = 0; tai < targetAnchors.length; tai++) {
+          targetAnchors[tai].stub = sourceAncestors.includes(lk.to) ? 0 : 18;
           targetCandidates.push({ anchor: targetAnchors[tai], sideRank: tsi, anchorRank: tai });
         }
       }
@@ -20510,15 +21117,20 @@
         var sourceCandidate = sourceCandidates[sci];
         for (var tci = 0; tci < targetCandidates.length; tci++) {
           var targetCandidate = targetCandidates[tci];
-          var routed = UMLShared.routeOrthogonalConnector(sourceCandidate.anchor, targetCandidate.anchor, obstacles, {
+          var searchObstacles = obstacles.concat(deploymentEndpointObstacles(
+            fromE, toE, sourceCandidate.anchor.side, targetCandidate.anchor.side));
+          var routed = UMLShared.routeOrthogonalConnector(sourceCandidate.anchor, targetCandidate.anchor, searchObstacles, {
             skipNames: skipN,
             occupied: occupiedSegments,
+            stub: 18,
             clearance: 10,
             bendPenalty: 44,
             extraXs: routeExtraXs,
             extraYs: routeExtraYs
           });
           if (!routed || !routed.points || routed.points.length < 2) continue;
+          if (UMLShared.routeHitsObstacle(routed.points, routeObstacles, skipN, null)) continue;
+          if (!deploymentRouteFitsContainer(routed.points, containingEndpoint)) continue;
 
           var crosses = UMLShared.countRouteCrossings(routed.points, occupiedSegments);
           var score = routed.length + routed.bends * 40 + crosses * 5000;
@@ -20543,7 +21155,7 @@
       var points = bestRoute ? bestRoute.points : UMLShared.routeOrthogonalConnector(
         buildDeploymentAnchorCandidates(fromE, sourceSideOrder[0], sourceSideOrder[0] === 'top' || sourceSideOrder[0] === 'bottom' ? sourcePreferredX : sourcePreferredY)[0],
         buildDeploymentAnchorCandidates(toE, targetSideOrder[0], targetSideOrder[0] === 'top' || targetSideOrder[0] === 'bottom' ? targetPreferredX : targetPreferredY)[0],
-        obstacles,
+        routeObstacles,
         {
           skipNames: skipN,
           extraXs: routeExtraXs,
@@ -20551,14 +21163,47 @@
         }
       ).points;
       if (points.length >= 4) {
-        points = UMLShared.optimizeEndpointSlides(
+        var slidPoints = UMLShared.optimizeEndpointSlides(
           points,
           buildDeploymentEndpointSlideAnchor(fromE, points[0], bestRoute ? bestRoute.sourceSide : sourceSideOrder[0]),
           buildDeploymentEndpointSlideAnchor(toE, points[points.length - 1], bestRoute ? bestRoute.targetSide : targetSideOrder[0]),
-          obstacles,
+          routeObstacles,
           skipN,
           occupiedSegments
         );
+        if (deploymentRouteFitsContainer(slidPoints, containingEndpoint)) points = slidPoints;
+      }
+      // Eliminate tiny (<12px) H-V-H or V-H-V doglegs: when the middle
+      // segment is short, snap both endpoints of the dogleg onto the longer
+      // side's coordinate, producing a clean straight line.
+      if (points.length === 4) {
+        var snappedPoints = null;
+        var dg0 = points[0], dg1 = points[1], dg2 = points[2], dg3 = points[3];
+        var dgH1 = Math.abs(dg1.y - dg0.y) < 1;
+        var dgV  = Math.abs(dg2.x - dg1.x) < 1;
+        var dgH2 = Math.abs(dg3.y - dg2.y) < 1;
+        var dgVLen = Math.abs(dg2.y - dg1.y);
+        if (dgH1 && dgV && dgH2 && dgVLen > 0.3 && dgVLen <= 12) {
+          var leftLen = Math.abs(dg1.x - dg0.x);
+          var rightLen = Math.abs(dg3.x - dg2.x);
+          var snapY = leftLen >= rightLen ? dg0.y : dg3.y;
+          snappedPoints = [{ x: dg0.x, y: snapY }, { x: dg3.x, y: snapY }];
+        } else {
+          var dgV1 = Math.abs(dg1.x - dg0.x) < 1;
+          var dgH  = Math.abs(dg2.y - dg1.y) < 1;
+          var dgV2 = Math.abs(dg3.x - dg2.x) < 1;
+          var dgHLen = Math.abs(dg2.x - dg1.x);
+          if (dgV1 && dgH && dgV2 && dgHLen > 0.3 && dgHLen <= 12) {
+            var topLen = Math.abs(dg1.y - dg0.y);
+            var botLen = Math.abs(dg3.y - dg2.y);
+            var snapX = topLen >= botLen ? dg0.x : dg3.x;
+            snappedPoints = [{ x: snapX, y: dg0.y }, { x: snapX, y: dg3.y }];
+          }
+        }
+        if (snappedPoints &&
+            deploymentEdgeForPoint(snappedPoints[0], fromE, null) &&
+            deploymentEdgeForPoint(snappedPoints[1], toE, null) &&
+            !UMLShared.routeHitsObstacle(snappedPoints, routeObstacles, skipN, null)) points = snappedPoints;
       }
       UMLShared.reserveOrthogonalRoute(points, occupiedSegments);
 
@@ -20740,7 +21385,7 @@
     var lines = text.split('\n');
     var actors = {};       // id -> { id, name }
     var usecases = {};     // id -> { id, name, alias }
-    var systems = [];      // [{ name, members: [id, ...] }]
+    var systems = [];      // [{ id, name, members: [id, ...] }]
     var relationships = [];
     var notes = [];
     var direction = 'LR';
@@ -20853,15 +21498,28 @@
       }
 
       // System boundary: rectangle "Name" { ... }
-      var sysMatch = line.match(/^rectangle\s+"([^"]+)"\s*\{/);
+      var sysMatch = line.match(/^rectangle\s+"([^"]+)"(?:\s+as\s+("[^"]+"|\S+))?\s*\{/);
       if (sysMatch) {
-        systems.push({ name: sysMatch[1], members: [] });
+        systems.push({ id: sysMatch[2] ? sysMatch[2].replace(/^"|"$/g, '') : sysMatch[1], name: sysMatch[1], members: [] });
         braceDepth = 1;
-        // Check for immediate close on same line
-        if (line.indexOf('}') !== -1 && line.indexOf('}') > line.indexOf('{')) {
-          braceDepth = 0;
-        } else {
-          inSystem = systems[systems.length - 1];
+        inSystem = systems[systems.length - 1];
+        // Feed inline members through the same body parser as multiline blocks.
+        var tail = line.slice(sysMatch[0].length).trim();
+        if (tail) {
+          // Split semicolons/braces outside quoted labels without splitting a declaration.
+          var statements = [], statement = '', quoted = false, escaped = false;
+          for (var tc = 0; tc < tail.length; tc++) {
+            var ch = tail[tc];
+            if (ch === '"' && !escaped) quoted = !quoted;
+            if (!quoted && (ch === ';' || ch === '}')) {
+              if (statement.trim()) statements.push(statement.trim());
+              statement = '';
+              if (ch === '}') statements.push('}');
+            } else statement += ch;
+            escaped = ch === '\\' && !escaped;
+          }
+          if (statement.trim()) statements.push(statement.trim());
+          lines.splice.apply(lines, [i + 1, 0].concat(statements));
         }
         continue;
       }
@@ -21505,6 +22163,7 @@
         var titleW = UMLShared.textWidth(sys.name, true, CFG.fontSizeBold);
         var boxW = Math.max(sMaxX - sMinX + CFG.sysPadX * 2, titleW + CFG.sysPadX * 2);
         systemBoxes.push({
+          id: sys.id,
           name: sys.name,
           x: sMinX - CFG.sysPadX,
           y: sMinY - CFG.sysPadY - CFG.sysTitlePadY,
@@ -21514,6 +22173,7 @@
       } else {
         var emptyTitleW = UMLShared.textWidth(sys.name, true, CFG.fontSizeBold);
         systemBoxes.push({
+          id: sys.id,
           name: sys.name,
           x: si * (Math.max(CFG.sysMinW, emptyTitleW + CFG.sysPadX * 2) + CFG.gapX),
           y: 0,
@@ -21592,8 +22252,8 @@
     // ── Draw system boundaries (behind everything) ──
     for (var sbi2 = 0; sbi2 < systemBoxes.length; sbi2++) {
       var sbox = systemBoxes[sbi2];
-      svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.name) +
-        '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.name) + '">');
+      svg.push('<g data-layout-id="' + UMLShared.escapeXml(sbox.id) +
+        '" data-layout-bounds-id="' + UMLShared.escapeXml(sbox.id) + '">');
       svg.push('<rect x="' + sbox.x + '" y="' + sbox.y + '" width="' + sbox.width + '" height="' + sbox.height +
         '" rx="' + CFG.sysRx + '" ry="' + CFG.sysRx +
         '" fill="' + colors.secondaryFill + '" fill-opacity="0.7" stroke="' + colors.secondaryLine + '" stroke-width="1.2"/>');
@@ -22268,10 +22928,16 @@
       return endpoint.id;
     }
 
-    function recordForkEndpoint(endpoint) {
+    function recordForkEndpoint(endpoint, previousId) {
       var context = decisionStack[decisionStack.length - 1];
       if (context && context.type === 'fork') {
-        if (endpoint && !isFinalNode(endpoint)) context.branches.push(endpoint);
+        var previousIndex = context.branches.indexOf(previousId);
+        if (previousIndex !== -1) context.branches[previousIndex] = endpoint;
+        else if ((!previousId || previousId === context.forkId) && endpoint && !isFinalNode(endpoint)) {
+          context.branches.push(endpoint);
+        }
+        // Continuations start independent branches; explicit flows extend
+        // only the branch whose endpoint matches their authored source.
         currentNode = context.forkId;
       } else currentNode = endpoint;
     }
@@ -22438,7 +23104,7 @@
           }
           if (decCtx2.inThen) pendingEnds.push({ node: decCtx2.decisionId, guard: 'else' });
           decisionStack.splice(decIdx, 1);
-          var endpoint = pendingEnds.length > 1 ? { ends: pendingEnds, lane: currentLane }
+          var endpoint = pendingEnds.length > 1 || decCtx2.inThen ? { ends: pendingEnds, lane: currentLane }
             : pendingEnds.length ? pendingEnds[0].node : null;
           recordForkEndpoint(endpoint);
         }
@@ -22461,12 +23127,7 @@
         if (currentNode) {
           addEdge(currentNode, genericTargetId, genericContLabel, relationParts.labelKind, i);
         }
-        var genericTopCtx = decisionStack.length > 0 ? decisionStack[decisionStack.length - 1] : null;
-        if (genericTopCtx && genericTopCtx.type === 'fork') {
-          genericTopCtx.branches.push(genericTargetId);
-        } else {
-          currentNode = genericTargetId;
-        }
+        recordForkEndpoint(genericTargetId);
         continue;
       }
 
@@ -22484,13 +23145,7 @@
           if (actTexture) genericFullTargetNode.texture = actTexture;
         }
         addEdge(genericSourceId, genericFullTargetId, genericLabel, relationParts.labelKind, i);
-        var fullFork = decisionStack[decisionStack.length - 1];
-        if (fullFork && fullFork.type === 'fork') {
-          var branchIndex = fullFork.branches.indexOf(genericSourceId);
-          if (branchIndex >= 0) fullFork.branches[branchIndex] = genericFullTargetId;
-          else fullFork.branches.push(genericFullTargetId);
-          currentNode = fullFork.forkId;
-        } else currentNode = genericFullTargetId;
+        recordForkEndpoint(genericFullTargetId, genericSourceId);
         continue;
       }
 
@@ -24171,6 +24826,7 @@
     container.innerHTML = window.GitGraph.renderToSVG(data);
     UMLShared.applyRenderedPositions(container, layoutExtract.layout);
     UMLShared.applyLayoutRoutes(container, layoutExtract.layout);
+    UMLShared.autoFitSVG(container);
   }
 
   // Accept both `diagram-gitgraph` (explicit HTML) and `language-gitgraph`
@@ -25821,6 +26477,12 @@
       }
 
       // entity / weak entity / relationship / identifying relationship blocks
+      var erHighlight = UMLShared.parseHighlightColor(line);
+      if (/^(?:(?:weak|identifying)\s+)?(?:entity|relationship)\s+\S/i.test(erHighlight.stripped)) {
+        line = erHighlight.stripped;
+      } else {
+        erHighlight = { highlight: null, texture: null };
+      }
       var entMatch = line.match(/^(weak\s+)?entity\s+(?:"([^"]+)"|(\S+))\s*\{?\s*$/i);
       if (entMatch) {
         var weak = !!entMatch[1];
@@ -25834,6 +26496,8 @@
         } else if (weak) {
           ent.weak = true;
         }
+        if (erHighlight.highlight) ent.highlight = erHighlight.highlight;
+        if (erHighlight.texture) ent.texture = erHighlight.texture;
         if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, ent.attrs);
         continue;
       }
@@ -25851,6 +26515,8 @@
         } else if (identifying) {
           rel.identifying = true;
         }
+        if (erHighlight.highlight) rel.highlight = erHighlight.highlight;
+        if (erHighlight.texture) rel.texture = erHighlight.texture;
         if (/\{\s*$/.test(line)) i = consumeAttrBlock(lines, i, rel.attrs);
         continue;
       }
@@ -26474,6 +27140,7 @@
   function drawEntity(svg, pos, colors) {
     var w = pos.box.w, h = pos.box.h;
     var x = pos.cx - w / 2, y = pos.cy - h / 2;
+    var fills = UMLShared.highlightFills(colors, pos.entity.highlight, pos.entity.texture);
     // Filled rectangle with the same light-blue header colour used by
     // other UML renderers (class headers, deployment nodes, component
     // boxes). Wrapped in a uml-node-shadow group so drop shadows apply
@@ -26481,8 +27148,9 @@
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<rect x="' + x + '" y="' + y +
       '" width="' + w + '" height="' + h +
-      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
       '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (fills.textureUrl) svg.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + fills.textureUrl + '" stroke="none"/>');
     if (pos.entity.weak) {
       var d = CFG.doubleInset;
       svg.push('<rect x="' + (x + d) + '" y="' + (y + d) +
@@ -26500,6 +27168,7 @@
   function drawRelationship(svg, pos, colors) {
     var w = pos.box.w, h = pos.box.h;
     var cx = pos.cx, cy = pos.cy;
+    var fills = UMLShared.highlightFills(colors, pos.relationship.highlight, pos.relationship.texture);
     var pts = [
       cx + ',' + (cy - h / 2),
       (cx + w / 2) + ',' + cy,
@@ -26508,8 +27177,9 @@
     ].join(' ');
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<polygon points="' + pts +
-      '" fill="' + colors.headerFill + '" stroke="' + colors.stroke +
+      '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
       '" stroke-width="' + CFG.strokeWidth + '"/>');
+    if (fills.textureUrl) svg.push('<polygon points="' + pts + '" fill="' + fills.textureUrl + '" stroke="none"/>');
     if (pos.relationship.identifying) {
       var d = CFG.doubleInset * 1.4;
       var innerPts = [
@@ -26673,6 +27343,197 @@
 
   UMLShared.createAutoInit('pre > code.diagram-er, pre > code.language-er', render, { type: 'er' });
   window.UMLERDiagram = { render: render, parse: parse };
+})();
+/**
+ * CRC Card Renderer
+ *
+ * card "Shopping cart" as Cart {
+ *   responsibility: Know selected products
+ *   collaborator: Catalog
+ * }
+ *
+ * Each entry occupies one source line. Responsibilities and collaborators are
+ * independent lists, not matched rows or UML associations. parse() returns
+ * zero-based startLine/endLine ranges in the original source for visual edits.
+ */
+(function () {
+  'use strict';
+
+  const CFG = { width: 560, split: 320, pad: 18, fontSize: 20, titleSize: 22, lineHeight: 28, gap: 32 };
+
+  function syntaxError(line, message) {
+    return new Error('CRC line ' + (line + 1) + ': ' + message);
+  }
+
+  function parseCardDeclaration(line, index) {
+    const declaration = line.replace(/\s+@pos\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)/i, '');
+    const match = declaration.match(/^card\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z_][\w.:-]*))(?:\s+as\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z_][\w.:-]*)))?\s*\{\s*$/i);
+    if (!match) throw syntaxError(index, 'Use card Name { or card "Display name" as Id {.');
+    const name = match[1] !== undefined ? match[1].replace(/\\(["\\])/g, '$1') : match[2];
+    if (!name.trim()) throw syntaxError(index, 'A card needs a nonempty name.');
+    const id = match[3] !== undefined ? match[3].replace(/\\(["\\])/g, '$1') : match[4] || name;
+    if (!id.trim()) throw syntaxError(index, 'A card needs a nonempty identifier.');
+    return { id: id, name: name, responsibilities: [], collaborators: [], startLine: index, endLine: null };
+  }
+
+  /** Parse CRC source, rejecting malformed or duplicate cards with line numbers. */
+  function parse(text) {
+    const lines = String(text || '').split('\n');
+    const result = { cards: [], direction: null, layoutPreference: 'auto', shadowEnabled: null, layout: UMLShared.extractLayoutMetadata(text).layout };
+    const identifiers = new Set();
+    let current = null;
+    let inLayout = false;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index].trim();
+      if (!line || /^(?:\/\/|#|')/.test(line)) continue;
+      if (current) {
+        if (line === '}') { current.endLine = index; current = null; continue; }
+        if (/^@enduml$/i.test(line)) throw syntaxError(current.startLine, 'Close the card with } before @enduml.');
+        const entry = line.match(/^(responsibility|collaborator)\s*:\s*(.*)$/i);
+        if (!entry) throw syntaxError(index, 'Use responsibility: text or collaborator: text inside a card.');
+        if (!entry[2].trim()) throw syntaxError(index, 'An entry needs text after the colon.');
+        current[entry[1].toLowerCase() === 'responsibility' ? 'responsibilities' : 'collaborators'].push(entry[2].trim());
+        continue;
+      }
+      if (/^@layout\b/i.test(line)) { inLayout = true; continue; }
+      if (/^@endlayout\b/i.test(line)) { inLayout = false; continue; }
+      if (inLayout || /^@(?:start|end)uml$/i.test(line) || /^caption\s*:/i.test(line)) continue;
+      const directive = UMLShared.parseLayoutDirective(line);
+      if (directive) {
+        if (directive.direction) { result.direction = directive.direction; result.layoutPreference = 'auto'; }
+        if (directive.layoutPreference !== null) { result.layoutPreference = directive.layoutPreference; result.direction = null; }
+        if (directive.shadowEnabled !== null) result.shadowEnabled = directive.shadowEnabled;
+        continue;
+      }
+      current = parseCardDeclaration(line, index);
+      if (identifiers.has(current.id)) throw syntaxError(index, 'Duplicate card identifier "' + current.id + '". Choose a unique identifier.');
+      identifiers.add(current.id);
+      result.cards.push(current);
+    }
+    if (current) throw syntaxError(current.startLine, 'Close the card with }.');
+    if (inLayout) throw syntaxError(lines.length - 1, 'Close the layout block with @endlayout.');
+    return result;
+  }
+
+  function wrapText(text, width, bold, fontSize) {
+    const lines = [];
+    let line = '';
+    for (const word of text.split(/\s+/)) {
+      const candidate = line ? line + ' ' + word : word;
+      if (UMLShared.textWidth(candidate, bold, fontSize) <= width) { line = candidate; continue; }
+      if (line) { lines.push(line); line = ''; }
+      for (const character of word) {
+        if (line && UMLShared.textWidth(line + character, bold, fontSize) > width) {
+          lines.push(line);
+          line = '';
+        }
+        line += character;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function measureEntries(entries, width) {
+    const rows = entries.length ? entries : ['—'];
+    return rows.map((entry) => wrapText(entry, width - CFG.pad * 2 - 16, false, CFG.fontSize));
+  }
+
+  function entriesHeight(entries) {
+    return entries.reduce((height, lines) => height + lines.length * CFG.lineHeight + 8, 0);
+  }
+
+  function measureCard(card) {
+    const title = wrapText(card.name, CFG.width - CFG.pad * 2, true, CFG.titleSize);
+    const responsibilities = measureEntries(card.responsibilities, CFG.split);
+    const collaborators = measureEntries(card.collaborators, CFG.width - CFG.split);
+    const headerHeight = title.length * CFG.lineHeight + CFG.pad * 2;
+    return { card, title, responsibilities, collaborators, headerHeight,
+      height: headerHeight + 48 + Math.max(entriesHeight(responsibilities), entriesHeight(collaborators)) + CFG.pad };
+  }
+
+  function columnCount(parsed, availableWidth) {
+    const count = parsed.cards.length;
+    if (parsed.direction === 'LR') return count;
+    if (parsed.direction === 'TB') return 1;
+    if (parsed.layoutPreference === 'landscape') return Math.min(count, Math.max(2, Math.ceil(Math.sqrt(count * 1.6))));
+    if (parsed.layoutPreference === 'portrait') return Math.max(1, Math.floor(Math.sqrt(count * 0.6)));
+    if (parsed.layoutPreference !== 'auto') return Math.ceil(Math.sqrt(count));
+    return Math.max(1, Math.min(count, Math.floor((availableWidth + CFG.gap) / (CFG.width + CFG.gap))));
+  }
+
+  function placeCards(parsed, availableWidth) {
+    const columns = columnCount(parsed, availableWidth);
+    const cards = parsed.cards.map(measureCard);
+    let y = 0;
+    for (let start = 0; start < cards.length; start += columns) {
+      const row = cards.slice(start, start + columns);
+      row.forEach((card, index) => { card.x = index * (CFG.width + CFG.gap); card.y = y; });
+      y += Math.max(...row.map((card) => card.height)) + CFG.gap;
+    }
+    return { cards, width: columns * (CFG.width + CFG.gap) - CFG.gap, height: y - CFG.gap };
+  }
+
+  function textElement(text, x, y, colors, options = {}) {
+    return '<text x="' + x + '" y="' + y + '" font-size="' + (options.size || CFG.fontSize) +
+      '" fill="' + colors.text + '"' + (options.bold ? ' font-weight="bold"' : '') +
+      (options.centered ? ' text-anchor="middle"' : '') + '>' + UMLShared.escapeXml(text) + '</text>';
+  }
+
+  function drawEntries(entries, x, y, colors, empty) {
+    const svg = [];
+    for (const lines of entries) {
+      lines.forEach((line, index) => {
+        if (!empty && index === 0) svg.push(textElement('•', x, y, colors));
+        svg.push(textElement(line, x + 16, y, colors));
+        y += CFG.lineHeight;
+      });
+      y += 8;
+    }
+    return svg.join('');
+  }
+
+  function drawCard(measured, colors) {
+    const { card, headerHeight, height } = measured;
+    const id = UMLShared.escapeXml(card.id);
+    const svg = ['<g data-layout-id="' + id + '" data-layout-bounds-id="' + id + '" transform="translate(' + measured.x + ',' + measured.y + ')">'];
+    svg.push('<rect width="' + CFG.width + '" height="' + height + '" rx="6" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1.5" filter="url(#uml-node-shadow)"/>');
+    svg.push('<path d="M6 0 H' + (CFG.width - 6) + ' Q' + CFG.width + ' 0 ' + CFG.width + ' 6 V' + headerHeight + ' H0 V6 Q0 0 6 0 Z" fill="' + colors.headerFill + '"/>');
+    svg.push('<path d="M0 ' + headerHeight + ' H' + CFG.width + ' M' + CFG.split + ' ' + headerHeight + ' V' + height + '" fill="none" stroke="' + colors.stroke + '" stroke-width="1.5"/>');
+    measured.title.forEach((line, index) => svg.push(textElement(line, CFG.width / 2, CFG.pad + CFG.titleSize + index * CFG.lineHeight, colors, { bold: true, centered: true, size: CFG.titleSize })));
+    svg.push(textElement('Responsibilities', CFG.pad, headerHeight + 30, colors, { bold: true }));
+    svg.push(textElement('Collaborators', CFG.split + CFG.pad, headerHeight + 30, colors, { bold: true }));
+    svg.push(drawEntries(measured.responsibilities, CFG.pad, headerHeight + 62, colors, !card.responsibilities.length));
+    svg.push(drawEntries(measured.collaborators, CFG.split + CFG.pad, headerHeight + 62, colors, !card.collaborators.length));
+    svg.push('</g>');
+    return svg.join('');
+  }
+
+  function describeCards(cards) {
+    return 'Class-responsibility-collaborator cards. ' + cards.map((card) => card.name + '. Responsibilities: ' +
+      (card.responsibilities.join('; ') || 'none listed') + '. Collaborators: ' +
+      (card.collaborators.join('; ') || 'none listed') + '.').join(' ');
+  }
+
+  function render(container, text) {
+    const parsed = parse(text);
+    UMLShared.prepareDiagramContainer(container, 'crc');
+    container.setAttribute('tabindex', '0');
+    if (!parsed.cards.length) {
+      container.innerHTML = '<div class="uml-empty-msg">No CRC cards to display.</div>';
+      return;
+    }
+    const layout = placeCards(parsed, container.clientWidth || CFG.width);
+    const colors = UMLShared.getThemeColors(container);
+    container.innerHTML = UMLShared.svgOpen(layout.width + 60, layout.height + 60, 30, 30, null, { shadowEnabled: parsed.shadowEnabled }) +
+      layout.cards.map((card) => drawCard(card, colors)).join('') + UMLShared.svgClose();
+    UMLShared.applyRenderedPositions(container, parsed.layout);
+    UMLShared.autoFitSVG(container);
+    UMLShared.applySvgAccessibility(container, 'crc', text, describeCards(parsed.cards));
+  }
+
+  UMLShared.createAutoInit('pre > code.diagram-crc, pre > code.language-crc', render, { type: 'crc' });
+  window.UMLCRCDiagram = { render, parse };
 })();
 /**
  * UML Notation Symbol Renderer
