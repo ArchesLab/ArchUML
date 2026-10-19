@@ -34,9 +34,11 @@
   // Boxes are tried every few units along each side, and past the target's
   // ends, where a pointer leaves the box corner diagonally.
   const POSITION_STEP = 4;
-  const DIAGONAL_REACH = 40;
-  // When nothing nearby is clear, boxes may sit further out and further along.
-  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, [0, 12, 24, 36, 48, 64, 80, 100]]];
+  const DIAGONAL_REACH = 80;
+  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, [0, 16, 32, 48, 72]]];
+  // Other callout targets keep a ring of empty space so a wide box cannot
+  // park on top of a neighbour's only short approach.
+  const OTHER_TARGET_CLEARANCE = 32;
   // Partial layouts kept, and distinct placements each tries per callout.
   const BEAM_WIDTH = 6;
   const BRANCHES = 4;
@@ -129,18 +131,22 @@
     const points = route.points;
     let point = target.anchor === 'start' ? points[0] : points[points.length - 1];
     if (target.anchor === 'middle') {
+      // The middle stretch of the host segment, so the tip can slide off a
+      // label on the relationship name without jumping to an endpoint.
       const segments = points.slice(1).map((end, index) => ({ start: points[index], end,
         length: Math.hypot(end.x - points[index].x, end.y - points[index].y) }));
-      let distance = segments.reduce((sum, segment) => sum + segment.length, 0) / 2;
+      let distance = segments.reduce((sum, segment) => sum + segment.length, 0) / 2, host = segments[0];
       for (const segment of segments) {
-        if (distance <= segment.length && segment.length > 0) {
-          const ratio = distance / segment.length;
-          point = { x: segment.start.x + ratio * (segment.end.x - segment.start.x),
-            y: segment.start.y + ratio * (segment.end.y - segment.start.y) };
-          break;
-        }
+        if (distance <= segment.length) { host = segment; break; }
         distance -= segment.length;
       }
+      const span = Math.max(6, (host && host.length || 0) * 0.7);
+      const t0 = host && host.length ? (host.length - span) / 2 / host.length : 0;
+      const at = t => ({ x: host.start.x + (host.end.x - host.start.x) * t, y: host.start.y + (host.end.y - host.start.y) * t });
+      const a = host ? at(t0) : point, b = host ? at(t0 + (host.length ? span / host.length : 0)) : point;
+      return { x: Math.min(a.x, b.x) - 3, y: Math.min(a.y, b.y) - 3,
+        width: Math.max(6, Math.abs(a.x - b.x) + 6), height: Math.max(6, Math.abs(a.y - b.y) + 6),
+        element: route.element };
     }
     return { x: point.x - 3, y: point.y - 3, width: 6, height: 6, element: route.element };
   }
@@ -186,14 +192,13 @@
 
   /** Where a pointer from a box on this side ends, just outside the target. */
   function tipFor(target, side, box) {
-    // A small symbol is pointed at its middle. A long label or a whole element
-    // may be pointed at anywhere in its middle half, so the pointer stays straight.
-    const cx = target.x + target.width / 2, cy = target.y + target.height / 2;
+    // A small symbol is pointed at its middle. A longer target may be pointed
+    // at anywhere along the facing side, so the pointer can skirt a nearby label.
     if (side === 'left' || side === 'right') {
       return { x: side === 'left' ? target.x - TIP_CLEARANCE : target.x + target.width + TIP_CLEARANCE,
-        y: clamp(box.y + box.height / 2, cy - target.height / 4, cy + target.height / 4) };
+        y: clamp(box.y + box.height / 2, target.y, target.y + target.height) };
     }
-    return { x: clamp(box.x + box.width / 2, cx - target.width / 4, cx + target.width / 4),
+    return { x: clamp(box.x + box.width / 2, target.x, target.x + target.width),
       y: side === 'top' ? target.y - TIP_CLEARANCE : target.y + target.height + TIP_CLEARANCE };
   }
 
@@ -504,8 +509,8 @@
    * already placed. A placement whose pointer crosses anything is used only
    * when no clear one exists, nearby or further away.
    */
-  function options(callout, target, geometry, reserved, placed) {
-    const blockers = geometry.blockers.concat(reserved,
+  function options(callout, target, geometry, reserved, others, placed) {
+    const blockers = geometry.blockers.concat(reserved, others,
       placed.flatMap(item => [padded(item.box, CALLOUT_CLEARANCE), padded(bounds(item.pointer), 3)]));
     // Labels always exclude pointers. A shape containing the target does not:
     // a pointer to a visibility marker must be able to reach inside its class.
@@ -549,10 +554,17 @@
    * few partial layouts, so an early callout can give way when its best spot
    * would leave a later one nowhere clear to go.
    */
+  function neighbourKeepOut(target, targets, obstacles) {
+    return targets.filter(item => item !== target && !obstacles.some(obstacle =>
+      obstacle.kind === 'shape' && obstacle.box && contains(obstacle.box, target) && contains(obstacle.box, item)))
+      .map(item => padded(item, OTHER_TARGET_CLEARANCE));
+  }
+
   function beamSearch(order, callouts, targets, geometry, reserved) {
     let beam = [{ placed: [], cost: 0 }];
     for (const index of order) {
-      beam = beam.flatMap(state => options(callouts[index], targets[index], geometry, reserved, state.placed)
+      const keepOut = neighbourKeepOut(targets[index], targets, geometry.obstacles);
+      beam = beam.flatMap(state => options(callouts[index], targets[index], geometry, reserved, keepOut, state.placed)
         .map(option => ({ placed: state.placed.concat(option), cost: state.cost + option.cost })))
         .sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
     }

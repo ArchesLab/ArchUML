@@ -2529,7 +2529,7 @@ Load `css/callouts.css` from the ArchUML package alongside `uml-bundle.js`. SEBo
 callout <side> of <target> : <brief explanation>
 ```
 
-The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, checks the triangular pointer for collisions, and favors short pointers. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
+The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, leaves a neighbour's nearby approach clear so one wide box cannot starve the next, checks the triangular pointer for collisions, and favors short pointers. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
 
 | Target | Example | Meaning |
 | --- | --- | --- |
