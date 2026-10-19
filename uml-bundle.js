@@ -42,8 +42,11 @@
   // Partial layouts kept, and distinct placements each tries per callout.
   const BEAM_WIDTH = 6;
   const BRANCHES = 4;
-  // A pointer crossing notation or another callout is the last resort.
+  // Crossing a label is worse than grazing the connector the target sits on:
+  // a multiplicity marker lives on its line, so the pointer often must cross
+  // that stroke, but it must not run through the relationship name.
   const CROSSING_COST = 1000;
+  const TEXT_CROSSING_COST = 5000;
   const FALLBACK_CANDIDATES = 600;
   const ORDER_ATTEMPTS = 3;
   // Placement costs are in units of pointer length.
@@ -388,7 +391,7 @@
           obstacles.push({ element, kind: 'stroke', polygon, area: bounds(polygon) });
         }
       } else {
-        const polygon = rectVertices(box, 1);
+        const polygon = rectVertices(box, tag === 'text' ? 3 : 1);
         blockers.push(padded(box, MODEL_CLEARANCE));
         obstacles.push({ element, kind: tag === 'text' ? 'text' : 'shape', box, polygon, area: bounds(polygon) });
       }
@@ -437,16 +440,18 @@
   }
 
   function pointerCrossings(pointer, area, obstacles, placed) {
-    let count = 0;
+    let soft = 0, hard = 0;
     for (let i = 0; i < obstacles.length; i++) {
       const obstacle = obstacles[i];
-      if (boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon)) count++;
+      if (!(boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon))) continue;
+      if (obstacle.kind === 'text') hard++;
+      else soft++;
     }
     for (let i = 0; i < placed.length; i++) {
       const item = placed[i];
-      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) count++;
+      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) hard++;
     }
-    return count;
+    return { soft, hard };
   }
 
   /** Blockers that a box sliding away from the target on this side could meet. */
@@ -543,7 +548,8 @@
     }
     let fallback = null;
     for (const candidate of list.slice(0, FALLBACK_CANDIDATES)) {
-      const cost = candidate.cost + pointerCrossings(candidate.pointer, candidate.area, obstacles, placed) * CROSSING_COST;
+      const crossings = pointerCrossings(candidate.pointer, candidate.area, obstacles, placed);
+      const cost = candidate.cost + crossings.hard * TEXT_CROSSING_COST + crossings.soft * CROSSING_COST;
       if (!fallback || cost < fallback.cost) fallback = { ...candidate, cost, forced: true, clearance: rectVertices(candidate.box, 3) };
     }
     return [fallback];
