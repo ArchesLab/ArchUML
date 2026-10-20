@@ -3345,11 +3345,10 @@
     if (!svg || !svg.viewBox.baseVal.width) return;
     const style = getComputedStyle(container);
     const availableWidth = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-    // Attachment and available space are separate: a lesson's prose scrolls
-    // with its diagram, but its pane still limits how tall the fitted SVG is.
+    // Fit to the whole viewing pane, not the space below the diagram's
+    // current position. Scrolling changes attachment, never the fit scale.
     // Remember constraints before fitting so shrinking an auto-height wrapper
     // cannot feed back into later fits and progressively shrink the diagram.
-    const anchorTop = view.viewport.getBoundingClientRect().top;
     let viewportPadding = 0;
     for (let element = container; element; element = element.parentElement) {
       const style = getComputedStyle(element);
@@ -3362,24 +3361,19 @@
       viewportPadding += topPadding + parseFloat(style.paddingBottom);
       if (element === view.viewport) break;
     }
-    let availableHeight = window.innerHeight - 24 - Math.max(0, anchorTop) - viewportPadding;
+    let availableHeight = window.innerHeight - 24 - viewportPadding;
     for (const element of view.previous.heightLimits) {
-      const paneTop = element.getBoundingClientRect().top + element.clientTop;
-      const offset = Math.max(0, anchorTop - paneTop);
-      // Ancestor top padding is already included in the anchor's position.
-      const bottomPadding = element === view.viewport ? 0 : parseFloat(getComputedStyle(element).paddingBottom);
-      availableHeight = Math.min(availableHeight, element.clientHeight - offset - viewportPadding - bottomPadding);
+      const paneStyle = getComputedStyle(element);
+      const panePadding = element === view.viewport ? 0
+        : parseFloat(paneStyle.paddingTop) + parseFloat(paneStyle.paddingBottom);
+      availableHeight = Math.min(availableHeight, element.clientHeight - viewportPadding - panePadding);
     }
-    // An offscreen control provides no usable height estimate. Keep the last
-    // height-based scale, but still respect a narrower container after resize.
     const aspect = svg.viewBox.baseVal.width / svg.viewBox.baseVal.height;
-    const usableWidth = height => view.fitted && height <= 0
-      ? parseFloat(container.style.getPropertyValue('--uml-fit-width')) : height * aspect;
     // Compare the drawing widths with the control beside or above it. A
     // centered drawing with 40 px on each side leaves room for the 32 px
     // control and its inset; reserving that gutter can still beat a row.
-    const inlineWidth = Math.max(1, Math.min(view.previous.width, Math.max(1, availableWidth - 80), usableWidth(availableHeight)));
-    const rowWidth = Math.max(1, Math.min(view.previous.width, availableWidth, usableWidth(availableHeight - 36)));
+    const inlineWidth = Math.max(1, Math.min(view.previous.width, Math.max(1, availableWidth - 80), availableHeight * aspect));
+    const rowWidth = Math.max(1, Math.min(view.previous.width, availableWidth, (availableHeight - 36) * aspect));
     const inlineControls = view.viewport === container && availableWidth >= 80 && inlineWidth >= rowWidth;
     view.viewport.classList.toggle('uml-fit-controls-inline', inlineControls);
     const width = inlineControls ? inlineWidth : rowWidth;
