@@ -3251,12 +3251,266 @@
 
   // ─── SVG Auto-Fit ───────────────────────────────────────────
 
+  // View controls live beside the image, never inside role="img" (whose
+  // descendants are presentational to assistive technology) or inside the SVG.
+  const diagramViews = new WeakMap();
+  const diagramControlHosts = new WeakMap();
+  let diagramTooltipId = 0;
+  let diagramViewListenersInstalled = false;
+
+  function hideDiagramTooltips() {
+    document.querySelectorAll('.uml-fit-tooltip').forEach(tip => { tip.hidden = true; });
+  }
+
+  function attachDiagramTooltip(corner, button, tooltip) {
+    let pressTimer;
+    let pressStart;
+    let suppressClick = false;
+    const cancelPress = () => { clearTimeout(pressTimer); pressStart = null; };
+    const show = () => {
+      hideDiagramTooltips();
+      tooltip.textContent = button.getAttribute('aria-label');
+      tooltip.hidden = false;
+    };
+    corner.addEventListener('pointerenter', event => {
+      if (event.pointerType === 'mouse') show();
+    });
+    corner.addEventListener('pointerleave', () => {
+      cancelPress();
+      if (!button.matches(':focus-visible')) tooltip.hidden = true;
+    });
+    button.addEventListener('focus', () => {
+      if (button.matches(':focus-visible')) show();
+    });
+    button.addEventListener('blur', () => { tooltip.hidden = true; });
+    button.addEventListener('pointerdown', event => {
+      suppressClick = false;
+      if (event.pointerType === 'mouse') return;
+      pressStart = { x: event.clientX, y: event.clientY };
+      pressTimer = setTimeout(() => { suppressClick = true; show(); }, 500);
+    });
+    button.addEventListener('pointermove', event => {
+      if (pressStart && Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y) > 8) cancelPress();
+    });
+    button.addEventListener('pointerup', cancelPress);
+    button.addEventListener('pointercancel', cancelPress);
+    button.addEventListener('contextmenu', event => { event.preventDefault(); });
+    // A long press explains the control; the compatibility click must not
+    // also activate it. A subsequent independent tap works normally.
+    button.addEventListener('click', event => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    });
+  }
+
+  function createDiagramView(container) {
+    installDiagramViewListeners();
+    const host = document.createElement('div');
+    host.className = 'uml-fit-controls';
+    const frame = document.createElement('div');
+    frame.className = 'uml-fit-frame';
+    host.appendChild(frame);
+    container.before(host);
+    const corner = document.createElement('span');
+    corner.className = 'uml-fit-corner';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'uml-fit-button';
+    button.setAttribute('aria-label', 'Fit diagram to screen');
+    const icon = document.createElement('span');
+    icon.className = 'uml-fit-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    button.appendChild(icon);
+    const tooltip = document.createElement('span');
+    tooltip.className = 'uml-fit-tooltip';
+    tooltip.id = 'uml-fit-tooltip-' + (++diagramTooltipId);
+    tooltip.setAttribute('role', 'tooltip');
+    tooltip.hidden = true;
+    button.setAttribute('aria-describedby', tooltip.id);
+    corner.append(button, tooltip);
+    frame.appendChild(corner);
+    const view = { container, viewport: null, host, frame, button, fitted: false, previous: null };
+    diagramControlHosts.set(host, view);
+    attachDiagramTooltip(corner, button, tooltip);
+    button.addEventListener('click', () => toggleDiagramView(view));
+    diagramViews.set(container, view);
+    return view;
+  }
+
+  function fitDiagramView(view) {
+    const container = view.container;
+    const svg = container.querySelector('svg');
+    if (!svg || !svg.viewBox.baseVal.width) return;
+    const style = getComputedStyle(container);
+    const availableWidth = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    // Attachment and available space are separate: a lesson's prose scrolls
+    // with its diagram, but its pane still limits how tall the fitted SVG is.
+    // Remember constraints before fitting so shrinking an auto-height wrapper
+    // cannot feed back into later fits and progressively shrink the diagram.
+    let availableHeight = window.innerHeight - 96;
+    let verticalPadding = 0;
+    for (let element = container; element && element !== document.body; element = element.parentElement) {
+      const elementStyle = getComputedStyle(element);
+      verticalPadding += parseFloat(elementStyle.paddingTop) + parseFloat(elementStyle.paddingBottom);
+      if (element === container) availableHeight -= verticalPadding;
+      if (view.previous.heightLimits.includes(element)) {
+        availableHeight = Math.min(availableHeight, element.clientHeight - verticalPadding);
+      }
+    }
+    const aspect = svg.viewBox.baseVal.width / svg.viewBox.baseVal.height;
+    const width = Math.max(1, Math.min(view.previous.width, availableWidth, availableHeight * aspect));
+    if (container.style.getPropertyValue('--uml-fit-width') !== width + 'px') {
+      container.style.setProperty('--uml-fit-width', width + 'px');
+    }
+  }
+
+  function positionDiagramControls(view) {
+    const bounds = view.viewport.getBoundingClientRect();
+    const origin = view.host.getBoundingClientRect();
+    view.frame.style.left = (bounds.left - origin.left) + 'px';
+    view.frame.style.top = (bounds.top - origin.top) + 'px';
+    view.frame.style.width = view.viewport.clientWidth + 'px';
+    view.frame.style.height = view.viewport.clientHeight + 'px';
+  }
+
+  function diagramScrollViewport(container) {
+    let branch = container;
+    for (let parent = container.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+      // Only a dedicated diagram wrapper may own the control. A lesson pane
+      // containing prose must scroll the button together with its diagram.
+      if (Array.from(parent.children).some(child => child !== branch && !child.matches('.uml-fit-controls'))) break;
+      branch = parent;
+      const style = getComputedStyle(parent);
+      const availableHeight = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+      if (/auto|scroll/.test(style.overflowY) && container.clientHeight > availableHeight + 1 &&
+          parent.scrollHeight > parent.clientHeight + 1 &&
+          parent.querySelectorAll(DIAGRAM_CONTAINER_SELECTOR).length === 1) return parent;
+    }
+    return container;
+  }
+
+  function rememberDiagramScroll(container) {
+    const positions = [];
+    for (let element = container; element; element = element.parentElement) {
+      positions.push({ element, left: element.scrollLeft, top: element.scrollTop });
+    }
+    return positions;
+  }
+
+  /** Restore the scale and scroll positions captured before fitting. */
+  function restoreDiagramView(container) {
+    const view = diagramViews.get(container);
+    if (!view || !view.fitted) return;
+    view.fitted = false;
+    container.classList.remove('uml-fit-fitted');
+    container.style.removeProperty('--uml-fit-width');
+    view.previous.scroll.forEach(({ element, left, top }) => {
+      element.scrollTo({ left, top, behavior: 'instant' });
+    });
+    updateDiagramScrollability(container);
+  }
+
+  function toggleDiagramView(view) {
+    const container = view.container;
+    hideDiagramTooltips();
+    if (!view.fitted) {
+      const svg = container.querySelector('svg');
+      const scroll = rememberDiagramScroll(container);
+      view.previous = { scroll,
+        heightLimits: scroll.map(position => position.element).filter(element =>
+          element !== document.body && element !== document.documentElement &&
+          /auto|scroll|hidden/.test(getComputedStyle(element).overflowY) &&
+          element.scrollHeight > element.clientHeight + 1),
+        width: parseFloat(getComputedStyle(svg).width) };
+      fitDiagramView(view);
+      view.fitted = true;
+      container.classList.add('uml-fit-fitted');
+      container.scrollLeft = 0;
+      container.scrollTop = 0;
+      // Scroll an HTML viewport: WebKit may use the original SVG bounds
+      // for SVG.scrollIntoView even after its CSS dimensions have changed.
+      if (view.viewport !== container) view.viewport.scrollTop = 0;
+      container.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      updateDiagramScrollability(container);
+    } else {
+      restoreDiagramView(container);
+    }
+    view.button.focus({ preventScroll: true });
+    hideDiagramTooltips();
+  }
+
+  function releaseDiagramViewport(view) {
+    if (!view.viewport) return;
+    view.viewport.classList.remove('uml-fit-viewport');
+    view.viewport.style.removeProperty('--uml-fit-padding-top');
+    view.viewport = null;
+  }
+
+  function reserveDiagramToolbar(view, viewport) {
+    if (view.viewport === viewport) return;
+    releaseDiagramViewport(view);
+    view.viewport = viewport;
+    viewport.style.setProperty('--uml-fit-padding-top', getComputedStyle(viewport).paddingTop);
+    viewport.classList.add('uml-fit-viewport');
+    viewport.before(view.host);
+  }
+
+  function updateDiagramView(container, overflowing) {
+    let view = diagramViews.get(container);
+    if (view && !view.host.isConnected) {
+      container.classList.remove('uml-fit-fitted');
+      container.style.removeProperty('--uml-fit-width');
+      releaseDiagramViewport(view);
+      diagramViews.delete(container);
+      view = null;
+    }
+    // Hidden render staging/measurement hosts must never produce controls.
+    if (!container.isConnected || !container.clientWidth || !container.querySelector('svg') ||
+        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]')) {
+      if (view) { view.host.hidden = true; releaseDiagramViewport(view); }
+      return;
+    }
+    const viewport = view && view.fitted && view.viewport ? view.viewport : diagramScrollViewport(container);
+    overflowing = overflowing || viewport !== container;
+    if (!view && !overflowing) return;
+    if (!view) view = createDiagramView(container);
+    view.host.hidden = !overflowing && !view.fitted;
+    if (view.host.hidden) { releaseDiagramViewport(view); return; }
+    reserveDiagramToolbar(view, viewport);
+    if (view.fitted) fitDiagramView(view);
+    view.host.classList.toggle('uml-fit-controls-fitted', view.fitted);
+    view.button.setAttribute('aria-label', view.fitted ? 'Restore previous diagram view' : 'Fit diagram to screen');
+    positionDiagramControls(view);
+  }
+
+  function installDiagramViewListeners() {
+    if (diagramViewListenersInstalled) return;
+    diagramViewListenersInstalled = true;
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') hideDiagramTooltips();
+    });
+    document.addEventListener('pointerdown', event => {
+      if (!event.target.closest('.uml-fit-corner')) hideDiagramTooltips();
+    });
+    window.addEventListener('resize', () => {
+      document.querySelectorAll('.uml-fit-controls').forEach(host => {
+        const view = diagramControlHosts.get(host);
+        if (view && view.container.isConnected) updateDiagramScrollability(view.container);
+        else host.remove();
+      });
+    });
+  }
+
+
   // Only overflowing figures enter the tab order. ResizeObserver also covers
   // figures revealed in quizzes and changes to the surrounding text size.
   function updateDiagramScrollability(container) {
     var overflowing = container.clientWidth > 0 &&
       (container.scrollWidth > container.clientWidth + 1 ||
        container.scrollHeight > container.clientHeight + 1);
+    updateDiagramView(container, overflowing);
     var managed = container.hasAttribute('data-uml-scroll-tabindex');
     if (overflowing && (!container.hasAttribute('tabindex') || managed)) {
       if (container.getAttribute('tabindex') !== '0') container.setAttribute('tabindex', '0');
@@ -3278,7 +3532,11 @@
     ? new ResizeObserver(function (entries) {
         entries.forEach(function (entry) {
           if (entry.target.isConnected) updateDiagramScrollability(entry.target);
-          else diagramScrollObserver.unobserve(entry.target);
+          else {
+            diagramScrollObserver.unobserve(entry.target);
+            const view = diagramViews.get(entry.target);
+            if (view) { view.host.remove(); releaseDiagramViewport(view); }
+          }
         });
       })
     : null;
