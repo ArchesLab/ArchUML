@@ -7908,9 +7908,22 @@
       // Extract label after ':'
       var label = '';
       var labelDirection = false;
-      var colonIdx = rightPart.lastIndexOf(' : ');
+      var colonIdx = -1;
+      var quote = '';
+      for (var ci = 0; ci < rightPart.length; ci++) {
+        var ch = rightPart[ci];
+        if (quote) {
+          if (ch === '\\') { ci++; continue; }
+          if (ch === quote) quote = '';
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+        } else if (ch === ':' && rightPart[ci - 1] !== ':' && rightPart[ci + 1] !== ':') {
+          colonIdx = ci;
+          break;
+        }
+      }
       if (colonIdx !== -1) {
-        label = rightPart.substring(colonIdx + 3).trim();
+        label = rightPart.substring(colonIdx + 1).trim();
         var labelInfo = UMLShared.parseLabelDirectionCue(label);
         label = labelInfo.text;
         labelDirection = labelInfo.hasDirection;
