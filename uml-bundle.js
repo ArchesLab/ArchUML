@@ -3353,7 +3353,13 @@
     let viewportPadding = 0;
     for (let element = container; element; element = element.parentElement) {
       const style = getComputedStyle(element);
-      viewportPadding += parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      // Measure the unreserved content area even when the toolbar row is
+      // currently present. The row is needed only if the button cannot fit
+      // beside the centered drawing.
+      const topPadding = element === view.viewport
+        ? parseFloat(element.style.getPropertyValue('--uml-fit-padding-top')) || 0
+        : parseFloat(style.paddingTop);
+      viewportPadding += topPadding + parseFloat(style.paddingBottom);
       if (element === view.viewport) break;
     }
     let availableHeight = window.innerHeight - 24 - Math.max(0, anchorTop) - viewportPadding;
@@ -3367,9 +3373,16 @@
     // An offscreen control provides no usable height estimate. Keep the last
     // height-based scale, but still respect a narrower container after resize.
     const aspect = svg.viewBox.baseVal.width / svg.viewBox.baseVal.height;
-    const heightConstrainedWidth = view.fitted && availableHeight <= 0
-      ? parseFloat(container.style.getPropertyValue('--uml-fit-width')) : availableHeight * aspect;
-    const width = Math.max(1, Math.min(view.previous.width, availableWidth, heightConstrainedWidth));
+    const usableWidth = height => view.fitted && height <= 0
+      ? parseFloat(container.style.getPropertyValue('--uml-fit-width')) : height * aspect;
+    // Compare the drawing widths with the control beside or above it. A
+    // centered drawing with 40 px on each side leaves room for the 32 px
+    // control and its inset; reserving that gutter can still beat a row.
+    const inlineWidth = Math.max(1, Math.min(view.previous.width, Math.max(1, availableWidth - 80), usableWidth(availableHeight)));
+    const rowWidth = Math.max(1, Math.min(view.previous.width, availableWidth, usableWidth(availableHeight - 36)));
+    const inlineControls = view.viewport === container && availableWidth >= 80 && inlineWidth >= rowWidth;
+    view.viewport.classList.toggle('uml-fit-controls-inline', inlineControls);
+    const width = inlineControls ? inlineWidth : rowWidth;
     if (container.style.getPropertyValue('--uml-fit-width') !== width + 'px') {
       container.style.setProperty('--uml-fit-width', width + 'px');
     }
@@ -3413,6 +3426,7 @@
     const view = diagramViews.get(container);
     if (!view || !view.fitted) return;
     view.fitted = false;
+    view.viewport.classList.remove('uml-fit-controls-inline');
     container.classList.remove('uml-fit-fitted');
     container.style.removeProperty('--uml-fit-width');
     container.style.removeProperty('--uml-fit-height');
@@ -3456,6 +3470,7 @@
   function releaseDiagramViewport(view) {
     if (!view.viewport) return;
     view.viewport.classList.remove('uml-fit-viewport');
+    view.viewport.classList.remove('uml-fit-controls-inline');
     view.viewport.style.removeProperty('--uml-fit-padding-top');
     view.viewport = null;
   }

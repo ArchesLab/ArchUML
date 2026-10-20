@@ -68,10 +68,13 @@ html.dark-mode .uml-fit-button, html.dark-mode .uml-fit-tooltip { color: #e6f3ff
 html.dark-mode .uml-fit-button:hover { background: #304c65; }
 html.dark-mode .uml-fit-button:focus-visible { outline-color: #8ecfff; }
 @media screen {
-  /* Reserve a toolbar row so neither icon can cover tabs, nodes or labels. */
+  /* Reserve a toolbar row when the diagram reaches the button's corner. */
   .uml-fit-viewport {
-    padding-top: calc(var(--uml-fit-padding-top, 0px) + 40px) !important;
+    padding-top: calc(var(--uml-fit-padding-top, 0px) + 36px) !important;
     overflow-anchor: none;
+  }
+  .uml-fit-viewport.uml-fit-controls-inline {
+    padding-top: var(--uml-fit-padding-top, 0px) !important;
   }
   .uml-fit-fitted { min-height: var(--uml-fit-height) !important; }
   .uml-fit-fitted > svg {
