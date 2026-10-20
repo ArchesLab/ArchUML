@@ -3349,18 +3349,27 @@
     // with its diagram, but its pane still limits how tall the fitted SVG is.
     // Remember constraints before fitting so shrinking an auto-height wrapper
     // cannot feed back into later fits and progressively shrink the diagram.
-    let availableHeight = window.innerHeight - 96;
-    let verticalPadding = 0;
-    for (let element = container; element && element !== document.body; element = element.parentElement) {
-      const elementStyle = getComputedStyle(element);
-      verticalPadding += parseFloat(elementStyle.paddingTop) + parseFloat(elementStyle.paddingBottom);
-      if (element === container) availableHeight -= verticalPadding;
-      if (view.previous.heightLimits.includes(element)) {
-        availableHeight = Math.min(availableHeight, element.clientHeight - verticalPadding);
-      }
+    const anchorTop = view.viewport.getBoundingClientRect().top;
+    let viewportPadding = 0;
+    for (let element = container; element; element = element.parentElement) {
+      const style = getComputedStyle(element);
+      viewportPadding += parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      if (element === view.viewport) break;
     }
+    let availableHeight = window.innerHeight - 24 - Math.max(0, anchorTop) - viewportPadding;
+    for (const element of view.previous.heightLimits) {
+      const paneTop = element.getBoundingClientRect().top + element.clientTop;
+      const offset = Math.max(0, anchorTop - paneTop);
+      // Ancestor top padding is already included in the anchor's position.
+      const bottomPadding = element === view.viewport ? 0 : parseFloat(getComputedStyle(element).paddingBottom);
+      availableHeight = Math.min(availableHeight, element.clientHeight - offset - viewportPadding - bottomPadding);
+    }
+    // An offscreen control provides no usable height estimate. Keep the last
+    // height-based scale, but still respect a narrower container after resize.
     const aspect = svg.viewBox.baseVal.width / svg.viewBox.baseVal.height;
-    const width = Math.max(1, Math.min(view.previous.width, availableWidth, availableHeight * aspect));
+    const heightConstrainedWidth = view.fitted && availableHeight <= 0
+      ? parseFloat(container.style.getPropertyValue('--uml-fit-width')) : availableHeight * aspect;
+    const width = Math.max(1, Math.min(view.previous.width, availableWidth, heightConstrainedWidth));
     if (container.style.getPropertyValue('--uml-fit-width') !== width + 'px') {
       container.style.setProperty('--uml-fit-width', width + 'px');
     }
@@ -3406,8 +3415,9 @@
     view.fitted = false;
     container.classList.remove('uml-fit-fitted');
     container.style.removeProperty('--uml-fit-width');
+    container.style.removeProperty('--uml-fit-height');
     view.previous.scroll.forEach(({ element, left, top }) => {
-      element.scrollTo({ left, top, behavior: 'instant' });
+      if (element === container || element === view.viewport) element.scrollTo({ left, top, behavior: 'instant' });
     });
     updateDiagramScrollability(container);
   }
@@ -3424,15 +3434,17 @@
           /auto|scroll|hidden/.test(getComputedStyle(element).overflowY) &&
           element.scrollHeight > element.clientHeight + 1),
         width: parseFloat(getComputedStyle(svg).width) };
+      // Keep the outer layout unchanged: otherwise a shorter fitted SVG can
+      // clamp an ancestor's scroll position, especially near the page end.
+      container.style.setProperty('--uml-fit-height', getComputedStyle(container).height);
       fitDiagramView(view);
       view.fitted = true;
       container.classList.add('uml-fit-fitted');
       container.scrollLeft = 0;
       container.scrollTop = 0;
-      // Scroll an HTML viewport: WebKit may use the original SVG bounds
-      // for SVG.scrollIntoView even after its CSS dimensions have changed.
+      // Only reset the diagram's own scrolling. The lesson/page stays anchored
+      // at the clicked control, and fit uses the space below that anchor.
       if (view.viewport !== container) view.viewport.scrollTop = 0;
-      container.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
       updateDiagramScrollability(container);
     } else {
       restoreDiagramView(container);
@@ -3462,6 +3474,7 @@
     if (view && !view.host.isConnected) {
       container.classList.remove('uml-fit-fitted');
       container.style.removeProperty('--uml-fit-width');
+      container.style.removeProperty('--uml-fit-height');
       releaseDiagramViewport(view);
       diagramViews.delete(container);
       view = null;

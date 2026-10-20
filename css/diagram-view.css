@@ -69,7 +69,11 @@ html.dark-mode .uml-fit-button:hover { background: #304c65; }
 html.dark-mode .uml-fit-button:focus-visible { outline-color: #8ecfff; }
 @media screen {
   /* Reserve a toolbar row so neither icon can cover tabs, nodes or labels. */
-  .uml-fit-viewport { padding-top: calc(var(--uml-fit-padding-top, 0px) + 40px) !important; }
+  .uml-fit-viewport {
+    padding-top: calc(var(--uml-fit-padding-top, 0px) + 40px) !important;
+    overflow-anchor: none;
+  }
+  .uml-fit-fitted { min-height: var(--uml-fit-height) !important; }
   .uml-fit-fitted > svg {
     --uml-readable-width: var(--uml-fit-width) !important;
     width: var(--uml-fit-width) !important;
