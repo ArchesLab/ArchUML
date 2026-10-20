@@ -76,7 +76,6 @@ html.dark-mode .uml-fit-button:focus-visible { outline-color: #8ecfff; }
   .uml-fit-viewport.uml-fit-controls-inline {
     padding-top: var(--uml-fit-padding-top, 0px) !important;
   }
-  .uml-fit-fitted { min-height: var(--uml-fit-height) !important; }
   .uml-fit-fitted > svg {
     --uml-readable-width: var(--uml-fit-width) !important;
     width: var(--uml-fit-width) !important;

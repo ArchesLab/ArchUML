@@ -3423,7 +3423,6 @@
     view.viewport.classList.remove('uml-fit-controls-inline');
     container.classList.remove('uml-fit-fitted');
     container.style.removeProperty('--uml-fit-width');
-    container.style.removeProperty('--uml-fit-height');
     view.previous.scroll.forEach(({ element, left, top }) => {
       if (element === container || element === view.viewport) element.scrollTo({ left, top, behavior: 'instant' });
     });
@@ -3442,16 +3441,13 @@
           /auto|scroll|hidden/.test(getComputedStyle(element).overflowY) &&
           element.scrollHeight > element.clientHeight + 1),
         width: parseFloat(getComputedStyle(svg).width) };
-      // Keep the outer layout unchanged: otherwise a shorter fitted SVG can
-      // clamp an ancestor's scroll position, especially near the page end.
-      container.style.setProperty('--uml-fit-height', getComputedStyle(container).height);
       fitDiagramView(view);
       view.fitted = true;
       container.classList.add('uml-fit-fitted');
       container.scrollLeft = 0;
       container.scrollTop = 0;
-      // Only reset the diagram's own scrolling. The lesson/page stays anchored
-      // at the clicked control, and fit uses the space below that anchor.
+      // Only reset the diagram's own scrolling. Following prose moves up
+      // naturally with the smaller SVG instead of reserving its old height.
       if (view.viewport !== container) view.viewport.scrollTop = 0;
       updateDiagramScrollability(container);
     } else {
@@ -3483,7 +3479,6 @@
     if (view && !view.host.isConnected) {
       container.classList.remove('uml-fit-fitted');
       container.style.removeProperty('--uml-fit-width');
-      container.style.removeProperty('--uml-fit-height');
       releaseDiagramViewport(view);
       diagramViews.delete(container);
       view = null;
