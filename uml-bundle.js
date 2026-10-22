@@ -2771,18 +2771,28 @@
     });
   }
 
-  // Only an attribute change on a diagram or one of its ancestors can reveal
-  // it. Animations and widgets elsewhere must not trigger document-wide scans.
-  function mayRevealDiagram(mutation) {
-    var target = mutation.target;
-    return !!target.matches && (target.matches(DIAGRAM_CONTAINER_SELECTOR) ||
-      !!target.querySelector(DIAGRAM_CONTAINER_SELECTOR));
+  // A batch can contain many style writes to the same large, unrelated SVG.
+  // Find diagrams once, then check ancestry without rescanning those subtrees
+  // for every mutation. Refresh the snapshot each batch for dynamic diagrams.
+  function mutationsMayRevealDiagram(mutations) {
+    var containers = getDiagramContainers();
+    if (!containers.length) return false;
+    var visitedTargets = new Set();
+    for (var m = 0; m < mutations.length; m++) {
+      var target = mutations[m].target;
+      if (visitedTargets.has(target)) continue;
+      visitedTargets.add(target);
+      for (var d = 0; d < containers.length; d++) {
+        if (target.contains(containers[d])) return true;
+      }
+    }
+    return false;
   }
 
   function watchDiagramVisibility() {
     if (visibilityMutationObserver || !document.body) return;
     visibilityMutationObserver = new MutationObserver(function (mutations) {
-      if (!mutations.some(mayRevealDiagram)) return;
+      if (!mutationsMayRevealDiagram(mutations)) return;
       setTimeout(function () {
         queueRefitAll();
         startSettleLoop();
