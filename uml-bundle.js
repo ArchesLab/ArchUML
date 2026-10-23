@@ -35,7 +35,10 @@
   // ends, where a pointer leaves the box corner diagonally.
   const POSITION_STEP = 4;
   const DIAGONAL_REACH = 80;
-  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, [0, 16, 32, 48, 72]]];
+  const SEARCH_DEPTHS = [0, 16, 32, 48, 72];
+  // Dense hierarchies can block every short approach to an interior member.
+  // Try a wider clear route before allowing a pointer to cross model strokes.
+  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, SEARCH_DEPTHS], [240, SEARCH_DEPTHS]];
   // Other callout targets keep a ring of empty space so a wide box cannot
   // park on top of a neighbour's only short approach.
   const OTHER_TARGET_CLEARANCE = 32;
