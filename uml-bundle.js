@@ -2669,8 +2669,13 @@
     };
   }
 
-  function createArchUmlFigure(type, text) {
+  function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
+    const attributeCaption = (explicitCaption || '').trim();
+    if (attributeCaption) {
+      captionInfo.caption = attributeCaption;
+      captionInfo.explicit = true;
+    }
     var normalized = normalizeDiagramType(type);
     var safeType = diagramTypeClass(type);
     var figure = document.createElement('figure');
@@ -5328,7 +5333,7 @@
         if (!getR || !spec) continue;
         var R = getR();
         if (R) {
-          var wrapped = createArchUmlFigure(type, spec);
+          var wrapped = createArchUmlFigure(type, spec, el.getAttribute('data-uml-caption'));
           if (el.parentElement) {
             el.parentElement.replaceChild(wrapped.figure, el);
           }
