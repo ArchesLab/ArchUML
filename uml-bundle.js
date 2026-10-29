@@ -35,7 +35,10 @@
   // ends, where a pointer leaves the box corner diagonally.
   const POSITION_STEP = 4;
   const DIAGONAL_REACH = 80;
-  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, [0, 16, 32, 48, 72]]];
+  const SEARCH_DEPTHS = [0, 16, 32, 48, 72];
+  // Dense hierarchies can block every short approach to an interior member.
+  // Try a wider clear route before allowing a pointer to cross model strokes.
+  const SEARCHES = [[DIAGONAL_REACH, [0]], [120, SEARCH_DEPTHS], [240, SEARCH_DEPTHS]];
   // Other callout targets keep a ring of empty space so a wide box cannot
   // park on top of a neighbour's only short approach.
   const OTHER_TARGET_CLEARANCE = 32;
@@ -2666,8 +2669,13 @@
     };
   }
 
-  function createArchUmlFigure(type, text) {
+  function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
+    const attributeCaption = (explicitCaption || '').trim();
+    if (attributeCaption) {
+      captionInfo.caption = attributeCaption;
+      captionInfo.explicit = true;
+    }
     var normalized = normalizeDiagramType(type);
     var safeType = diagramTypeClass(type);
     var figure = document.createElement('figure');
@@ -2771,18 +2779,28 @@
     });
   }
 
-  // Only an attribute change on a diagram or one of its ancestors can reveal
-  // it. Animations and widgets elsewhere must not trigger document-wide scans.
-  function mayRevealDiagram(mutation) {
-    var target = mutation.target;
-    return !!target.matches && (target.matches(DIAGRAM_CONTAINER_SELECTOR) ||
-      !!target.querySelector(DIAGRAM_CONTAINER_SELECTOR));
+  // A batch can contain many style writes to the same large, unrelated SVG.
+  // Find diagrams once, then check ancestry without rescanning those subtrees
+  // for every mutation. Refresh the snapshot each batch for dynamic diagrams.
+  function mutationsMayRevealDiagram(mutations) {
+    var containers = getDiagramContainers();
+    if (!containers.length) return false;
+    var visitedTargets = new Set();
+    for (var m = 0; m < mutations.length; m++) {
+      var target = mutations[m].target;
+      if (visitedTargets.has(target)) continue;
+      visitedTargets.add(target);
+      for (var d = 0; d < containers.length; d++) {
+        if (target.contains(containers[d])) return true;
+      }
+    }
+    return false;
   }
 
   function watchDiagramVisibility() {
     if (visibilityMutationObserver || !document.body) return;
     visibilityMutationObserver = new MutationObserver(function (mutations) {
-      if (!mutations.some(mayRevealDiagram)) return;
+      if (!mutationsMayRevealDiagram(mutations)) return;
       setTimeout(function () {
         queueRefitAll();
         startSettleLoop();
@@ -5315,7 +5333,7 @@
         if (!getR || !spec) continue;
         var R = getR();
         if (R) {
-          var wrapped = createArchUmlFigure(type, spec);
+          var wrapped = createArchUmlFigure(type, spec, el.getAttribute('data-uml-caption'));
           if (el.parentElement) {
             el.parentElement.replaceChild(wrapped.figure, el);
           }
