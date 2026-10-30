@@ -13917,6 +13917,12 @@
   // space only between connected columns, preserving existing row order.
   function reserveHorizontalStateLabels(result, transitions) {
     if (result.direction !== 'LR') return;
+    var forwardBranches = {};
+    transitions.forEach(function(transition) {
+      var from = result.nodes[transition.from], to = result.nodes[transition.to];
+      if (!from || !to || to.x <= from.x) return;
+      forwardBranches[transition.from] = (forwardBranches[transition.from] || 0) + 1;
+    });
     var ids = Object.keys(result.nodes).sort(function(a, b) {
       return result.nodes[a].x - result.nodes[b].x;
     });
@@ -13941,9 +13947,14 @@
       var left = from.x < to.x ? from : to;
       var right = from.x < to.x ? to : from;
       var labelWidth = UMLShared.labelDirectionTextWidth(transition.label, transition.labelDirection, CFG.fontSize);
+      // Fan-out stems are too close together to distinguish their labels.
+      // Each target's separate half of the Z-route needs the full label width;
+      // budgeting only the whole gap sends collision fallback to a sibling.
+      var labelSpace = labelWidth + CFG.labelBgPad * 2 + 12;
+      if (to.x > from.x && forwardBranches[transition.from] > 1) labelSpace *= 2;
       columns[Math.min(fromColumn, toColumn)].demands.push({
         target: Math.max(fromColumn, toColumn),
-        extra: labelWidth + CFG.labelBgPad * 2 + 12 - (right.x - left.x - left.width)
+        extra: labelSpace - (right.x - left.x - left.width)
       });
     }
     for (var ci = 0; ci < columns.length; ci++) {
