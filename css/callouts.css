@@ -19,17 +19,20 @@
   fill: var(--uml-callout-text);
 }
 
-html.dark-mode svg.uml-with-callouts {
-  filter: none;
-}
+/* Print previews stay light even when the surrounding site preference is dark. */
+@media screen {
+  html.dark-mode:not(.print-light-mode) svg.uml-with-callouts {
+    filter: none;
+  }
 
-html.dark-mode .uml-with-callouts .uml-model-layer {
-  filter: invert(1) hue-rotate(180deg);
-}
+  html.dark-mode:not(.print-light-mode) .uml-with-callouts .uml-model-layer {
+    filter: invert(1) hue-rotate(180deg);
+  }
 
-html.dark-mode .uml-callouts {
-  --uml-callout-fill: #ffd100;
-  --uml-callout-text: #003b5c;
+  html.dark-mode:not(.print-light-mode) .uml-callouts {
+    --uml-callout-fill: #ffd100;
+    --uml-callout-text: #003b5c;
+  }
 }
 
 @media print {
