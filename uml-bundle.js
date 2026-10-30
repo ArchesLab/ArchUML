@@ -25141,6 +25141,7 @@
     var edges = [];
     var notes = [];
     var direction = 'TB';
+    var directionLocked = false;
     var layoutPreference = null;
     var shadowEnabled = null;
 
@@ -25151,7 +25152,11 @@
 
       var layoutDirective = UMLShared.parseLayoutDirective(line);
       if (layoutDirective) {
-        if (layoutDirective.direction) direction = layoutDirective.direction;
+        // An authored direction is kept, as in class diagrams; the container's shape only picks one when none is given.
+        if (layoutDirective.direction) {
+          direction = layoutDirective.direction;
+          directionLocked = true;
+        }
         if (layoutDirective.layoutPreference !== null && layoutDirective.layoutPreference !== undefined) {
           layoutPreference = layoutDirective.layoutPreference;
         }
@@ -25239,6 +25244,7 @@
       edges: edges,
       notes: notes,
       direction: direction,
+      directionLocked: directionLocked,
       layoutPreference: layoutPreference,
       shadowEnabled: shadowEnabled
     };
@@ -25305,6 +25311,7 @@
       gapX: isTight ? 0 : CFG.gapX,
       gapY: isTight ? 0 : CFG.gapY,
       direction: parsed.direction || 'TB',
+      directionLocked: !!parsed.directionLocked,
       layoutPreference: isTight ? null : (parsed.layoutPreference || null),
       containerAspect: parsed._containerAspect,
       labelFontSize: CFG.fontSize,
