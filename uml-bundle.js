@@ -13690,7 +13690,7 @@
     function ensureState(name, parent, explicit) {
       if (!states[name]) {
         states[name] = { name: name, type: name === '[*]' ? 'pseudo' : 'state',
-          entryAction: '', exitAction: '', doActivity: '', parent: null };
+          entryAction: '', exitAction: '', doActivity: '', internalTransitions: [], parent: null };
       }
       // Explicit declarations own containment even when referenced earlier.
       // An undeclared reference can acquire its first containing region.
@@ -13743,6 +13743,20 @@
         states[parent][actionProperties[blockAction[1].toLowerCase()]] = blockAction[2].trim();
         continue;
       }
+      // An internal transition, `trigger [guard] / effect`, is listed inside its
+      // state and never exits it. Only rows with an effect slash qualify, so a
+      // plain `State : description` row keeps its existing meaning.
+      if (!/-->/.test(line)) {
+        var namedInternal = line.match(/^([^\s\[:][^\s:]*)\s*:\s*([^\/]*\/.*)$/);
+        if (namedInternal) {
+          ensureState(namedInternal[1], parent).internalTransitions.push(namedInternal[2].trim());
+          continue;
+        }
+        if (parent !== null && /^[^\s:{}][^:{}]*\/.*$/.test(line) && !/^(?:state|note|callout)\b/i.test(line)) {
+          states[parent].internalTransitions.push(line);
+          continue;
+        }
+      }
 
       var stateHl = UMLShared.parseHighlightColor(line);
       // A texture keyword may itself be a state identifier.
@@ -13750,7 +13764,13 @@
       const declarationText = hasStateHighlight ? stateHl.stripped : line;
       const declaration = declarationText.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
       if (declaration) {
-        const state = ensureState(declaration[1], parent, true);
+        // A top-level highlight of a state already nested in a composite (such
+        // as an appended emphasis line) restyles it where it is; it must not
+        // move the state out of its composite.
+        const existing = states[declaration[1]];
+        const restyleOnly = Boolean(existing && existing.parent) && parent === null &&
+          Boolean(stateHl.highlight || stateHl.texture) && !declaration[2];
+        const state = restyleOnly ? states[declaration[1]] : ensureState(declaration[1], parent, true);
         if (/<<choice>>/i.test(declarationText)) state.type = 'choice';
         if (hasStateHighlight && stateHl.highlight) state.highlight = stateHl.highlight;
         if (hasStateHighlight && stateHl.texture) state.texture = stateHl.texture;
@@ -13857,8 +13877,9 @@
     if (s.type === 'choice') return { width: 30, height: 30 };
 
     var nameW = UMLShared.textWidth(s.name, true, CFG.fontSizeBold);
-    var hasActions = s.entryAction || s.exitAction || s.doActivity;
-    var actionLines = 0;
+    var internals = s.internalTransitions || [];
+    var hasActions = s.entryAction || s.exitAction || s.doActivity || internals.length > 0;
+    var actionLines = internals.length;
     if (s.entryAction) actionLines++;
     if (s.exitAction) actionLines++;
     if (s.doActivity) actionLines++;
@@ -13867,6 +13888,9 @@
     if (s.entryAction) actionMaxW = Math.max(actionMaxW, UMLShared.textWidth('entry / ' + s.entryAction, false, CFG.fontSizeAction));
     if (s.exitAction) actionMaxW = Math.max(actionMaxW, UMLShared.textWidth('exit / ' + s.exitAction, false, CFG.fontSizeAction));
     if (s.doActivity) actionMaxW = Math.max(actionMaxW, UMLShared.textWidth('do / ' + s.doActivity, false, CFG.fontSizeAction));
+    internals.forEach(function(row) {
+      actionMaxW = Math.max(actionMaxW, UMLShared.textWidth(row, false, CFG.fontSizeAction));
+    });
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
     var height = CFG.padY * 2 + CFG.lineHeight;
@@ -14246,6 +14270,11 @@
         UMLShared.escapeXml(action[1]) + '</text>');
       actionY += CFG.actionLineHeight;
     });
+    (entry.state.internalTransitions || []).forEach(function(row) {
+      svg.push('<text' + attrs + ' x="' + (entry.x + CFG.padX / 2) + '" y="' + actionY +
+        '" font-size="' + CFG.fontSizeAction + '" fill="' + colors.text + '">' + UMLShared.escapeXml(row) + '</text>');
+      actionY += CFG.actionLineHeight;
+    });
   }
 
   function stateTransitionsInScope(parsed, parent) {
@@ -14585,6 +14614,7 @@
     var placedRouteSegments = [];
     var curveBounds = [];
     var stateRouteInfos = [];
+    var selfLoops = [];
     var stateObstacles = [];
     for (var sen in entries) {
       var se0 = entries[sen];
@@ -14603,89 +14633,9 @@
       // Self-transition — loop lives on the secondary-far face so it
       // never obstructs the primary flow of the diagram.
       if (tr.from === tr.to) {
-        var selfRouteId = 'edge-' + tr.routeIndex;
-        var selfRouteAttrs = stateRouteAttrs(selfRouteId, tr.from, tr.to);
-        var lw = CFG.selfLoopW, lh = CFG.selfLoopH;
-        var sPathStart, sPathCtrl1, sPathCtrl2, sPathEnd, sArrowTip, sArrowDir;
-        var loopLabelX, loopLabelY, loopLabelAnchor;
-        if (isTB) {
-          // Loop on the right face — vertical oval extending right.
-          var sx = fromE.x + fromE.box.width;
-          var sy = fromE.y + fromE.box.height / 2 - 10;
-          sPathStart = { x: sx, y: sy };
-          sPathCtrl1 = { x: sx + lw, y: sy - lh };
-          sPathCtrl2 = { x: sx + lw, y: sy + lh + 20 };
-          sPathEnd   = { x: sx, y: sy + 20 };
-          sArrowTip  = { x: sx, y: sy + 20, dx: -1, dy: 0 };
-          loopLabelX = sx + lw + 4;
-          loopLabelY = sy + 10;
-          loopLabelAnchor = 'start';
-        } else {
-          // Loop on the bottom face — horizontal oval extending down.
-          var sxh = fromE.x + fromE.box.width / 2 - 10;
-          var syh = fromE.y + fromE.box.height;
-          sPathStart = { x: sxh, y: syh };
-          sPathCtrl1 = { x: sxh - lh, y: syh + lw };
-          sPathCtrl2 = { x: sxh + lh + 20, y: syh + lw };
-          sPathEnd   = { x: sxh + 20, y: syh };
-          sArrowTip  = { x: sxh + 20, y: syh, dx: 0, dy: -1 };
-          loopLabelX = sxh + 10;
-          loopLabelY = syh + lw + CFG.fontSize + 2;
-          loopLabelAnchor = 'middle';
-        }
-        curveBounds.push({
-          left: Math.min(sPathStart.x, sPathCtrl1.x, sPathCtrl2.x, sPathEnd.x),
-          right: Math.max(sPathStart.x, sPathCtrl1.x, sPathCtrl2.x, sPathEnd.x),
-          top: Math.min(sPathStart.y, sPathCtrl1.y, sPathCtrl2.y, sPathEnd.y),
-          bottom: Math.max(sPathStart.y, sPathCtrl1.y, sPathCtrl2.y, sPathEnd.y)
-        });
-        svg.push('<path' + selfRouteAttrs + ' d="M ' + sPathStart.x + ' ' + sPathStart.y + ' C ' +
-          sPathCtrl1.x + ' ' + sPathCtrl1.y + ' ' +
-          sPathCtrl2.x + ' ' + sPathCtrl2.y + ' ' +
-          sPathEnd.x + ' ' + sPathEnd.y +
-          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
-        UMLShared.drawArrow(svg, sArrowTip.x, sArrowTip.y, sArrowTip.dx, sArrowTip.dy,
-          colors.line, null, null, stateRouteDecorationAttrs(selfRouteId, 'edge-arrow'));
-        if (tr.label || tr.labelDirection) {
-          var labelW = UMLShared.labelDirectionTextWidth(tr.label, tr.labelDirection, CFG.fontSize);
-          var loopTextW = UMLShared.textWidth(tr.label || '', false, CFG.fontSize);
-          if (tr.label) {
-            labelSvg.push('<text' + stateRouteDecorationAttrs(selfRouteId, 'edge-label') +
-              ' x="' + loopLabelX + '" y="' + loopLabelY +
-              '" text-anchor="' + loopLabelAnchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
-          }
-          var lblLeft = loopLabelAnchor === 'middle' ? loopLabelX - labelW / 2 :
-                        (loopLabelAnchor === 'end' ? loopLabelX - labelW : loopLabelX);
-          var loopTextLeft = loopLabelAnchor === 'middle' ? loopLabelX - loopTextW / 2 :
-                             (loopLabelAnchor === 'end' ? loopLabelX - loopTextW : loopLabelX);
-          var loopTextRect = {
-            left: loopTextLeft,
-            right: loopTextLeft + loopTextW,
-            top: loopLabelY - CFG.fontSize - 2,
-            bottom: loopLabelY + 4
-          };
-          var loopDirectionRect = UMLShared.pushLabelDirectionTriangle(
-            labelSvg,
-            tr.label,
-            tr.labelDirection,
-            { x: loopLabelX, y: loopLabelY, anchor: loopLabelAnchor },
-            null,
-            colors,
-            {
-              fontSize: CFG.fontSize,
-              textRect: loopTextRect,
-              direction: isTB ? 'down' : 'right',
-              attrs: stateRouteDecorationAttrs(selfRouteId, 'edge-direction')
-            }
-          );
-          placedLabels.push(UMLShared.unionRects({
-            left: lblLeft,
-            right: lblLeft + labelW,
-            top: loopLabelY - CFG.fontSize - 2,
-            bottom: loopLabelY + 4
-          }, loopDirectionRect));
-        }
+        // Drawn after every other route, on the first face where neither the
+        // loop nor its label meets another route (see drawSelfLoops).
+        selfLoops.push({ tr: tr, entry: fromE });
         continue;
       }
 
@@ -15022,6 +14972,109 @@
       return out;
     }
 
+    function loopLabelRect(spot, width) {
+      var left = spot.anchor === 'middle' ? spot.x - width / 2 : (spot.anchor === 'end' ? spot.x - width : spot.x);
+      return { left: left, right: left + width, top: spot.y - CFG.fontSize - 2, bottom: spot.y + 4 };
+    }
+
+    // A self-transition's oval on one face of its state, with its label spot.
+    // The first face of each direction is the established default.
+    function selfLoopShape(entry, face) {
+      var lw = CFG.selfLoopW, lh = CFG.selfLoopH;
+      if (face === 'right' || face === 'left') {
+        var sign = face === 'right' ? 1 : -1;
+        var sx = face === 'right' ? entry.x + entry.box.width : entry.x;
+        var sy = entry.y + entry.box.height / 2 - 10;
+        return {
+          start: { x: sx, y: sy }, ctrl1: { x: sx + sign * lw, y: sy - lh },
+          ctrl2: { x: sx + sign * lw, y: sy + lh + 20 }, end: { x: sx, y: sy + 20 },
+          tip: { x: sx, y: sy + 20, dx: -sign, dy: 0 },
+          label: { x: sx + sign * (lw + 4), y: sy + 10, anchor: face === 'right' ? 'start' : 'end' }
+        };
+      }
+      var down = face === 'bottom' ? 1 : -1;
+      var sxh = entry.x + entry.box.width / 2 - 10;
+      var syh = face === 'bottom' ? entry.y + entry.box.height : entry.y;
+      return {
+        start: { x: sxh, y: syh }, ctrl1: { x: sxh - lh, y: syh + down * lw },
+        ctrl2: { x: sxh + lh + 20, y: syh + down * lw }, end: { x: sxh + 20, y: syh },
+        tip: { x: sxh + 20, y: syh, dx: 0, dy: -down },
+        label: { x: sxh + 10, y: face === 'bottom' ? syh + lw + CFG.fontSize + 2 : syh - lw - 6, anchor: 'middle' }
+      };
+    }
+
+    function selfLoopBounds(shape) {
+      var xs = [shape.start.x, shape.ctrl1.x, shape.ctrl2.x, shape.end.x];
+      var ys = [shape.start.y, shape.ctrl1.y, shape.ctrl2.y, shape.end.y];
+      return { left: Math.min.apply(null, xs), right: Math.max.apply(null, xs),
+        top: Math.min.apply(null, ys), bottom: Math.max.apply(null, ys) };
+    }
+
+    // True when no other route, state, loop, or label occupies the area.
+    function selfLoopAreaIsClear(rect, ownEntry) {
+      var pad = 6;
+      for (var lsi = 0; lsi < placedRouteSegments.length; lsi++) {
+        var segment = placedRouteSegments[lsi];
+        var hit = segment.isH
+          ? segment.y >= rect.top - pad && segment.y <= rect.bottom + pad && segment.x2 >= rect.left - pad && segment.x1 <= rect.right + pad
+          : segment.x >= rect.left - pad && segment.x <= rect.right + pad && segment.y2 >= rect.top - pad && segment.y1 <= rect.bottom + pad;
+        if (hit) return false;
+      }
+      for (var en in entries) {
+        var other = entries[en];
+        if (other === ownEntry || other.state.isComposite) continue;
+        if (UMLShared.rectsOverlap(rect, { left: other.x, top: other.y, right: other.x + other.box.width, bottom: other.y + other.box.height })) return false;
+      }
+      return !curveBounds.concat(placedLabels).some(function(occupied) { return UMLShared.rectsOverlap(rect, occupied); });
+    }
+
+    function drawSelfLoops() {
+      for (var sli = 0; sli < selfLoops.length; sli++) {
+        var tr = selfLoops[sli].tr, entry = selfLoops[sli].entry;
+        var routeId = 'edge-' + tr.routeIndex;
+        var labelled = Boolean(tr.label || tr.labelDirection);
+        var labelW = UMLShared.labelDirectionTextWidth(tr.label, tr.labelDirection, CFG.fontSize);
+        var faces = isTB ? ['right', 'left'] : ['bottom', 'top'];
+        var shape = null;
+        for (var fi = 0; fi < faces.length && !shape; fi++) {
+          var candidate = selfLoopShape(entry, faces[fi]);
+          if (selfLoopAreaIsClear(selfLoopBounds(candidate), entry) &&
+              (!labelled || selfLoopAreaIsClear(loopLabelRect(candidate.label, labelW), entry))) shape = candidate;
+        }
+        shape = shape || selfLoopShape(entry, faces[0]);
+        curveBounds.push(selfLoopBounds(shape));
+        routeSvg.push('<path' + stateRouteAttrs(routeId, tr.from, tr.to) + ' d="M ' + shape.start.x + ' ' + shape.start.y + ' C ' +
+          shape.ctrl1.x + ' ' + shape.ctrl1.y + ' ' + shape.ctrl2.x + ' ' + shape.ctrl2.y + ' ' +
+          shape.end.x + ' ' + shape.end.y +
+          '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        UMLShared.drawArrow(routeSvg, shape.tip.x, shape.tip.y, shape.tip.dx, shape.tip.dy,
+          colors.line, null, null, stateRouteDecorationAttrs(routeId, 'edge-arrow'));
+        if (!labelled) continue;
+        var spot = shape.label;
+        if (tr.label) {
+          labelSvg.push('<text' + stateRouteDecorationAttrs(routeId, 'edge-label') +
+            ' x="' + spot.x + '" y="' + spot.y +
+            '" text-anchor="' + spot.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+            '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke">' + UMLShared.escapeXml(tr.label) + '</text>');
+        }
+        var loopDirectionRect = UMLShared.pushLabelDirectionTriangle(
+          labelSvg,
+          tr.label,
+          tr.labelDirection,
+          spot,
+          null,
+          colors,
+          {
+            fontSize: CFG.fontSize,
+            textRect: loopLabelRect(spot, UMLShared.textWidth(tr.label || '', false, CFG.fontSize)),
+            direction: isTB ? 'down' : 'right',
+            attrs: stateRouteDecorationAttrs(routeId, 'edge-direction')
+          }
+        );
+        placedLabels.push(UMLShared.unionRects(loopLabelRect(spot, labelW), loopDirectionRect));
+      }
+    }
+
     function placeStateTransitionLabels() {
       var ordered = stateRouteInfos.slice();
       ordered.sort(function(a, b) {
@@ -15125,6 +15178,7 @@
       }
     }
 
+    drawSelfLoops();
     placeStateTransitionLabels();
     return {
       routes: routeSvg,

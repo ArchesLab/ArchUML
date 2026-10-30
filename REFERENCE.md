@@ -1139,15 +1139,17 @@ state Name <<choice>>       ← choice pseudostate (diamond)
 
 StateA --> StateB : event [guard] / action
 StateA --> StateB : event
-[*] --> InitialState : trigger
+[*] --> InitialState        ← initial transition: no event and no guard (an effect such as `: / setUp()` is allowed)
 FinalState --> [*]
 ```
+
+UML gives the initial pseudostate's transition no trigger or guard: it is taken as soon as the region starts. Put an event on the transition out of the first real state instead.
 
 **Example:**
 
 ```
 @startuml
-[*] --> Created : Order Placed
+[*] --> Created
 
 Created --> Paid : payment_received
 Paid --> Shipped : ship_order
@@ -1163,7 +1165,7 @@ Refunded --> [*]
 
 <pre><code class="language-uml-state">
 @startuml
-[*] --> Created : Order Placed
+[*] --> Created
 
 Created --> Paid : payment_received
 Paid --> Shipped : ship_order
@@ -1190,6 +1192,18 @@ do / activity_text        ← ongoing activity while in state
 ```
 
 The equivalent named-row form attaches an action to a state without opening its block: `Connecting : entry / showSpinner()`. Use `exit` or `do` in the same form for exit actions or ongoing activities. Inside a composite state block, a named row can attach an activity to one of its child states.
+
+An **internal transition** handles an event without leaving its state, so no exit or entry action runs. List it in the same compartment, in either form, as `trigger [guard] / effect`:
+
+```
+state Waiting {
+  entry / notifyCustomer()
+  enterPin(code) [pin wrong] / beep()     ← internal transition
+}
+Waiting : locate / shareLocation()       ← named-row form
+```
+
+A row needs its effect slash to count as an internal transition; a row such as `Red : write a failing test` keeps its existing meaning and is not drawn. Draw a self-transition (`Waiting --> Waiting : extendWait`) when the state should be exited and entered again. A self-transition's loop sits on the first face of its state where neither the loop nor its label meets another transition.
 
 **Example:**
 
@@ -1296,7 +1310,7 @@ Name --> StateC : [invalid]
 
 ```
 @startuml
-[*] --> Validating : submit
+[*] --> Validating
 
 state Check <<choice>>
 Validating --> Check : validate()
@@ -1309,7 +1323,7 @@ Rejected --> [*]
 
 <pre><code class="language-uml-state">
 @startuml
-[*] --> Validating : submit
+[*] --> Validating
 
 state Check <<choice>>
 Validating --> Check : validate()
