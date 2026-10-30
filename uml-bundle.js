@@ -13327,8 +13327,14 @@
         var cIdx = findPIdx(m.target);
         var cpx = partX[cIdx] - partWidths[cIdx] / 2;
         var cpart = participants[cIdx];
+        // A created head keeps its participant's highlight and texture, like a head drawn at the top.
+        var cFills = UMLShared.highlightFills(colors, cpart.highlight, cpart.texture);
         svg.push('<rect filter="url(#uml-node-shadow)" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
-          '" fill="' + colors.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+          '" fill="' + cFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        if (cFills.textureUrl) {
+          svg.push('<rect x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
+            '" fill="' + cFills.textureUrl + '" stroke="none"/>');
+        }
         pushSequenceRectObstacle(cpx, my, partWidths[cIdx], partH);
         var cDisp = participantDisplay(cpart);
         var cTextY = my + partH / 2 + CFG.fontSize * 0.35;
