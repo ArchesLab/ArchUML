@@ -8019,22 +8019,30 @@
 
   /**
    * Measure a class box.
-   * Returns { width, height, nameH, stereotypeH, attrH, methH }
+   * Returns { width, height, nameH, stereotypeH, propertyH, attrH, methH }
    */
   function measureBox(cls) {
-    var hasStereotype = cls.type === 'abstract' || cls.type === 'interface' || cls.type === 'enum' || cls.stereotype;
+    var hasStereotype = cls.type === 'interface' || cls.type === 'enum' || cls.stereotype;
     var stereotypeText = '';
     if (cls.stereotype) stereotypeText = '\u00AB' + cls.stereotype + '\u00BB';
-    else if (cls.type === 'abstract') stereotypeText = '\u00ABabstract\u00BB';
     else if (cls.type === 'interface') stereotypeText = '\u00ABinterface\u00BB';
     else if (cls.type === 'enum') stereotypeText = '\u00ABenumeration\u00BB';
+    // UML 2.5.1 (9.2.4) shows an abstract classifier by its italic name and,
+    // alternatively or in addition, the property {abstract} after or below the
+    // name; it defines no \u00ABabstract\u00BB keyword. A class with its own stereotype
+    // keeps that keyword and its italic name.
+    var propertyText = cls.type === 'abstract' && !cls.stereotype ? '{abstract}' : '';
 
     var stereotypeH = hasStereotype ? CFG.lineHeight : 0;
-    var nameH = CFG.padY * 2 + CFG.lineHeight + stereotypeH;
+    var propertyH = propertyText ? CFG.lineHeight : 0;
+    var nameH = CFG.padY * 2 + CFG.lineHeight + stereotypeH + propertyH;
 
     var nameW = UMLShared.textWidth(cls.name, true, CFG.fontSizeBold);
     if (hasStereotype) {
       nameW = Math.max(nameW, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype));
+    }
+    if (propertyText) {
+      nameW = Math.max(nameW, UMLShared.textWidth(propertyText, false, CFG.fontSizeStereotype));
     }
 
     var attrMaxW = 0;
@@ -8059,9 +8067,11 @@
       height: height,
       nameH: nameH,
       stereotypeH: stereotypeH,
+      propertyH: propertyH,
       attrH: attrH,
       methH: methH,
       stereotypeText: stereotypeText,
+      propertyText: propertyText,
     };
   }
 
@@ -8194,9 +8204,11 @@
       height: height,
       nameH: nameH,
       stereotypeH: box.stereotypeH,
+      propertyH: box.propertyH,
       attrH: box.attrH,
       methH: box.methH,
       stereotypeText: box.stereotypeText,
+      propertyText: box.propertyText,
     };
   }
 
@@ -10840,7 +10852,7 @@
 
       // Stereotype text
       var textCx = x + box.width / 2;
-      var headerContentH = box.stereotypeH + CFG.lineHeight;
+      var headerContentH = box.stereotypeH + CFG.lineHeight + (box.propertyH || 0);
       var headerTopPad = Math.max(CFG.padY, (box.nameH - headerContentH) / 2);
       if (box.stereotypeText) {
         var stereoY = y + headerTopPad + CFG.lineHeight * 0.75;
@@ -10856,6 +10868,12 @@
         'font-weight="bold" font-size="' + CFG.fontSizeBold + '" ' +
         (isAbstract ? 'font-style="italic" ' : '') +
         'fill="' + colors.text + '">' + UMLShared.escapeXml(cls.name) + '</text>');
+      // Property string below the name, such as {abstract}
+      if (box.propertyText) {
+        svg.push('<text x="' + textCx + '" y="' + (nameY + CFG.lineHeight) + '" text-anchor="middle" ' +
+          'font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '">' +
+          UMLShared.escapeXml(box.propertyText) + '</text>');
+      }
 
       // Attributes
       var attrBaseY = y + box.nameH + CFG.padY;

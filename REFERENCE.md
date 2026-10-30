@@ -290,7 +290,7 @@ Broken --> [*]
 
 ```
 class ClassName
-abstract class AbstractName
+abstract class AbstractName      ← italic name with {abstract} below it (UML 2.5.1, 9.2.4)
 interface InterfaceName
 enum EnumName
 class Name <<StereotypeName>>
