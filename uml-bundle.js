@@ -12746,6 +12746,10 @@
     var lastEventY = curY; // tracks the latest occurrence-like vertical position
     var prevLayoutType = null;
     var selfMessageH = 20;
+    // The next row starts activationEndGap below a bar's end; a self-call's nested bar
+    // runs at least minSelfActivationH below the call's return.
+    var activationEndGap = Math.max(3, Math.round(messageGapY * 0.12));
+    var minSelfActivationH = Math.min(8, Math.max(6, Math.round(messageGapY * 0.18)));
 
     function previousMessageBefore(index) {
       for (var pmi = index - 1; pmi >= 0; pmi--) {
@@ -12775,6 +12779,11 @@
           // message label needs clearance below the entire header, including
           // taller actor headers and compact-mode message spacing.
           curY = Math.max(curY, createYs[msg.to] + partH + CFG.fontSize + 10);
+        }
+        if (msg.from === msg.to) {
+          // Compact rows are shorter than a self-call's loop. Start the next row below its
+          // return, as after a nested bar, so the two arrows and their labels stay apart.
+          curY = Math.max(curY, messageReceiveY(msg, lastMsgY) + minSelfActivationH + activationEndGap);
         }
         // Track which participants are involved in ALL open fragments (not just innermost)
         if (fragmentStack.length > 0) {
@@ -12850,7 +12859,6 @@
         lastEventY = activateY;
         msgYs.push(activateY); // bar starts at the preceding receive occurrence
       } else if (msg.type === 'deactivate') {
-        var activationEndGap = Math.max(3, Math.round(messageGapY * 0.12));
         var prevMsg = prevLayoutType === 'message' ? messages[mi - 1] : previousMessageBefore(mi);
         var prevOccurrenceY = messageReceiveY(prevMsg, lastMsgY);
         var nextIsFragmentStart = messages[mi + 1] && messages[mi + 1].type === 'fragment_start';
@@ -12866,7 +12874,6 @@
           deactivateY = Math.max(lastEventY, curY - activationEndGap);
         }
         if (prevMsg && prevMsg.msgType !== 'response' && prevMsg.from === prevMsg.to && prevMsg.to === msg.target) {
-          var minSelfActivationH = Math.min(8, Math.max(6, Math.round(messageGapY * 0.18)));
           deactivateY = Math.max(deactivateY, prevOccurrenceY + minSelfActivationH);
         }
         curY = Math.max(curY, deactivateY + (nextIsFragmentStart ? 20 : activationEndGap));
