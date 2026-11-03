@@ -2779,20 +2779,18 @@
     });
   }
 
-  // A batch can contain many style writes to the same large, unrelated SVG.
-  // Find diagrams once, then check ancestry without rescanning those subtrees
-  // for every mutation. Refresh the snapshot each batch for dynamic diagrams.
+  // Only an attribute change on a diagram or one of its ancestors can reveal
+  // it. A batch can contain many style writes to the same large, unrelated
+  // SVG, so scan each changed element's subtree once per batch. Never scan the
+  // whole document per batch: large pages deliver thousands of batches.
   function mutationsMayRevealDiagram(mutations) {
-    var containers = getDiagramContainers();
-    if (!containers.length) return false;
     var visitedTargets = new Set();
     for (var m = 0; m < mutations.length; m++) {
       var target = mutations[m].target;
       if (visitedTargets.has(target)) continue;
       visitedTargets.add(target);
-      for (var d = 0; d < containers.length; d++) {
-        if (target.contains(containers[d])) return true;
-      }
+      if (target.matches && (target.matches(DIAGRAM_CONTAINER_SELECTOR) ||
+          target.querySelector(DIAGRAM_CONTAINER_SELECTOR))) return true;
     }
     return false;
   }
