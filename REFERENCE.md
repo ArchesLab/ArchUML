@@ -787,6 +787,63 @@ deactivate browser
 
 ---
 
+### Organization Boxes
+
+Group lifelines by the organization, system, or trust zone that owns them. The syntax follows PlantUML:
+
+```
+box "Name" <<stereotype>> #color    ← opens a box; name, stereotype, and color are optional
+participant ...                     ← participants and actors declared here belong to the box
+end box                             ← closes the box (endbox also works)
+```
+
+Each box becomes a lane that runs the full height of the diagram, with its name in a header at the top. UML 2.5.1 defines no grouping of lifelines within an interaction, so ArchUML borrows the ActivityPartition (swimlane) notation of clause 15.6.4: parallel lines with the partition's name in a box at one end. The specification notes that partitions often correspond to organizational units, and it labels a partition outside the modeled organization with the keyword «external» (write `<<external>>`). Neighboring boxes share one dividing line, so a message that crosses a line passes from one owner to another.
+
+- A box keeps its participants together in declaration order. A participant belongs to the first box that declares it, even when an earlier message created it.
+- Boxes do not nest: a `box` line closes any open box.
+- Without a color, lanes alternate two light tints. With `#color`, the lane takes the color and its header a darker shade; choose a light color so that text keeps its contrast.
+- Participants outside every box, such as an initiating actor, stay outside the lanes.
+
+**Example:**
+
+```
+@startuml
+actor user: Customer
+box "Shop"
+participant web as : WebApp
+participant db as : Database
+end box
+box "Payment provider" <<external>> #fdf3e1
+participant pay as : PaymentGateway
+end box
+user -> web: checkout()
+web -> pay: charge(card)
+pay --> web: approved
+web -> db: save(order)
+web --> user: receipt
+@enduml
+```
+
+<pre><code class="language-uml-sequence">
+@startuml
+actor user: Customer
+box "Shop"
+participant web as : WebApp
+participant db as : Database
+end box
+box "Payment provider" <<external>> #fdf3e1
+participant pay as : PaymentGateway
+end box
+user -> web: checkout()
+web -> pay: charge(card)
+pay --> web: approved
+web -> db: save(order)
+web --> user: receipt
+@enduml
+</code></pre>
+
+---
+
 ### Message Arrow Types
 
 ```

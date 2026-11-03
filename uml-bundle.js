@@ -12240,6 +12240,12 @@
  *   destroy Name    Destroy (X mark)
  *
  * Combined fragments: alt/else/end, loop/end, opt/end
+ *
+ * Organization boxes (PlantUML syntax) group the participants declared
+ * between them into one labeled lane:
+ *   box "Hugging Face" <<external>> #e8f0fe
+ *   participant hub as : Hub
+ *   end box
  */
 (function () {
   'use strict';
@@ -12270,16 +12276,27 @@
     destroySize: 12,
     lostFoundRadius: 6,
     lostFoundGap: 60,
+    boxPadX: 14,          // lane margin beside its outermost lifeline heads
+    boxTextPadX: 12,      // lane-header margin beside its name
+    boxHeaderPadY: 6,     // lane-header margin above and below its name
+    boxHeadGap: 12,       // space between the lane headers and the lifeline heads
+    boxClearance: 10,     // space between a lane edge and an unboxed head
   };
 
   // ─── Parser ───────────────────────────────────────────────────────
 
+  // `box ["Title" | Title] [<<stereotype>>]` after any `#color` is stripped.
+  // An unquoted title excludes arrow characters, so `box -> b` stays a message.
+  var BOX_START_RE = /^box(?:\s+(?:"([^"]*)"|([^"<>#:\s][^"<>#:]*?)))?(?:\s*<<\s*(.+?)\s*>>)?\s*$/i;
+
   function parse(text) {
     var lines = text.split('\n');
-    var participants = [];      // { id, label }
+    var participants = [];      // { id, label, box? }
     var participantMap = {};    // id -> index
     var messages = [];          // Each item: message, fragment start/end, create, destroy
     var autoParticipants = {};  // Track implicitly declared participants
+    var boxes = [];             // { title, stereotype, highlight, texture }
+    var openBox = null;         // index into boxes while a box is open
     var shadowEnabled = true;
     var layoutPreference = null;
 
@@ -12304,10 +12321,28 @@
       var seqLine = line;
       var seqHighlight = null;
       var seqTexture = null;
-      if (/^(?:participant|actor)\s+\S/i.test(seqHl.stripped) || seqHl.highlight) {
+      if (/^(?:participant|actor)\s+\S/i.test(seqHl.stripped) || BOX_START_RE.test(seqHl.stripped) || seqHl.highlight) {
         seqLine = seqHl.stripped;
         seqHighlight = seqHl.highlight;
         seqTexture = seqHl.texture;
+      }
+
+      // Organization box: participants declared until `end box` share a lane.
+      // Boxes do not nest; a new `box` closes the open one.
+      var boxMatch = seqLine.match(BOX_START_RE);
+      if (boxMatch) {
+        openBox = boxes.length;
+        boxes.push({
+          title: (boxMatch[1] !== undefined ? boxMatch[1] : boxMatch[2] || '').trim(),
+          stereotype: boxMatch[3] || null,
+          highlight: seqHighlight,
+          texture: seqTexture,
+        });
+        continue;
+      }
+      if (/^end\s*box$/i.test(line)) {
+        openBox = null;
+        continue;
       }
 
       // Participant declaration
@@ -12342,6 +12377,7 @@
           if (seqHighlight) participants[participantMap[id]].highlight = seqHighlight;
           if (seqTexture) participants[participantMap[id]].texture = seqTexture;
         }
+        joinOpenBox(participants[participantMap[id]], openBox);
         continue;
       }
 
@@ -12371,6 +12407,7 @@
           if (seqHighlight) participants[participantMap[actorId]].highlight = seqHighlight;
           if (seqTexture) participants[participantMap[actorId]].texture = seqTexture;
         }
+        joinOpenBox(participants[participantMap[actorId]], openBox);
         continue;
       }
 
@@ -12509,7 +12546,37 @@
       }
     }
 
-    return { participants: participants, messages: messages, shadowEnabled: shadowEnabled, layoutPreference: layoutPreference };
+    return {
+      participants: groupBoxMembers(participants),
+      messages: messages,
+      boxes: boxes,
+      shadowEnabled: shadowEnabled,
+      layoutPreference: layoutPreference,
+    };
+  }
+
+  // A participant belongs to the first box that declares it.
+  function joinOpenBox(part, openBox) {
+    if (openBox !== null && part.box === undefined) part.box = openBox;
+  }
+
+  // A box draws one lane, so its members must be neighbors. Keep declaration
+  // order, but move each box's later members up beside its first member.
+  function groupBoxMembers(participants) {
+    var ordered = [];
+    var placed = [];
+    for (var i = 0; i < participants.length; i++) {
+      if (placed[i]) continue;
+      var box = participants[i].box;
+      ordered.push(participants[i]);
+      if (box === undefined) continue;
+      for (var j = i + 1; j < participants.length; j++) {
+        if (participants[j].box !== box) continue;
+        ordered.push(participants[j]);
+        placed[j] = true;
+      }
+    }
+    return ordered;
   }
 
   function ensureParticipant(id, participants, participantMap, auto) {
@@ -12543,6 +12610,115 @@
       return { text: id + ': ' + label, isInstance: true };
     }
     return { text: label, isInstance: false };
+  }
+
+  // ─── Organization lanes ───────────────────────────────────────────
+  //
+  // UML 2.5.1 defines no grouping of lifelines within an interaction, so a
+  // box borrows the ActivityPartition (swimlane) notation of clause 15.6.4:
+  // parallel lines with the partition's name in a box at the top end, and the
+  // «external» keyword for a partition outside the modeled organization.
+  // Neighboring lanes share one dividing line.
+
+  // Lanes ordered left to right; a box without participants draws nothing.
+  function sequenceLanes(boxes, participants) {
+    var lanes = [];
+    for (var b = 0; b < boxes.length; b++) {
+      var lo = -1, hi = -1;
+      for (var p = 0; p < participants.length; p++) {
+        if (participants[p].box !== b) continue;
+        if (lo < 0) lo = p;
+        hi = p;
+      }
+      if (lo < 0) continue;
+      var box = boxes[b];
+      var lines = [];
+      if (box.stereotype) lines.push({ text: '«' + box.stereotype + '»', bold: false });
+      if (box.title) lines.push({ text: box.title, bold: true });
+      lanes.push({ box: box, index: b, lo: lo, hi: hi, lines: lines, padL: CFG.boxPadX, padR: CFG.boxPadX });
+    }
+    return lanes.sort(function (a, b) { return a.lo - b.lo; });
+  }
+
+  function laneOfBox(lanes, boxIndex) {
+    for (var i = 0; i < lanes.length; i++) {
+      if (lanes[i].index === boxIndex) return lanes[i];
+    }
+    return null;
+  }
+
+  function laneHeaderHeight(lanes) {
+    var lineCount = 0;
+    for (var i = 0; i < lanes.length; i++) lineCount = Math.max(lineCount, lanes[i].lines.length);
+    return lineCount ? lineCount * CFG.lineHeight + CFG.boxHeaderPadY * 2 : 0;
+  }
+
+  // Widen a lane whose name is wider than its lifelines, then widen the gaps
+  // at lane edges: neighboring lanes need both margins, and an unboxed head
+  // stays boxClearance away from a lane.
+  function reserveLaneSpace(lanes, participants, partWidths, gapMin) {
+    for (var i = 0; i < lanes.length; i++) {
+      var lane = lanes[i];
+      var innerW = 0;
+      for (var p = lane.lo; p <= lane.hi; p++) innerW += partWidths[p] + (p < lane.hi ? gapMin[p] : 0);
+      var nameW = 0;
+      for (var l = 0; l < lane.lines.length; l++) {
+        var line = lane.lines[l];
+        nameW = Math.max(nameW, UMLShared.textWidth(line.text, line.bold, line.bold ? CFG.fontSizeBold : CFG.fontSize));
+      }
+      lane.padL = lane.padR = Math.max(CFG.boxPadX, Math.ceil((nameW + CFG.boxTextPadX * 2 - innerW) / 2));
+    }
+    for (var g = 0; g < gapMin.length; g++) {
+      var leftBox = participants[g].box, rightBox = participants[g + 1].box;
+      if (leftBox === rightBox) continue;
+      var need = (leftBox !== undefined ? laneOfBox(lanes, leftBox).padR : CFG.boxClearance) +
+        (rightBox !== undefined ? laneOfBox(lanes, rightBox).padL : CFG.boxClearance);
+      gapMin[g] = Math.max(gapMin[g], need);
+    }
+  }
+
+  // Set each lane's left/right edges around its heads and return the extent of
+  // all lanes. Neighboring lanes split the space beyond their margins evenly,
+  // so they meet on one shared line.
+  function placeLanes(lanes, participants, partX, partWidths) {
+    var extent = { left: Infinity, right: -Infinity };
+    for (var i = 0; i < lanes.length; i++) {
+      var lane = lanes[i];
+      var headLeft = partX[lane.lo] - partWidths[lane.lo] / 2;
+      var headRight = partX[lane.hi] + partWidths[lane.hi] / 2;
+      lane.left = headLeft - lane.padL;
+      lane.right = headRight + lane.padR;
+      var before = participants[lane.lo - 1];
+      if (before && before.box !== undefined) {
+        var beforeEdge = partX[lane.lo - 1] + partWidths[lane.lo - 1] / 2 + laneOfBox(lanes, before.box).padR;
+        lane.left -= (lane.left - beforeEdge) / 2;
+      }
+      var after = participants[lane.hi + 1];
+      if (after && after.box !== undefined) {
+        var afterEdge = partX[lane.hi + 1] - partWidths[lane.hi + 1] / 2 - laneOfBox(lanes, after.box).padL;
+        lane.right += (afterEdge - lane.right) / 2;
+      }
+      extent.left = Math.min(extent.left, lane.left);
+      extent.right = Math.max(extent.right, lane.right);
+    }
+    return extent;
+  }
+
+  // A label centered on a message between neighboring lanes straddles their
+  // dividing line. A backdrop in the label halo's color keeps the line out
+  // of the words; labels inside one lane keep the plain halo.
+  function pushLaneLabelBackdrop(svg, lanes, text, x, y, anchor, colors) {
+    if (!text || !lanes.length) return;
+    var w = UMLShared.textWidth(text, false, CFG.fontSize);
+    var left = anchor === 'middle' ? x - w / 2 : x;
+    var right = left + w;
+    var crosses = false;
+    for (var i = 0; i < lanes.length && !crosses; i++) {
+      crosses = (lanes[i].left > left && lanes[i].left < right) || (lanes[i].right > left && lanes[i].right < right);
+    }
+    if (!crosses) return;
+    svg.push('<rect data-layout-route-decorative="true" x="' + (left - 3) + '" y="' + (y - CFG.fontSize) +
+      '" width="' + (w + 6) + '" height="' + (CFG.fontSize + 4) + '" rx="2" fill="' + colors.fill + '" fill-opacity="0.85"/>');
   }
 
   function computeSequenceSpacing(participants) {
@@ -12698,6 +12874,12 @@
       }
     }
 
+    // ── Organization lanes: room for their names, edges, and headers ──
+    var lanes = sequenceLanes(parsed.boxes || [], participants);
+    reserveLaneSpace(lanes, participants, partWidths, gapMin);
+    var laneHeaderH = laneHeaderHeight(lanes);
+    var headTop = CFG.svgPad + (lanes.length ? laneHeaderH + CFG.boxHeadGap : 0);
+
     // ── Compute participant X positions ──
     var partX = []; // center X of each participant
     var curX = CFG.svgPad;
@@ -12728,7 +12910,7 @@
     }
 
     // ── Process messages to compute Y positions ──
-    var curY = CFG.svgPad + partH + firstMessageGapY; // Start below participant boxes
+    var curY = headTop + partH + firstMessageGapY; // Start below participant boxes
     var msgYs = [];
     var fragmentStack = [];    // Stack of { startY, type, condition, elseYs }
     var fragments = [];        // Completed fragments for rendering
@@ -12959,6 +13141,16 @@
       totalW += foundPad;
     }
 
+    // ── Place organization lanes; a widened first lane may shift the drawing ──
+    var laneExtent = placeLanes(lanes, participants, partX, partWidths);
+    if (laneExtent.left < 2) {
+      var laneShift = 2 - laneExtent.left;
+      for (var lsi = 0; lsi < partX.length; lsi++) partX[lsi] += laneShift;
+      totalW += laneShift;
+      laneExtent = placeLanes(lanes, participants, partX, partWidths);
+    }
+    totalW = Math.max(totalW, laneExtent.right + 2);
+
     // ── Compute activation bars (execution specifications) ──
     //
     // UML execution specifications have explicit start and finish
@@ -13062,7 +13254,10 @@
 
     for (var pbi = 0; pbi < participants.length; pbi++) {
       if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[pbi].id)) continue;
-      pushSequenceRectObstacle(partX[pbi] - partWidths[pbi] / 2, CFG.svgPad, partWidths[pbi], partH);
+      pushSequenceRectObstacle(partX[pbi] - partWidths[pbi] / 2, headTop, partWidths[pbi], partH);
+    }
+    for (var lhi = 0; lhi < lanes.length; lhi++) {
+      if (laneHeaderH) pushSequenceRectObstacle(lanes[lhi].left, CFG.svgPad, lanes[lhi].right - lanes[lhi].left, laneHeaderH);
     }
     for (var abo = 0; abo < activationBars.length; abo++) {
       var obstacleBar = activationBars[abo];
@@ -13127,8 +13322,11 @@
       }
     }
 
+    // ── Draw organization lanes behind everything else ──
+    drawLanes(svg, lanes, CFG.svgPad, totalH - 4, laneHeaderH, colors);
+
     // ── Draw lifelines (dashed vertical lines, adjusted for create/destroy) ──
-    var lifelineTop = CFG.svgPad + partH;
+    var lifelineTop = headTop + partH;
     var lifelineBot = totalH - 10;
     for (var li = 0; li < participants.length; li++) {
       var pid = participants[li].id;
@@ -13267,6 +13465,7 @@
           if (m.label || m.labelDirection) {
             var selfLabelX = selfLoopX + 6;
             var selfLabelY = my + 4;
+            pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), selfLabelX, selfLabelY, 'start', colors);
             if (m.label) {
               svg.push('<text x="' + selfLabelX + '" y="' + selfLabelY +
                 '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
@@ -13309,6 +13508,7 @@
           if (m.label || m.labelDirection) {
             var labelX = (x1 + x2) / 2;
             var labelY = my - 6;
+            pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), labelX, labelY, 'middle', colors);
             if (m.label) {
               svg.push('<text x="' + labelX + '" y="' + labelY +
                 '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
@@ -13378,6 +13578,7 @@
         if (m.label || m.labelDirection) {
           var llabelX = (lx1 + lx2) / 2;
           var lostLabelY = my - 6;
+          pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), llabelX, lostLabelY, 'middle', colors);
           if (m.label) {
             svg.push('<text x="' + llabelX + '" y="' + lostLabelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
@@ -13412,6 +13613,7 @@
         if (m.label || m.labelDirection) {
           var flabelX = (fx1 + fx2) / 2;
           var foundLabelY = my - 6;
+          pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), flabelX, foundLabelY, 'middle', colors);
           if (m.label) {
             svg.push('<text x="' + flabelX + '" y="' + foundLabelY +
               '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
@@ -13500,13 +13702,51 @@
     }
 
     // ── Draw participant boxes (top, skip created participants) ──
-    drawParticipantBoxes(svg, participants, partX, partWidths, partH, CFG.svgPad, colors, createYs);
+    drawParticipantBoxes(svg, participants, partX, partWidths, partH, headTop, colors, createYs);
 
     // ── Guard conditions on top of everything ──
     for (var gi = 0; gi < guardSvg.length; gi++) svg.push(guardSvg[gi]);
 
     svg.push(UMLShared.svgClose());
     return svg.join('\n');
+  }
+
+  // A colored box fills its lane with the color and its header with a darker
+  // shade. Uncolored lanes alternate two light tints, like activity swimlanes.
+  function laneFills(box, position, colors) {
+    var fills = UMLShared.highlightFills(colors, box.highlight, box.texture);
+    if (box.highlight) return { body: fills.fill, bodyOpacity: 1, header: fills.headerFill, textureUrl: fills.textureUrl };
+    return { body: colors.secondaryFill, bodyOpacity: position % 2 === 0 ? 0.46 : 0.3, header: colors.secondaryFill, textureUrl: fills.textureUrl };
+  }
+
+  // Lanes are frames, lighter than the lifelines they group. Callouts and
+  // route editing treat the lane body as an outline, not a solid obstacle.
+  function drawLanes(svg, lanes, top, bottom, headerH, colors) {
+    for (var i = 0; i < lanes.length; i++) {
+      var lane = lanes[i];
+      var x = lane.left, w = lane.right - lane.left;
+      var fills = laneFills(lane.box, i, colors);
+      var frameAttrs = ' data-callout-frame="true" data-layout-route-decorative="true" x="' + x + '" y="' + top +
+        '" width="' + w + '" height="' + (bottom - top) + '"';
+      svg.push('<g class="uml-sequence-box" data-sequence-box="' + lane.index + '">');
+      svg.push('<rect' + frameAttrs + ' fill="' + fills.body + '" fill-opacity="' + fills.bodyOpacity +
+        '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
+      if (fills.textureUrl) svg.push('<rect' + frameAttrs + ' fill="' + fills.textureUrl + '" stroke="none"/>');
+      if (headerH && lane.lines.length) {
+        svg.push('<rect data-layout-route-decorative="true" x="' + x + '" y="' + top + '" width="' + w + '" height="' + headerH +
+          '" fill="' + fills.header + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
+        // Center the lines in the header, even when another lane's is taller.
+        var lineTop = top + (headerH - lane.lines.length * CFG.lineHeight) / 2;
+        for (var l = 0; l < lane.lines.length; l++) {
+          var line = lane.lines[l];
+          var baseline = lineTop + (l + 0.5) * CFG.lineHeight + CFG.fontSize * 0.35;
+          svg.push('<text x="' + (x + w / 2) + '" y="' + baseline + '" text-anchor="middle"' +
+            (line.bold ? ' font-weight="bold"' : '') + ' font-size="' + (line.bold ? CFG.fontSizeBold : CFG.fontSize) +
+            '" fill="' + colors.text + '">' + UMLShared.escapeXml(line.text) + '</text>');
+        }
+      }
+      svg.push('</g>');
+    }
   }
 
   function drawParticipantBoxes(svg, participants, partX, partWidths, partH, y, colors, createYs) {
