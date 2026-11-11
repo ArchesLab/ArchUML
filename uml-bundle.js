@@ -3451,29 +3451,33 @@
     updateDiagramScrollability(container);
   }
 
-  function toggleDiagramView(view) {
+  function enterFittedDiagramView(view) {
     const container = view.container;
+    const svg = container.querySelector('svg');
+    const scroll = rememberDiagramScroll(container);
+    view.previous = { scroll,
+      heightLimits: scroll.map(position => position.element).filter(element =>
+        element !== document.body && element !== document.documentElement &&
+        /auto|scroll|hidden/.test(getComputedStyle(element).overflowY) &&
+        element.scrollHeight > element.clientHeight + 1),
+      width: parseFloat(getComputedStyle(svg).width) };
+    fitDiagramView(view);
+    view.fitted = true;
+    container.classList.add('uml-fit-fitted');
+    container.scrollLeft = 0;
+    container.scrollTop = 0;
+    // Only reset the diagram's own scrolling. Following prose moves up
+    // naturally with the smaller SVG instead of reserving its old height.
+    if (view.viewport !== container) view.viewport.scrollTop = 0;
+    updateDiagramScrollability(container);
+  }
+
+  function toggleDiagramView(view) {
     hideDiagramTooltips();
     if (!view.fitted) {
-      const svg = container.querySelector('svg');
-      const scroll = rememberDiagramScroll(container);
-      view.previous = { scroll,
-        heightLimits: scroll.map(position => position.element).filter(element =>
-          element !== document.body && element !== document.documentElement &&
-          /auto|scroll|hidden/.test(getComputedStyle(element).overflowY) &&
-          element.scrollHeight > element.clientHeight + 1),
-        width: parseFloat(getComputedStyle(svg).width) };
-      fitDiagramView(view);
-      view.fitted = true;
-      container.classList.add('uml-fit-fitted');
-      container.scrollLeft = 0;
-      container.scrollTop = 0;
-      // Only reset the diagram's own scrolling. Following prose moves up
-      // naturally with the smaller SVG instead of reserving its old height.
-      if (view.viewport !== container) view.viewport.scrollTop = 0;
-      updateDiagramScrollability(container);
+      enterFittedDiagramView(view);
     } else {
-      restoreDiagramView(container);
+      restoreDiagramView(view.container);
     }
     view.button.focus({ preventScroll: true });
     hideDiagramTooltips();
@@ -3518,6 +3522,9 @@
     view.host.hidden = !overflowing && !view.fitted;
     if (view.host.hidden) { releaseDiagramViewport(view); return; }
     reserveDiagramToolbar(view, viewport);
+    // Start with the whole diagram visible, without focusing its control.
+    // Subsequent renders preserve the reader's chosen fit/expanded state.
+    if (!view.previous) { enterFittedDiagramView(view); return; }
     if (view.fitted) fitDiagramView(view);
     view.host.classList.toggle('uml-fit-controls-fitted', view.fitted);
     view.button.setAttribute('aria-label', view.fitted ? 'Restore previous diagram view' : 'Fit diagram to screen');
