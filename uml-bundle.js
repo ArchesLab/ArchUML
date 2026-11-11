@@ -964,14 +964,20 @@
     var cardAliasMatch = clean.match(/^card\s+(?:"(?:[^"\\]|\\.)*"|\S+)\s+as\s+("(?:[^"\\]|\\.)*")\s*\{?\s*$/i);
     if (cardAliasMatch) return unquoteLayoutId(cardAliasMatch[1]);
 
+    // Sequence participants put the instance before `:` or `as`. Actors also
+    // support a colon here; their generic use-case aliases still resolve below.
+    var participantMatch = clean.match(/^participant\s+([^\s:]+)/i) ||
+      clean.match(/^actor\s+([^"\s:]+)\s*:/i);
+    if (participantMatch) return unquoteLayoutId(participantMatch[1]);
+
     var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
     if (aliasMatch) return aliasMatch[1];
 
     var boxAliasMatch = clean.match(/^box(?:\s+[a-z]+)?\s+"(?:[^"\\]|\\.)*"\s+as\s+(\S+)/i);
     if (boxAliasMatch) return boxAliasMatch[1];
 
-    var participantMatch = clean.match(/^(?:participant|actor)\s+(\S+)/i);
-    if (participantMatch) return participantMatch[1];
+    var actorMatch = clean.match(/^actor\s+(\S+)/i);
+    if (actorMatch) return unquoteLayoutId(actorMatch[1]);
 
     var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
     if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
@@ -12290,9 +12296,9 @@
   function parse(text) {
     var lines = text.split('\n');
     var participants = [];      // { id, label, box? }
-    var participantMap = {};    // id -> index
+    var participantMap = Object.create(null);    // id -> index
     var messages = [];          // Each item: message, fragment start/end, create, destroy
-    var autoParticipants = {};  // Track implicitly declared participants
+    var autoParticipants = Object.create(null);  // Track implicitly declared participants
     var boxes = [];             // { title, stereotype, highlight, texture }
     var openBox = null;         // index into boxes while a box is open
     var shadowEnabled = true;
@@ -12343,69 +12349,25 @@
         continue;
       }
 
-      // Participant declaration
-      var partMatch = seqLine.match(/^participant\s+(.+)$/);
-      if (partMatch) {
-        var partDecl = partMatch[1].trim();
-        var id, label;
-        // Forms supported:
-        //   participant id           →  id used for both
-        //   participant id : Label   →  "id: Label"
-        //   participant id as Label  →  "id: Label" (alternate syntax)
-        //   participant id as : Cls  →  "id: Label" where label is ": Cls"
-        //                               (anonymous-instance display)
-        // `as` wins over `:` because `as` is a stronger delimiter and may
-        // itself be followed by a label that contains `:`.
-        var asIdx = partDecl.indexOf(' as ');
-        var colonIdx = partDecl.indexOf(':');
-        if (asIdx !== -1) {
-          id = partDecl.substring(0, asIdx).trim();
-          label = partDecl.substring(asIdx + 4).trim();
-        } else if (colonIdx !== -1) {
-          id = partDecl.substring(0, colonIdx).trim();
-          label = partDecl.substring(colonIdx + 1).trim();
-        } else {
-          id = partDecl;
-          label = partDecl;
-        }
+      // Explicit declarations may follow messages that implicitly created the
+      // lifeline. Upgrade that placeholder without changing its lane order.
+      var declaration = parseParticipantDeclaration(seqLine);
+      if (declaration) {
+        var id = declaration.id;
         if (!Object.prototype.hasOwnProperty.call(participantMap, id)) {
           participantMap[id] = participants.length;
-          participants.push({ id: id, label: label, highlight: seqHighlight, texture: seqTexture });
-        } else {
-          if (seqHighlight) participants[participantMap[id]].highlight = seqHighlight;
-          if (seqTexture) participants[participantMap[id]].texture = seqTexture;
+          participants.push(declaration);
+        } else if (autoParticipants[id]) {
+          var existing = participants[participantMap[id]];
+          existing.label = declaration.label;
+          existing.isActor = declaration.isActor;
+          existing.isInstance = declaration.isInstance;
         }
-        joinOpenBox(participants[participantMap[id]], openBox);
-        continue;
-      }
-
-      // Actor declaration (same id/label forms as `participant`; `as` wins
-      // over `:` so anonymous-instance labels like "as : Cls" are parsed
-      // correctly).
-      var actorMatch = seqLine.match(/^actor\s+(.+)$/);
-      if (actorMatch) {
-        var actorDecl = actorMatch[1].trim();
-        var actorId, actorLabel;
-        var aa = actorDecl.indexOf(' as ');
-        var ac = actorDecl.indexOf(':');
-        if (aa !== -1) {
-          actorId = actorDecl.substring(0, aa).trim();
-          actorLabel = actorDecl.substring(aa + 4).trim();
-        } else if (ac !== -1) {
-          actorId = actorDecl.substring(0, ac).trim();
-          actorLabel = actorDecl.substring(ac + 1).trim();
-        } else {
-          actorId = actorDecl;
-          actorLabel = actorDecl;
-        }
-        if (!Object.prototype.hasOwnProperty.call(participantMap, actorId)) {
-          participantMap[actorId] = participants.length;
-          participants.push({ id: actorId, label: actorLabel, isActor: true, highlight: seqHighlight, texture: seqTexture });
-        } else {
-          if (seqHighlight) participants[participantMap[actorId]].highlight = seqHighlight;
-          if (seqTexture) participants[participantMap[actorId]].texture = seqTexture;
-        }
-        joinOpenBox(participants[participantMap[actorId]], openBox);
+        delete autoParticipants[id];
+        var declaredParticipant = participants[participantMap[id]];
+        if (seqHighlight) declaredParticipant.highlight = seqHighlight;
+        if (seqTexture) declaredParticipant.texture = seqTexture;
+        joinOpenBox(declaredParticipant, openBox);
         continue;
       }
 
@@ -12553,6 +12515,23 @@
     };
   }
 
+  function parseParticipantDeclaration(line) {
+    var match = line.match(/^(participant|actor)\s+(.+)$/i);
+    if (!match) return null;
+    var declaration = match[2].trim();
+    // `as` takes precedence because anonymous labels contain a colon.
+    var alias = /\s+as\s+/i.exec(declaration);
+    var delimiter = alias ? alias.index : declaration.indexOf(':');
+    var id = delimiter < 0 ? declaration : declaration.substring(0, delimiter).trim();
+    var label = delimiter < 0 ? id : declaration.substring(delimiter + (alias ? alias[0].length : 1)).trim();
+    return {
+      id: id,
+      label: label,
+      isActor: match[1].toLowerCase() === 'actor',
+      isInstance: delimiter >= 0,
+    };
+  }
+
   // A participant belongs to the first box that declares it.
   function joinOpenBox(part, openBox) {
     if (openBox !== null && part.box === undefined) part.box = openBox;
@@ -12604,7 +12583,7 @@
       var trimmed = label.replace(/^:\s*/, ': ');
       return { text: trimmed, isInstance: true };
     }
-    if (id !== label) {
+    if (part.isInstance || id !== label) {
       return { text: id + ': ' + label, isInstance: true };
     }
     return { text: label, isInstance: false };
