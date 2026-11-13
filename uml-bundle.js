@@ -2817,6 +2817,55 @@
     });
   }
 
+  // ─── Theme Re-render Scheduler ─────────────────────────────────
+  //
+  // Theme colors are baked into the SVG, so a theme change re-renders every
+  // diagram. Layout and routing make one render cost up to seconds, so the
+  // renders run one per task, nearest the viewport first: the page stays
+  // responsive and the diagrams the reader sees are recolored first.
+
+  var themeRerenderJobs = [];
+  var themeRerenderTimer = null;
+
+  function viewportDistance(container) {
+    var rect = container.getBoundingClientRect();
+    if (rect.bottom < 0) return -rect.bottom;
+    if (rect.top > window.innerHeight) return rect.top - window.innerHeight;
+    return 0;
+  }
+
+  function runNextThemeRerender() {
+    themeRerenderTimer = null;
+    themeRerenderJobs = themeRerenderJobs.filter(function (job) { return job.container.isConnected; });
+    if (!themeRerenderJobs.length) {
+      queueRefitAll();
+      startSettleLoop();
+      return;
+    }
+    var next = 0;
+    var nearest = Infinity;
+    for (var i = 0; i < themeRerenderJobs.length; i++) {
+      var distance = viewportDistance(themeRerenderJobs[i].container);
+      if (distance < nearest) { nearest = distance; next = i; }
+    }
+    var job = themeRerenderJobs.splice(next, 1)[0];
+    try {
+      job.render();
+    } finally {
+      themeRerenderTimer = setTimeout(runNextThemeRerender, 0);
+    }
+  }
+
+  // A newer theme change replaces any pending render of the same container.
+  function queueThemeRerenders(jobs, delay) {
+    var queued = jobs.map(function (job) { return job.container; });
+    themeRerenderJobs = themeRerenderJobs.filter(function (job) {
+      return queued.indexOf(job.container) === -1;
+    }).concat(jobs);
+    if (themeRerenderTimer) clearTimeout(themeRerenderTimer);
+    themeRerenderTimer = setTimeout(runNextThemeRerender, delay);
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -2856,15 +2905,16 @@
       var observer = new MutationObserver(function (mutations) {
         for (var m = 0; m < mutations.length; m++) {
           if (mutations[m].attributeName === 'class') {
-            setTimeout(function () {
-              for (var d = 0; d < diagrams.length; d++) {
-                renderFn(diagrams[d].container, diagrams[d].text);
-                hideNestedSvgFromAccessibility(diagrams[d].container);
-                if (visibilityObserver) visibilityObserver.observe(diagrams[d].container);
-              }
-              queueRefitAll();
-              startSettleLoop();
-            }, 50);
+            queueThemeRerenders(diagrams.map(function (diagram) {
+              return {
+                container: diagram.container,
+                render: function () {
+                  renderFn(diagram.container, diagram.text);
+                  hideNestedSvgFromAccessibility(diagram.container);
+                  if (visibilityObserver) visibilityObserver.observe(diagram.container);
+                },
+              };
+            }), 50);
             break;
           }
         }
@@ -4755,16 +4805,63 @@
     };
   }
 
+  // The rectangles routing must avoid, resolved once. The grid search tests
+  // every grid point and edge against every obstacle, so resolving them per
+  // test would dominate a diagram's render time.
+  function activeObstacleRects(obstacles, skipNames) {
+    var rects = [];
+    for (var i = 0; i < obstacles.length; i++) {
+      var rect = obstacleToRect(obstacles[i]);
+      if (!rect) continue;
+      if (skipNames && obstacles[i].name && skipNames[obstacles[i].name]) continue;
+      rects.push(rect);
+    }
+    return rects;
+  }
+
+  function pointInsideRects(x, y, rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var rect = rects[i];
+      if (x > rect.left && x < rect.right && y > rect.top && y < rect.bottom) return true;
+    }
+    return false;
+  }
+
+  // Same rules as routeHitsObstacle for a single segment.
+  function segmentHitsRects(p0, p1, rects, occupied) {
+    var i, rect;
+    if (Math.abs(p0.x - p1.x) < 1) {
+      var yMin = Math.min(p0.y, p1.y), yMax = Math.max(p0.y, p1.y);
+      for (i = 0; i < rects.length; i++) {
+        rect = rects[i];
+        if (p0.x > rect.left && p0.x < rect.right && yMax > rect.top && yMin < rect.bottom) return true;
+      }
+      return vSegHitsOccupied(p0.x, yMin, yMax, occupied) ||
+        vSegCrossesOccupiedH(p0.x, yMin, yMax, occupied);
+    }
+    if (Math.abs(p0.y - p1.y) < 1) {
+      var xMin = Math.min(p0.x, p1.x), xMax = Math.max(p0.x, p1.x);
+      for (i = 0; i < rects.length; i++) {
+        rect = rects[i];
+        if (p0.y > rect.top && p0.y < rect.bottom && xMax > rect.left && xMin < rect.right) return true;
+      }
+      return hSegHitsOccupied(p0.y, xMin, xMax, occupied) ||
+        hSegCrossesOccupiedV(p0.y, xMin, xMax, occupied);
+    }
+    return true;
+  }
+
   function buildOrthogonalGraph(xs, ys, obstacles, skipNames, occupied) {
     var nodes = [];
     var nodeMap = {};
     var rows = {};
     var cols = {};
+    var rects = activeObstacleRects(obstacles, skipNames);
 
     for (var xi = 0; xi < xs.length; xi++) {
       for (var yi = 0; yi < ys.length; yi++) {
         var x = xs[xi], y = ys[yi];
-        if (pointInsideObstacle(x, y, obstacles, skipNames)) continue;
+        if (pointInsideRects(x, y, rects)) continue;
         var key = xi + ':' + yi;
         var nodeIndex = nodes.length;
         nodes.push({ x: x, y: y, xi: xi, yi: yi });
@@ -4781,9 +4878,7 @@
 
     function connect(aIdx, bIdx, dir) {
       var a = nodes[aIdx], b = nodes[bIdx];
-      var p0 = { x: a.x, y: a.y };
-      var p1 = { x: b.x, y: b.y };
-      if (routeHitsObstacle([p0, p1], obstacles, skipNames, occupied)) return;
+      if (segmentHitsRects(a, b, rects, occupied)) return;
       var cost = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
       adjacency[aIdx].push({ to: bIdx, dir: dir, cost: cost });
       adjacency[bIdx].push({ to: aIdx, dir: dir, cost: cost });
