@@ -7815,8 +7815,17 @@
 
     if (!name) return null;
 
+    // Keep the reference identifier separate from a quoted display name.
+    var label = null;
+    var alias = name.match(/^("(?:[^"\\]|\\.)*"|\S+)\s+as\s+("(?:[^"\\]|\\.)*"|\S+)$/i);
+    if (alias) {
+      label = alias[1].replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1');
+      name = alias[2].replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1');
+    }
+
     return {
       name: name,
+      label: label,
       type: classType,
       stereotype: stereotype,
       highlight: highlight,
@@ -8048,7 +8057,7 @@
     var propertyH = propertyText ? CFG.lineHeight : 0;
     var nameH = CFG.padY * 2 + CFG.lineHeight + stereotypeH + propertyH;
 
-    var nameW = UMLShared.textWidth(cls.name, true, CFG.fontSizeBold);
+    var nameW = UMLShared.textWidth(cls.label || cls.name, true, CFG.fontSizeBold);
     if (hasStereotype) {
       nameW = Math.max(nameW, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype));
     }
@@ -10878,7 +10887,7 @@
       svg.push('<text x="' + textCx + '" y="' + nameY + '" text-anchor="middle" ' +
         'font-weight="bold" font-size="' + CFG.fontSizeBold + '" ' +
         (isAbstract ? 'font-style="italic" ' : '') +
-        'fill="' + colors.text + '">' + UMLShared.escapeXml(cls.name) + '</text>');
+        'fill="' + colors.text + '">' + UMLShared.escapeXml(cls.label || cls.name) + '</text>');
       // Property string below the name, such as {abstract}
       if (box.propertyText) {
         svg.push('<text x="' + textCx + '" y="' + (nameY + CFG.lineHeight) + '" text-anchor="middle" ' +
@@ -15905,7 +15914,7 @@
     var connectors = [];
     var notes = [];
     var portAliasMap = {}; // alias → { comp: componentName, name: displayName }
-    var displayNameMap = {}; // componentName → display label (when different)
+    var displayNameMap = Object.create(null); // componentName → display label (when different)
     var orderConstraints = []; // hidden PlantUML edges used only for layout order
 
     var direction = 'LR'; // Component diagrams default to left-to-right
@@ -16231,7 +16240,8 @@
         }
       }
 
-      var nameW = UMLShared.textWidth(c.name, true, CFG.fontSizeBold);
+      var displayName = parsed.displayNameMap[c.name] || c.name;
+      var nameW = UMLShared.textWidth(displayName, true, CFG.fontSizeBold);
       var hasPorts = leftPorts.length > 0 || rightPorts.length > 0;
       var maxSidePorts = Math.max(leftPorts.length, rightPorts.length);
 
@@ -16277,6 +16287,7 @@
 
       entries[c.name] = {
         comp: c,
+        label: displayName,
         box: { width: Math.ceil(w), height: h },
         x: 0, y: 0,
         leftPorts: leftPorts,
@@ -18931,7 +18942,7 @@
         // The initial row pitch is deliberately generous. Endpoint alignment
         // may use its spare padding, but must keep the title and label font
         // boxes apart (including ascenders and descenders in the chosen font).
-        var headerMetrics = UMLShared.textMetrics(entry.comp.name, true, CFG.fontSizeBold, CFG.fontFamily);
+        var headerMetrics = UMLShared.textMetrics(entry.label, true, CFG.fontSizeBold, CFG.fontFamily);
         var labelFontSize = CFG.fontSize - 1;
         var labelMetrics = UMLShared.textMetrics(pos.label || alias, false, labelFontSize, CFG.fontFamily, true);
         var headerDescent = isFinite(headerMetrics.fontBoundingBoxDescent) ? headerMetrics.fontBoundingBoxDescent : 4;
@@ -21298,13 +21309,13 @@
         // Name at top-left when component has ports
         svg.push('<text x="' + (bx + CFG.padX) + '" y="' + (by + CFG.padY + CFG.fontSizeBold * 0.35 + 2) +
           '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
-          UMLShared.escapeXml(e.comp.name) + '</text>');
+          UMLShared.escapeXml(e.label) + '</text>');
 
       } else {
         // Centered name when no ports
         svg.push('<text x="' + (bx + (bw - CFG.iconW - 8) / 2) + '" y="' + (by + bh / 2 + CFG.fontSize * 0.35) +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
-          UMLShared.escapeXml(e.comp.name) + '</text>');
+          UMLShared.escapeXml(e.label) + '</text>');
       }
 
       // ── Draw ports (squares, lollipops, sockets) and labels ──
