@@ -3335,6 +3335,16 @@
     return { x: x, y: y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
   }
 
+  // The room a package frame takes around what it encloses: its body keeps
+  // `padX`/`padY` from its members; the name tab stands above the body.
+  var PACKAGE_FRAME = { padX: 18, padY: 18, tabPadX: 10, tabPadY: 3, tabMinW: 56, bodyBeyondTab: 24 };
+
+  // The height of a package's name tab: one line for the name, one more
+  // for a stereotype.
+  function packageTabHeight(pkg, style) {
+    return (pkg.stereotype ? 2 : 1) * style.lineHeight + PACKAGE_FRAME.tabPadY * 2;
+  }
+
   // Frames for the packages that have drawn members, outermost first.
   // `elementExtent(id)` returns the area an element occupies, or null;
   // `elementIds` lists every drawn element. The layout does not group a
@@ -3343,7 +3353,8 @@
   // @pos. `style` carries the renderer's typography: fontFamily,
   // fontSizeBold, fontSizeStereotype, and lineHeight.
   function layoutPackageFrames(packages, elementExtent, elementIds, style) {
-    var padX = 18, padY = 18, tabPadX = 10, tabPadY = 3, tabMinW = 56, bodyBeyondTab = 24;
+    var padX = PACKAGE_FRAME.padX, padY = PACKAGE_FRAME.padY, tabPadX = PACKAGE_FRAME.tabPadX;
+    var tabPadY = PACKAGE_FRAME.tabPadY, tabMinW = PACKAGE_FRAME.tabMinW, bodyBeyondTab = PACKAGE_FRAME.bodyBeyondTab;
     var children = createStringMap();
     packages.forEach(function(pkg) {
       if (pkg.parent) (children[pkg.parent] = children[pkg.parent] || []).push(pkg);
@@ -3381,7 +3392,7 @@
       var textW = 0;
       lines.forEach(function(line) { textW = Math.max(textW, textWidth(line.text, line.bold, line.fontSize, style.fontFamily)); });
       var tabW = Math.max(tabMinW, Math.ceil(textW + tabPadX * 2));
-      var tabH = lines.length * style.lineHeight + tabPadY * 2;
+      var tabH = packageTabHeight(pkg, style);
       var body = {
         x: extent.x - padX,
         y: extent.y - padY,
@@ -3395,7 +3406,7 @@
       });
       var outer = unionExtent(body, tab);
       var frame = {
-        id: pkg.id, label: pkg.label, stereotype: pkg.stereotype, depth: depth,
+        id: pkg.id, label: pkg.label, stereotype: pkg.stereotype, parent: pkg.parent, depth: depth,
         body: body, tab: tab, outer: outer, lines: lines,
         overlaps: overlappingNonMembers(pkg, outer)
       };
@@ -3405,6 +3416,85 @@
 
     packages.forEach(function(pkg) { if (!pkg.parent) layoutPackage(pkg, 0); });
     return frames.sort(function(a, b) { return a.depth - b.depth; });
+  }
+
+  // ─── Packages in compact drawings ───
+  //
+  // A compact drawing is judged from its UMLLayoutQuality scene, so its
+  // packages are recorded there: the body as a container of its members
+  // (an element inside a package it does not belong to overlaps it), the
+  // tab as part of the package, and the names in the tab as labels. Lines
+  // may cross all three (packages are not routing obstacles).
+
+  // The scene id of a package; members name it as their parent.
+  function packageSceneId(id) {
+    return id == null ? null : 'package:' + id;
+  }
+
+  function recordPackageFrames(scene, frames) {
+    frames.forEach(function(frame) {
+      var id = packageSceneId(frame.id), tabId = 'package-tab:' + frame.id;
+      scene.addNode({ id: id, kind: 'package', container: true, crossable: true, parent: packageSceneId(frame.parent),
+        x: frame.body.x, y: frame.body.y, width: frame.body.width, height: frame.body.height });
+      scene.addNode({ id: tabId, kind: 'package-tab', crossable: true, parent: id,
+        x: frame.tab.x, y: frame.tab.y, width: frame.tab.width, height: frame.tab.height });
+      // The inked band of each line: cap height above the baseline and
+      // descenders below it (the two lines of a tab sit a line apart). A
+      // line crossing the tab passes under the name's halo, as under a
+      // label on its own line (drawPackageNames), so it may cross the name.
+      frame.lines.forEach(function(line, i) {
+        var width = textWidth(line.text, line.bold, line.fontSize);
+        scene.addLabel({ id: 'package-name:' + frame.id + ':' + i, owner: tabId, kind: 'package-name', onRoute: true,
+          x: line.x - width / 2, y: line.y - line.fontSize * 0.8, width: width, height: line.fontSize * 1.05 });
+        scene.noteFont(line.fontSize);
+      });
+    });
+  }
+
+  // The innermost of `frames` whose body holds `rect` ({x, y, width,
+  // height}) and that `allowed(frameId)` accepts; null when none does.
+  function packageHolding(frames, rect, allowed) {
+    var found = null;
+    frames.forEach(function(frame) {
+      var b = frame.body;
+      if (!allowed(frame.id)) return;
+      if (rect.x < b.x || rect.y < b.y || rect.x + rect.width > b.x + b.width || rect.y + rect.height > b.y + b.height) return;
+      if (!found || frame.depth > found.depth) found = frame;
+    });
+    return found ? found.id : null;
+  }
+
+  // The packages an element is in, innermost first. `packageOf(id)` names
+  // the package an element is declared in, or null.
+  function packageChain(packages, packageOf, id) {
+    var byId = createStringMap();
+    packages.forEach(function(pkg) { byId[pkg.id] = pkg; });
+    var chain = [];
+    for (var pkg = byId[packageOf(id)]; pkg && chain.indexOf(pkg) === -1; pkg = byId[pkg.parent]) chain.push(pkg);
+    return chain;
+  }
+
+  // For the compact squeeze (UMLCompactLayout's `separation`): the extra gap
+  // two elements keep on an axis for the frames between them, `a` before
+  // `b` on it. Each package one of them is in and the other is not puts its
+  // padding on that element's side; on the vertical axis a package of the
+  // later element also puts its tab between them.
+  function packageSeparation(packages, packageOf, style) {
+    if (!packages || !packages.length) return null;
+    var chains = createStringMap();
+    function chainOf(id) {
+      if (!chains[id]) chains[id] = packageChain(packages, packageOf, id);
+      return chains[id];
+    }
+    return function(aId, bId, axisStart) {
+      var a = chainOf(aId), b = chainOf(bId);
+      var onlyA = a.filter(function(pkg) { return b.indexOf(pkg) === -1; });
+      var onlyB = b.filter(function(pkg) { return a.indexOf(pkg) === -1; });
+      if (axisStart === 'x') return (onlyA.length + onlyB.length) * PACKAGE_FRAME.padX;
+      return onlyA.length * PACKAGE_FRAME.padY + onlyB.reduce(function(sum, pkg) {
+        return sum + PACKAGE_FRAME.padY + packageTabHeight(pkg, style);
+      }, 0);
+    };
   }
 
   // The package shapes, to be drawn first so everything else paints over
@@ -6461,6 +6551,10 @@
     parsePackageOpener: parsePackageOpener,
     createPackageScope: createPackageScope,
     layoutPackageFrames: layoutPackageFrames,
+    packageSceneId: packageSceneId,
+    recordPackageFrames: recordPackageFrames,
+    packageHolding: packageHolding,
+    packageSeparation: packageSeparation,
     drawPackageFrames: drawPackageFrames,
     drawPackageNames: drawPackageNames,
     updatePackageFrames: updatePackageFrames,
@@ -8920,6 +9014,8 @@
       node.id = n.id;
       node.kind = n.kind || null;
       node.container = !!n.container;
+      // Lines may cross it, as they cross a UML package's outline.
+      node.crossable = !!n.crossable;
       node.parent = n.parent != null ? n.parent : null;
       scene.nodes.push(node);
       return node;
@@ -9206,7 +9302,7 @@
     routes.forEach(function (route) {
       var exempt = routeExemptNodes(route, nodesById);
       nodes.forEach(function (node) {
-        if (exempt[node.id]) return;
+        if (exempt[node.id] || node.crossable) return;
         if (routeEntersRect(route, insetRect(node, tol))) found.push(violation('route-node', route.id, node.id));
       });
     });
@@ -9728,7 +9824,8 @@
     if (ctx.tied(a, b)) return { lo: 0, hi: 0 };
     if (eA > sB + GEOMETRY_EPSILON) return { lo: -Infinity, hi: Infinity, free: true };
 
-    var clearance = ctx.clearances.boxClearance + Math.max(ctx.extra(a.id), ctx.extra(b.id));
+    var clearance = ctx.clearances.boxClearance + Math.max(ctx.extra(a.id), ctx.extra(b.id)) +
+      ctx.separation(a.id, b.id, axis.start);
     if (ctx.otherOverlap(a, b) > -clearance) {
       var gap = sB - eA;
       var asked = Math.max(ctx.room(a.id, 'after'), ctx.room(b.id, 'before'));
@@ -9832,10 +9929,10 @@
     };
   }
 
-  function squeezeAxis(bodies, scene, clearances, axis, otherOverlap, extra, room) {
+  function squeezeAxis(bodies, scene, clearances, axis, otherOverlap, extra, room, separation) {
     var order = axisOrder(bodies, axis);
     var ctx = {
-      scene: scene, clearances: clearances, otherOverlap: otherOverlap, extra: extra,
+      scene: scene, clearances: clearances, otherOverlap: otherOverlap, extra: extra, separation: separation,
       room: function (id, side) {
         var at = room[id] && room[id][side];
         return Number(at && at[axis.start]) || 0;
@@ -9879,20 +9976,26 @@
    *   nameLabelsShareStubs (optional, default false) — the name label of an
    *   edge crossing a gap straight shares the gap with its stubs and end
    *   labels, as the renderer sets it beside the line
-   * @param {{widen?: Object<string, number>, room?: Object<string, {before?: {x?, y?}, after?: {x?, y?}}>}} [options]
+   * @param {{widen?: Object<string, number>, room?: Object<string, {before?: {x?, y?}, after?: {x?, y?}}>, separation?: function(string, string, string): number}} [options]
    *   widen — extra box clearance for every pair that includes one of these
    *   bodies; room — the least gap these bodies keep, per axis, to the box
    *   they face before them (left, above) or after them (right, below); a
-   *   gap already narrower stays as it is
+   *   gap already narrower stays as it is; separation(aId, bId, 'x'|'y') —
+   *   extra clearance a pair keeps on that axis, `a` before `b` (for what
+   *   the drawing puts between them, such as package frames)
    * @returns {Object<string, {x:number, y:number}>}
    */
   function squeeze(bodies, scene, clearances, options) {
     var widen = (options && options.widen) || {};
     var room = (options && options.room) || {};
     var extra = function (id) { return Number(widen[id]) || 0; };
+    var pairSeparation = options && options.separation;
+    var separation = function (aId, bId, axisStart) {
+      return pairSeparation ? Number(pairSeparation(aId, bId, axisStart)) || 0 : 0;
+    };
     var xAxis = AXES[0], yAxis = AXES[1];
 
-    var dx = squeezeAxis(bodies, scene, clearances, xAxis, overlapOnOtherAxis(xAxis), extra, room);
+    var dx = squeezeAxis(bodies, scene, clearances, xAxis, overlapOnOtherAxis(xAxis), extra, room, separation);
     var shifted = bodies.map(function (b, i) { return { x: b.x + dx[i], width: b.width }; });
     var indexOf = {};
     bodies.forEach(function (b, i) { indexOf[b.id] = i; });
@@ -9902,7 +10005,7 @@
       var sa = shifted[indexOf[a.id]], sb = shifted[indexOf[b.id]];
       return Math.max(originalOverlap(a, b), overlapOf(sa.x, sa.x + sa.width, sb.x, sb.x + sb.width));
     };
-    var dy = squeezeAxis(bodies, scene, clearances, yAxis, yOverlap, extra, room);
+    var dy = squeezeAxis(bodies, scene, clearances, yAxis, yOverlap, extra, room, separation);
 
     var positions = {};
     bodies.forEach(function (b, i) { positions[b.id] = { x: b.x + dx[i], y: b.y + dy[i] }; });
@@ -10163,7 +10266,7 @@
       bodies: run.adapter.bodies(base.placement),
       tries: 0,
       widenIds: [],
-      options: { widen: {}, room: {} },
+      options: { widen: {}, room: {}, separation: run.adapter.separation || null },
       result: null,
       done: false
     };
@@ -10183,7 +10286,8 @@
     });
     job.options = {
       widen: widening(job.bodies, job.widenIds, job.tries * clearances.lanePitch),
-      room: roomForLabels(squeezed, job.base, job.bodies, clearances, job.options.room)
+      room: roomForLabels(squeezed, job.base, job.bodies, clearances, job.options.room),
+      separation: job.options.separation
     };
   }
 
@@ -10267,6 +10371,8 @@
    *   withPositions(placement, {[id]: {x, y}}) → a new placement
    *   realize(placement) → {svg, scene}  (one routing pass)
    *   clearances: {lanePitch, boxClearance, stub, labelPad, labelEndPad?, labelsBesideLeads?, nameLabelsShareStubs?}
+   *   separation(aId, bId, 'x'|'y') → number  (optional; extra clearance a
+   *     pair of bodies keeps on that axis, see squeeze)
    *   size: {boxes, edges}  (decides the pass budget)
    *   estimate(placement) → {width, height}  (optional, ranks candidates)
    *   limits: {crossings, bends}  (optional; those of the renderer's drawing
@@ -11950,6 +12056,16 @@
       });
       return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
     }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
+  }
+
+  // Whether package `id` is `packageId` or one that encloses it.
+  function isClassPackageWithin(packages, packageId, id) {
+    var byId = {};
+    (packages || []).forEach(function(pkg) { byId[pkg.id] = pkg; });
+    for (var seen = 0, pkg = byId[packageId]; pkg && seen <= packages.length; pkg = byId[pkg.parent], seen++) {
+      if (pkg.id === id) return true;
+    }
+    return false;
   }
 
   // Member note targets are derived from class positions: rebuild them once
@@ -13916,6 +14032,7 @@
     UMLShared.drawPackageFrames(packageShapes, packageFrames, colors);
     svg[packageShapesSlot] = packageShapes.join('');
     UMLShared.drawPackageNames(svg, packageFrames, colors);
+    if (scene) UMLShared.recordPackageFrames(scene, packageFrames);
 
     // ── Draw class boxes (on top of lines) ──
 
@@ -13973,7 +14090,8 @@
       svg.push('</g>');
 
       if (scene) {
-        scene.addNode({ id: en, x: x, y: y, width: box.width, height: box.height, kind: 'class' });
+        scene.addNode({ id: en, x: x, y: y, width: box.width, height: box.height, kind: 'class',
+          parent: UMLShared.packageSceneId(cls.package) });
         scene.noteFont(CFG.fontSizeBold);
         if (box.stereotypeText || box.propertyText) scene.noteFont(CFG.fontSizeStereotype);
         if (cls.attributes.length || cls.methods.length) scene.noteFont(CFG.fontSize);
@@ -14465,7 +14583,16 @@
       for (var sni = 0; sni < notePositions.length; sni++) {
         var sceneNote = notePositions[sni];
         var sceneNoteId = '__note_' + sni;
-        scene.addNode({ id: sceneNoteId, x: sceneNote.x, y: sceneNote.y, width: sceneNote.w, height: sceneNote.h, kind: 'note' });
+        var sceneNoteRect = { x: sceneNote.x, y: sceneNote.y, width: sceneNote.w, height: sceneNote.h };
+        // A note inside a package that holds its class belongs to it there;
+        // inside any other package it overlaps that package.
+        var noteTargetEntry = entries[noteTargetBaseName(sceneNote.note.target)];
+        var noteTargetPackage = noteTargetEntry && noteTargetEntry.cls ? noteTargetEntry.cls.package : null;
+        var notePackage = UMLShared.packageHolding(packageFrames, sceneNoteRect, function(id) {
+          return isClassPackageWithin(parsed.packages, noteTargetPackage, id);
+        });
+        scene.addNode({ id: sceneNoteId, x: sceneNoteRect.x, y: sceneNoteRect.y, width: sceneNoteRect.width, height: sceneNoteRect.height,
+          kind: 'note', parent: UMLShared.packageSceneId(notePackage) });
         scene.noteFont(UMLShared.NOTE_CFG.fontSize);
         if (sceneNote.note.lines.some(function(line) { return line.trim().indexOf('```') === 0; })) {
           scene.noteFont(UMLShared.NOTE_CFG.codeFontSize);
@@ -15808,6 +15935,11 @@
     var clearances = compactClassClearances();
     return {
       clearances: clearances,
+      // The squeeze keeps room for the package frames between two classes.
+      separation: UMLShared.packageSeparation(parsed.packages, function(name) {
+        var entry = reference.entries[name];
+        return entry && entry.cls ? entry.cls.package : null;
+      }, { lineHeight: CFG.lineHeight }),
       limits: limits,
       size: { boxes: parsed.classes.length + (parsed.notes || []).length, edges: parsed.relationships.length },
       candidates: function() { return compactClassCandidates(reference, shaped, parsed, pane, clearances); },
@@ -20565,6 +20697,18 @@
     return (note.note.lines || []).some(function(line) { return line.trim().indexOf('```') === 0; });
   }
 
+  // Transitions that meet at a junction or a join (or leave a junction or a
+  // fork) are drawn into one point of it, sharing their last (or first)
+  // stretch: that is the merge the pseudostate stands for, not an overlap.
+  function convergingBundle(entries, route) {
+    var target = entries[route.target], source = entries[route.source];
+    var into = target && target.state.type;
+    var from = source && source.state.type;
+    if (into === 'junction' || into === 'join') return 'into:' + route.target;
+    if (from === 'junction' || from === 'fork') return 'out-of:' + route.source;
+    return route.bundle != null ? route.bundle : null;
+  }
+
   // Fills a scene with what generateSVG drew, in layout coordinates.
   function recordStateScene(scene, drawn) {
     var entries = drawn.entries;
@@ -20573,10 +20717,13 @@
       scene.addNode({ id: id, x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height,
         kind: state.isComposite ? 'composite' : state.type, container: !!state.isComposite,
         parent: state.parent || null });
-      if (state.type === 'state') scene.noteFont(CFG.fontSizeBold);
+      if (state.type === 'state' || state.type === 'history' || state.type === 'deepHistory') scene.noteFont(CFG.fontSizeBold);
+      if (state.stereotype) scene.noteFont(CFG.fontSize);
       if (entry.box.hasActions) scene.noteFont(CFG.fontSizeAction);
     });
-    drawn.routes.forEach(function(route) { scene.addRoute(route); });
+    drawn.routes.forEach(function(route) {
+      scene.addRoute(Object.assign({}, route, { bundle: convergingBundle(entries, route) }));
+    });
     drawn.labels.forEach(function(label) {
       scene.addLabel(label);
       scene.noteFont(CFG.fontSize);
@@ -23801,7 +23948,7 @@
         include(pos.x, pos.y, pos.x + CFG.portSize, pos.y + CFG.portSize);
         continue;
       }
-      var fontSize = CFG.fontSize - 1;
+      var fontSize = CFG.fontSizePort;
       var halfLabel = UMLShared.textWidth(pos.label !== undefined ? pos.label : alias, false, fontSize) / 2;
       var baseline = pos.side === 'top' ? symbol.y - symbol.r - 4 : symbol.y + symbol.r + fontSize + 2;
       include(symbol.x - symbol.r, symbol.y - symbol.r, symbol.x + symbol.r, symbol.y + symbol.r);
@@ -23830,6 +23977,9 @@
     // Notes and connector labels keep clear of their name tabs.
     var packageFrames = layoutComponentPackages(parsed, entries, joinedPorts);
     var packageTabs = packageFrames.map(function(frame) { return frame.tab; });
+    // The joined ball and socket drawn at a component, and that interface's
+    // name: in compact, its package encloses them (see componentDrawnExtent).
+    var joinedInterfaceRects = {};
 
     // Resolve note target — supports dotted paths to sub-elements
 
@@ -26320,6 +26470,10 @@
           bsAlongRoute += Math.abs(points[bsk + 1].x - points[bsk].x) + Math.abs(points[bsk + 1].y - points[bsk].y);
         }
         var bsDrawnAt = bsAlongRoute <= bsRouteLength / 2 ? conn.from : conn.to;
+        var bsRects = joinedInterfaceRects[bsDrawnAt] = joinedInterfaceRects[bsDrawnAt] || [];
+        bsRects.push({ x: ballCx - ballR, y: ballCy - ballR, width: 2 * ballR, height: 2 * ballR },
+          { x: socketCx - socketR, y: socketCy - socketR, width: 2 * socketR, height: 2 * socketR });
+        var bsLabelsBefore = placedLabels.length;
         svg.push('<g data-uml-drawn-at="' + UMLShared.escapeXml(bsDrawnAt) + '">');
         // Draw ball (filled circle)
         if (recorder) recorder.extent({ left: socketCx - socketR, right: socketCx + socketR, top: socketCy - socketR, bottom: socketCy + socketR });
@@ -26344,6 +26498,9 @@
           Math.max(ballR, socketR),
           UMLShared.routeDirectionAtPlacement(points, { x: bsMx, y: bsMy })
         );
+        placedLabels.slice(bsLabelsBefore).forEach(function(rect) {
+          bsRects.push({ x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top });
+        });
         svg.push('</g>');
       } else {
         routeId = 'edge-' + renderedRouteCount++;
@@ -26498,12 +26655,15 @@
     // slid ports along their borders): shapes behind everything, names over
     // the connectors that cross them. Once connector labels settle, render()
     // refits them to the joined interfaces drawn at members. ──
-    var finalPackageFrames = layoutComponentPackages(parsed, entries, joinedPorts);
+    // A compact drawing is final as generated; the page refits the others
+    // to what the browser draws (refitComponentPackageFrames).
+    var finalPackageFrames = layoutComponentPackages(parsed, entries, joinedPorts, recorder ? joinedInterfaceRects : null);
     if (finalPackageFrames.length) {
       var packageShapes = [];
       UMLShared.drawPackageFrames(packageShapes, finalPackageFrames, colors);
       Array.prototype.splice.apply(svg, [1, 0].concat(packageShapes));
       UMLShared.drawPackageNames(svg, finalPackageFrames, colors);
+      if (recorder) recorder.packages(finalPackageFrames);
     }
 
     // ── Draw component boxes ──
@@ -26845,10 +27005,12 @@
     return {
       component: function(entry) {
         scene.addNode({ id: entry.comp.name, x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height,
-          kind: entry.standalonePort ? 'port' : 'component' });
+          kind: entry.standalonePort ? 'port' : 'component', parent: UMLShared.packageSceneId(entry.comp.package) });
         if (!entry.standalonePort) scene.noteFont(CFG.fontSizeBold);
+        if (!entry.standalonePort && entry.comp.stereotype) scene.noteFont(CFG.fontSizeStereotype);
         if (entry.hasPorts) scene.noteFont(CFG.fontSizePort);
       },
+      packages: function(frames) { UMLShared.recordPackageFrames(scene, frames); },
       port: function(entry, alias, rect) {
         scene.addNode({ id: entry.comp.name + '.' + alias, kind: 'port', parent: entry.comp.name,
           x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top });
@@ -26911,6 +27073,7 @@
   // Sizes for compact drawings, stated against the connector-label font (14).
   var COMPACT_COMPONENT_METRICS = Object.freeze({
     fontSizePort: 14,  // port names at the base size, like edge labels
+    fontSizeStereotype: 14,  // «keywords» above a name, and in package tabs
     padX: 12,          // ≈ 0.85 em beside a component's name
     compMinW: 0,       // a component is as wide as its text needs
     svgPad: 10,        // ≈ 0.7 em
@@ -27102,8 +27265,15 @@
       return layout;
     }
 
+    var componentsByName = {};
+    parsed.components.forEach(function(comp) { componentsByName[comp.name] = comp; });
+
     return {
       clearances: COMPACT_COMPONENT_CLEARANCES,
+      // The squeeze keeps room for the package frames between two components.
+      separation: UMLShared.packageSeparation(parsed.packages, function(name) {
+        return componentsByName[name] ? componentsByName[name].package || null : null;
+      }, { lineHeight: CFG.lineHeight }),
       size: { boxes: parsed.components.length + parsed.notes.length, edges: parsed.connectors.length },
 
       // The normal placement; the placement the spec gets without a layout

@@ -7,7 +7,7 @@
 // divider of an alternative keep their outlines.
 const assert = require('node:assert/strict');
 const { before, after, test } = require('node:test');
-const { launchBrowser, openDiagramPage, render } = require('./support/diagram-page');
+const { launchBrowser, openDiagramPage, render, inkPixels } = require('./support/diagram-page');
 
 let browser;
 before(async () => { browser = await launchBrowser(); });
@@ -56,39 +56,6 @@ async function guardBoxes(page) {
     const box = text.getBoundingClientRect();
     return { text: text.textContent, x: box.x + 1, y: box.y + 1, width: box.width - 2, height: box.height - 2 };
   }));
-}
-
-/**
- * Pixels in a page region that differ from its most common color, as a
- * reader sees them; `hide` names elements left out of the picture.
- */
-async function inkPixels(page, clip, hide) {
-  const png = await page.screenshot({ fullPage: true, clip, style: hide ? `${hide} { visibility: hidden !important; }` : '' });
-  return page.evaluate(async (base64) => {
-    const image = new Image();
-    image.src = 'data:image/png;base64,' + base64;
-    await image.decode();
-    const canvas = document.createElement('canvas');
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext('2d');
-    context.drawImage(image, 0, 0);
-    const { data } = context.getImageData(0, 0, image.width, image.height);
-    const counts = new Map();
-    for (let i = 0; i < data.length; i += 4) {
-      const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    const channel = (key, shift) => (key >> shift) & 255;
-    let ink = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const distance = Math.max(Math.abs(data[i] - channel(background, 16)),
-        Math.abs(data[i + 1] - channel(background, 8)), Math.abs(data[i + 2] - channel(background, 0)));
-      if (distance > 24) ink += 1;
-    }
-    return ink;
-  }, png.toString('base64'));
 }
 
 test('no lifeline or activation bar shows through a guard', async () => {
