@@ -601,6 +601,56 @@ class Singleton <<singleton>> {
 
 ---
 
+### Packages
+
+A package groups the classes declared inside its braces, drawn as in component diagrams (UML 2.5.1, 12.2.4): a rectangle with the name in a tab on the left of its top edge, any stereotype above the name, a solid outline, and no fill. Packages sit behind the classes, relationships cross them, they nest, and they enclose their classes at `@pos` positions. A name may be qualified with `::` and shows as written.
+
+```
+package opc::partners { ... }
+package opc::partners <<Subsystem>> { ... }
+package "Partner Gateways" as partners { ... }
+```
+
+**Example:**
+
+```
+@startuml
+abstract class Provider {
+  + {abstract} place(order: SupplierOrder)
+}
+package opc::partners {
+  class SupplierProvider {
+    + place(order: SupplierOrder)
+  }
+  class ShuttleProvider {
+    + place(order: SupplierOrder)
+  }
+}
+SupplierProvider --|> Provider
+ShuttleProvider --|> Provider
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+abstract class Provider {
+  + {abstract} place(order: SupplierOrder)
+}
+package opc::partners {
+  class SupplierProvider {
+    + place(order: SupplierOrder)
+  }
+  class ShuttleProvider {
+    + place(order: SupplierOrder)
+  }
+}
+SupplierProvider --|> Provider
+ShuttleProvider --|> Provider
+@enduml
+</code></pre>
+
+---
+
 ### Complete Class Diagram Example — Observer Pattern
 
 ```
@@ -1606,6 +1656,116 @@ component CRM {
 }
 o_items --> w_items
 o_cust --> crm_cust
+@enduml
+</code></pre>
+
+---
+
+### Stereotypes
+
+A stereotype names the kind of component (UML 2.5.1, 12.3.4). Write it after the name or alias, before any `#color`, texture, `dashed`, or port block. A `#color` may also come before it.
+
+```
+component OPC <<service>>
+component "Trip Website" as Website <<web application>> {
+  portout "orders" as w_out
+}
+component Bank <<external>> #lightblue
+component Archive #lightblue <<repository>> dashed
+component Gateway <<Service, External>>       ← two stereotypes
+component Gateway <<Service>> <<External>>    ← the same two
+[Ledger] <<repository>>
+```
+
+Several stereotypes show as one list in a single pair of guillemets, spelled as written: «Service, External». The keywords are centered in plain face above the centered bold name, and the component icon stays in the corner. A component without a stereotype keeps its one-line header.
+
+A connector may carry a stereotype and a property string (UML 2.5.1, 11.2.4). `<<x>>` in a connector label shows as «x»:
+
+```
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+```
+
+**Example:**
+
+```
+@startuml
+component OPC <<service>> {
+  portout "trip events" as opc_pub
+}
+component trips <<topic exchange>> {
+  portin "publish" as ex_in
+  portout "deliver" as ex_out
+}
+component Loyalty <<service>> {
+  portin "events" as l_in
+}
+opc_pub -- ex_in : <<publish>>
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+@enduml
+```
+
+<pre><code class="language-uml-component">
+@startuml
+component OPC <<service>> {
+  portout "trip events" as opc_pub
+}
+component trips <<topic exchange>> {
+  portin "publish" as ex_in
+  portout "deliver" as ex_out
+}
+component Loyalty <<service>> {
+  portin "events" as l_in
+}
+opc_pub -- ex_in : <<publish>>
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+@enduml
+</code></pre>
+
+---
+
+### Packages
+
+A UML package groups the components declared inside its braces (UML 2.5.1, 12.2.4). It is drawn as a rectangle with a tab on the left of its top edge; the tab holds the name, with any stereotype above it. Packages nest, have a solid outline, and sit behind the diagram. They are not routing obstacles: connectors and dependencies cross them. A package encloses its members wherever they are placed, including at `@pos` positions.
+
+```
+package Headliner { ... }
+package "Order Processing Center" as OPC <<Subsystem>> { ... }
+package Headliner { component OPC; component Loyalty }    ← one-line block
+```
+
+A component belongs to the innermost package it is declared in. A component that is only named by a connector inside a package does not join it. The automatic layout does not keep a package's members together, so it can place another component inside a package. The package then lists that component in its `data-package-overlaps` attribute; move it out with `@pos`. A `rectangle { ... }` block is not drawn; its contents are read as top-level declarations.
+
+**Example:**
+
+```
+@startuml
+package Headliner {
+  component Website <<web application>> {
+    portout "orders" as w_out
+  }
+  component OPC <<service>> {
+    portin "orders" as opc_in
+  }
+}
+component Bank <<external>>
+w_out -- opc_in : HTTPS
+OPC ..> Bank : capture payment
+@enduml
+```
+
+<pre><code class="language-uml-component">
+@startuml
+package Headliner {
+  component Website <<web application>> {
+    portout "orders" as w_out
+  }
+  component OPC <<service>> {
+    portin "orders" as opc_in
+  }
+}
+component Bank <<external>>
+w_out -- opc_in : HTTPS
+OPC ..> Bank : capture payment
 @enduml
 </code></pre>
 
@@ -3072,6 +3232,10 @@ Output JSON format:
 ### Combined Fragments (Sequence)
 
 `alt` · `loop` · `opt` · `par` · `break` · `critical` · `ref` · `neg`
+
+### Stereotypes and Packages (Class, Component)
+
+`component Name <<Kind>>` · `component Name <<A, B>>` · `A -- B : <<kind>> {property = "value"}` · `package Name { … }` · `package "Display Name" as Id <<Kind>> { … }`
 
 ### Layout Hints
 

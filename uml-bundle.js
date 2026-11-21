@@ -957,6 +957,25 @@
     return String(id || '').trim().replace(/^"((?:[^"\\]|\\.)*)"$/, '$1').replace(/\\"/g, '"');
   }
 
+  // A declaration's identity without what may follow it: a `{…}` body and
+  // `<<stereotypes>>`.
+  function declarationHead(line) {
+    var quoted = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i);
+      if (ch === '"' && line.charAt(i - 1) !== '\\') quoted = !quoted;
+      else if (ch === '{' && !quoted) { line = line.slice(0, i); break; }
+    }
+    return extractStereotypes(line).stripped.trim();
+  }
+
+  // Style suffixes that may follow an alias: `#color`, a texture, `dashed`.
+  function isDeclarationStyleSuffix(text) {
+    return String(text || '').trim().split(/\s+/).every(function(token) {
+      return !token || /^(?:#[0-9A-Za-z]+|hatched|crosshatch|dotted|grid|striped|dashed)$/i.test(token);
+    });
+  }
+
   function inferLayoutTargetId(line) {
     var clean = String(line || '').trim();
     if (!clean) return null;
@@ -970,8 +989,8 @@
       clean.match(/^actor\s+([^"\s:]+)\s*:/i);
     if (participantMatch) return unquoteLayoutId(participantMatch[1]);
 
-    var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
-    if (aliasMatch) return aliasMatch[1];
+    var aliasMatch = declarationHead(clean).match(/\bas\s+([A-Za-z_][\w.:-]*)((?:\s+\S+)*)\s*$/i);
+    if (aliasMatch && isDeclarationStyleSuffix(aliasMatch[2])) return aliasMatch[1];
 
     var boxAliasMatch = clean.match(/^box(?:\s+[a-z]+)?\s+"(?:[^"\\]|\\.)*"\s+as\s+(\S+)/i);
     if (boxAliasMatch) return boxAliasMatch[1];
@@ -979,7 +998,7 @@
     var actorMatch = clean.match(/^actor\s+(\S+)/i);
     if (actorMatch) return unquoteLayoutId(actorMatch[1]);
 
-    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
+    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card|rectangle|package|namespace)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
     if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
 
     var bareMatch = clean.match(/^([A-Za-z0-9_.:-]+)(?:\s+merge\s+\S+|\s+"(?:[^"\\]|\\.)*"|\s*)$/);
@@ -2253,6 +2272,69 @@
     return { stripped: stripped.trim(), highlight: highlight, texture: texture };
   }
 
+  // ─── Stereotypes ──────────────────────────────────────────────
+  //
+  // A declaration may apply several stereotypes, as one list
+  // (`<<Service, External>>`) or as separate groups
+  // (`<<Service>> <<External>>`). UML 2.5.1 (12.3.4) shows them as one
+  // comma-separated list within a single pair of guillemets, spelled as the
+  // author wrote them. Names match case-insensitively, so a repeat is shown
+  // once.
+
+  function appendStereotypeNames(names, list) {
+    var parts = String(list || '').split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var name = parts[i].trim();
+      if (!name) continue;
+      var lower = name.toLowerCase();
+      var seen = false;
+      for (var j = 0; j < names.length; j++) {
+        if (names[j].toLowerCase() === lower) { seen = true; break; }
+      }
+      if (!seen) names.push(name);
+    }
+  }
+
+  // Remove every `<<…>>` group outside quoted text. Returns the remaining
+  // text, unchanged when it has no group, and the joined list (or null).
+  function extractStereotypes(text) {
+    var source = String(text || '');
+    if (source.indexOf('<<') === -1) return { stripped: source, stereotype: null };
+    var names = [];
+    var kept = '';
+    var quoted = false;
+    for (var i = 0; i < source.length; i++) {
+      var ch = source.charAt(i);
+      if (ch === '"' && source.charAt(i - 1) !== '\\') quoted = !quoted;
+      var close = !quoted && ch === '<' && source.charAt(i + 1) === '<' ? source.indexOf('>>', i + 2) : -1;
+      if (close === -1) {
+        kept += ch;
+        continue;
+      }
+      appendStereotypeNames(names, source.slice(i + 2, close));
+      // Close the gap the group leaves: `A <<s>> {` becomes `A {`.
+      kept = kept.replace(/\s+$/, '');
+      i = close + 1;
+      while (i + 1 < source.length && /\s/.test(source.charAt(i + 1))) i++;
+      if (kept && i + 1 < source.length && source.charAt(i + 1) !== '<') kept += ' ';
+    }
+    return { stripped: kept, stereotype: names.length ? names.join(', ') : null };
+  }
+
+  function stereotypeDisplayText(stereotype) {
+    return stereotype ? '«' + stereotype + '»' : '';
+  }
+
+  // Show `<<x>>` in free text, such as a connector label, the way a
+  // declaration shows it: adjacent groups merge into one «…» pair.
+  function formatStereotypeLabels(text) {
+    return String(text || '').replace(/<<[^<>]*>>(?:\s*<<[^<>]*>>)*/g, function(run) {
+      var names = [];
+      run.replace(/<<([^<>]*)>>/g, function(_, list) { appendStereotypeNames(names, list); return ''; });
+      return stereotypeDisplayText(names.join(', '));
+    });
+  }
+
   function _expandHex(h) {
     if (h.length === 3) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
     if (h.length === 4) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
@@ -2355,6 +2437,239 @@
 
   function svgClose() {
     return '</g></svg>';
+  }
+
+  // ─── UML Packages ─────────────────────────────────────────────
+  //
+  // A package that shows its members inside is a large rectangle with a
+  // small tab on the left of its top edge; the tab holds the name, with an
+  // optional «stereotype» above it (UML 2.5.1, 12.2.4). Diagram parsers
+  // collect `package` blocks with createPackageScope; renderers draw them
+  // behind everything with layoutPackageFrames and drawPackageFrames after
+  // manual positions are applied, so a package follows its members' @pos.
+  // Packages are not routing obstacles: connectors cross their outlines.
+
+  // Split the text after a block's `{` at top-level `;`, stopping at the
+  // brace that closes the block. Quoted text and nested blocks stay whole.
+  function splitInlineBlockBody(text) {
+    var statements = [], start = 0, depth = 0, quoted = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (ch === '"' && text.charAt(i - 1) !== '\\') quoted = !quoted;
+      if (quoted) continue;
+      if (ch === '{') depth++;
+      else if (ch === '}' && depth > 0) depth--;
+      else if (ch === '}' || (ch === ';' && depth === 0)) {
+        statements.push(text.slice(start, i).trim());
+        if (ch === '}') {
+          return { statements: statements.filter(Boolean), closed: true, rest: text.slice(i + 1).trim() };
+        }
+        start = i + 1;
+      }
+    }
+    statements.push(text.slice(start).trim());
+    return { statements: statements.filter(Boolean), closed: false, rest: '' };
+  }
+
+  // `package Name {`, `package "Display Name" as Id {`, either followed by
+  // stereotypes, or a one-line block `package Name { … }`. A name may be
+  // qualified (`opc::partners`) and is shown as written. Returns null for
+  // any other line.
+  function parsePackageOpener(line) {
+    var m = String(line || '').match(/^package\s+(?:"((?:[^"\\]|\\.)*)"|([^\s{"]+))(?:\s+as\s+([^\s{"]+))?([^{]*)\{(.*)$/i);
+    if (!m) return null;
+    var label = m[1] !== undefined ? m[1].replace(/\\(["\\])/g, '$1') : m[2];
+    var body = splitInlineBlockBody(m[5]);
+    return {
+      id: m[3] || label,
+      label: label,
+      stereotype: extractStereotypes(m[4]).stereotype,
+      // Statements written on the opening line, to be read as the
+      // block's first lines; `closed` when that line also ends the block.
+      inlineLines: body.statements.concat(body.closed ? ['}'] : [], body.rest ? [body.rest] : [])
+    };
+  }
+
+  // The blocks open at a point in a source: packages, and other wrappers
+  // whose closing braces must not close a package. Each element is a member
+  // of the innermost package it is declared in; the first one wins.
+  function createPackageScope() {
+    var packages = [];
+    var byId = createStringMap();
+    var stack = [];
+    function current() {
+      for (var i = stack.length - 1; i >= 0; i--) if (stack[i]) return stack[i];
+      return null;
+    }
+    return {
+      packages: packages,
+      openPackage: function(opener) {
+        var pkg = byId[opener.id];
+        if (!pkg) {
+          var parent = current();
+          pkg = { id: opener.id, label: opener.label, stereotype: opener.stereotype, parent: parent ? parent.id : null, members: [] };
+          byId[opener.id] = pkg;
+          packages.push(pkg);
+        } else if (opener.stereotype && !pkg.stereotype) {
+          pkg.stereotype = opener.stereotype;
+        }
+        stack.push(pkg);
+      },
+      openWrapper: function() { stack.push(null); },
+      close: function() { stack.pop(); },
+      currentPackageId: function() {
+        var pkg = current();
+        return pkg ? pkg.id : null;
+      },
+      declare: function(element, id) {
+        var pkg = current();
+        if (!pkg || element.package) return;
+        element.package = pkg.id;
+        if (pkg.members.indexOf(id) === -1) pkg.members.push(id);
+      }
+    };
+  }
+
+  function unionExtent(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    var x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x: x, y: y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+  }
+
+  // Frames for the packages that have drawn members, outermost first.
+  // `elementExtent(id)` returns the area an element occupies, or null;
+  // `elementIds` lists every drawn element. The layout does not group a
+  // package's members, so it can place another element inside a package:
+  // each frame lists such elements in `overlaps` for authors to move with
+  // @pos. `style` carries the renderer's typography: fontFamily,
+  // fontSizeBold, fontSizeStereotype, and lineHeight.
+  function layoutPackageFrames(packages, elementExtent, elementIds, style) {
+    var padX = 18, padY = 18, tabPadX = 10, tabPadY = 3, tabMinW = 56, bodyBeyondTab = 24;
+    var children = createStringMap();
+    packages.forEach(function(pkg) {
+      if (pkg.parent) (children[pkg.parent] = children[pkg.parent] || []).push(pkg);
+    });
+    var frames = [];
+
+    function containedElements(pkg) {
+      var ids = pkg.members.slice();
+      (children[pkg.id] || []).forEach(function(child) { ids = ids.concat(containedElements(child)); });
+      return ids;
+    }
+
+    function overlappingNonMembers(pkg, outer) {
+      var contained = containedElements(pkg);
+      return elementIds.filter(function(id) {
+        if (contained.indexOf(id) !== -1) return false;
+        var extent = elementExtent(id);
+        return !!extent && extent.x < outer.x + outer.width && outer.x < extent.x + extent.width &&
+          extent.y < outer.y + outer.height && outer.y < extent.y + extent.height;
+      });
+    }
+
+    function layoutPackage(pkg, depth) {
+      var extent = null;
+      pkg.members.forEach(function(id) { extent = unionExtent(extent, elementExtent(id)); });
+      (children[pkg.id] || []).forEach(function(child) {
+        var childFrame = layoutPackage(child, depth + 1);
+        if (childFrame) extent = unionExtent(extent, childFrame.outer);
+      });
+      if (!extent) return null;
+
+      var lines = [];
+      if (pkg.stereotype) lines.push({ text: stereotypeDisplayText(pkg.stereotype), bold: false, fontSize: style.fontSizeStereotype });
+      lines.push({ text: pkg.label, bold: true, fontSize: style.fontSizeBold });
+      var textW = 0;
+      lines.forEach(function(line) { textW = Math.max(textW, textWidth(line.text, line.bold, line.fontSize, style.fontFamily)); });
+      var tabW = Math.max(tabMinW, Math.ceil(textW + tabPadX * 2));
+      var tabH = lines.length * style.lineHeight + tabPadY * 2;
+      var body = {
+        x: extent.x - padX,
+        y: extent.y - padY,
+        width: Math.max(extent.width + padX * 2, tabW + bodyBeyondTab),
+        height: extent.height + padY * 2
+      };
+      var tab = { x: body.x, y: body.y - tabH, width: tabW, height: tabH };
+      lines.forEach(function(line, i) {
+        line.x = tab.x + tabW / 2;
+        line.y = tab.y + tabPadY + (i + 0.5) * style.lineHeight + line.fontSize * 0.35;
+      });
+      var outer = unionExtent(body, tab);
+      var frame = {
+        id: pkg.id, label: pkg.label, stereotype: pkg.stereotype, depth: depth,
+        body: body, tab: tab, outer: outer, lines: lines,
+        overlaps: overlappingNonMembers(pkg, outer)
+      };
+      frames.push(frame);
+      return frame;
+    }
+
+    packages.forEach(function(pkg) { if (!pkg.parent) layoutPackage(pkg, 0); });
+    return frames.sort(function(a, b) { return a.depth - b.depth; });
+  }
+
+  // The package shapes, to be drawn first so everything else paints over
+  // them.
+  function drawPackageFrames(svg, frames, colors) {
+    frames.forEach(function(frame) {
+      var outline = ' data-callout-frame="true" data-layout-route-decorative="true" stroke="' + colors.secondaryLine + '" stroke-width="1.2"';
+      var overlaps = frame.overlaps && frame.overlaps.length
+        ? ' data-package-overlaps="' + escapeXml(frame.overlaps.join(' ')) + '"' : '';
+      svg.push('<g class="uml-package" data-uml-package="' + escapeXml(frame.id) + '"' + overlaps + ' pointer-events="none">');
+      svg.push('<rect data-package-part="tab"' + outline + ' x="' + frame.tab.x + '" y="' + frame.tab.y +
+        '" width="' + frame.tab.width + '" height="' + frame.tab.height + '" fill="' + colors.fill + '"/>');
+      svg.push('<rect data-package-part="body"' + outline + ' x="' + frame.body.x + '" y="' + frame.body.y +
+        '" width="' + frame.body.width + '" height="' + frame.body.height + '" fill="none"/>');
+      svg.push('</g>');
+    });
+  }
+
+  // The names in the tabs, to be drawn after connectors: a line that
+  // crosses a tab passes under the name's halo, as under a connector label.
+  function drawPackageNames(svg, frames, colors) {
+    frames.forEach(function(frame) {
+      svg.push('<g class="uml-package-name" data-uml-package-name="' + escapeXml(frame.id) + '" pointer-events="none">');
+      frame.lines.forEach(function(line) {
+        svg.push('<text x="' + line.x + '" y="' + line.y + '" text-anchor="middle" font-size="' + line.fontSize + '"' +
+          (line.bold ? ' font-weight="bold"' : '') + ' fill="' + colors.text + '" stroke="' + colors.fill +
+          '" stroke-width="4" stroke-linejoin="round" paint-order="stroke">' + escapeXml(line.text) + '</text>');
+      });
+      svg.push('</g>');
+    });
+  }
+
+  // Give drawn packages new frames from layoutPackageFrames, in place: the
+  // tab and body, the names in the tab, and the non-members each overlaps.
+  function updatePackageFrames(svgEl, frames) {
+    function drawnPart(selector, attribute, id) {
+      var parts = svgEl.querySelectorAll(selector);
+      for (var i = 0; i < parts.length; i++) if (parts[i].getAttribute(attribute) === id) return parts[i];
+      return null;
+    }
+    function setRect(el, rect) {
+      if (!el) return;
+      el.setAttribute('x', rect.x);
+      el.setAttribute('y', rect.y);
+      el.setAttribute('width', rect.width);
+      el.setAttribute('height', rect.height);
+    }
+    frames.forEach(function(frame) {
+      var shape = drawnPart('g[data-uml-package]', 'data-uml-package', frame.id);
+      if (shape) {
+        setRect(shape.querySelector('[data-package-part="tab"]'), frame.tab);
+        setRect(shape.querySelector('[data-package-part="body"]'), frame.body);
+        if (frame.overlaps.length) shape.setAttribute('data-package-overlaps', frame.overlaps.join(' '));
+        else shape.removeAttribute('data-package-overlaps');
+      }
+      var name = drawnPart('g[data-uml-package-name]', 'data-uml-package-name', frame.id);
+      var texts = name ? name.querySelectorAll('text') : [];
+      frame.lines.forEach(function(line, i) {
+        if (!texts[i]) return;
+        texts[i].setAttribute('x', line.x);
+        texts[i].setAttribute('y', line.y);
+      });
+    });
   }
 
   function expandBounds(bounds, node, svg) {
@@ -5295,6 +5610,9 @@
     renderedLayoutBox: renderedLayoutBox,
     renderedSvgBox: renderedBox,
     parseHighlightColor: parseHighlightColor,
+    extractStereotypes: extractStereotypes,
+    stereotypeDisplayText: stereotypeDisplayText,
+    formatStereotypeLabels: formatStereotypeLabels,
     highlightFills: highlightFills,
     darkenHexColor: darkenHexColor,
     getThemeColors: getThemeColors,
@@ -5302,6 +5620,12 @@
     applySvgAccessibility: applySvgAccessibility,
     svgOpen: svgOpen,
     svgClose: svgClose,
+    parsePackageOpener: parsePackageOpener,
+    createPackageScope: createPackageScope,
+    layoutPackageFrames: layoutPackageFrames,
+    drawPackageFrames: drawPackageFrames,
+    drawPackageNames: drawPackageNames,
+    updatePackageFrames: updatePackageFrames,
     createAutoInit: createAutoInit,
     drawNote: drawNote,
     measureNote: measureNote,
@@ -7662,6 +7986,7 @@
  *   class Animal { +name: str; +speak() }
  *   abstract class Shape { -color: int; +{abstract} area(): double }
  *   interface Drawable { +draw() }
+ *   package zoo::animals { class Dog }   UML package around the classes declared in it
  *   Dog --|> Animal
  *   Circle ..|> Drawable
  *   Zoo *-- Animal : contains
@@ -7723,6 +8048,9 @@
    */
   function parse(text) {
     var lines = text.split('\n');
+    // Source line of each working line: statements of a one-line package
+    // are read as extra lines but keep their line's index (route ids).
+    var lineOrigins = lines.map(function(_, index) { return index; });
     var classes = [];
     var relationships = [];
     var classMap = {};
@@ -7733,6 +8061,7 @@
     var layoutPreference = null;
     var shadowEnabled = true;
     var directionLocked = false;
+    var packageScope = UMLShared.createPackageScope();
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
@@ -7777,6 +8106,21 @@
         continue;
       }
 
+      // Packages contain the classes declared inside them.
+      var packageOpener = UMLShared.parsePackageOpener(line);
+      if (packageOpener) {
+        packageScope.openPackage(packageOpener);
+        // A one-line block's statements are read as the lines that follow.
+        var inlineLines = packageOpener.inlineLines;
+        Array.prototype.splice.apply(lines, [i + 1, 0].concat(inlineLines));
+        Array.prototype.splice.apply(lineOrigins, [i + 1, 0].concat(inlineLines.map(function() { return lineOrigins[i]; })));
+        continue;
+      }
+      if (line === '}') {
+        packageScope.close();
+        continue;
+      }
+
       // Note
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
@@ -7784,6 +8128,7 @@
       // Try to parse class declaration
       var cls = parseClassDecl(line);
       if (cls) {
+        packageScope.declare(cls, cls.name);
         // Check if this line also contains opening brace
         if (line.indexOf('{') !== -1) {
           braceDepth = 1;
@@ -7816,10 +8161,14 @@
       // Try to parse relationship
       var rel = parseRelationship(line);
       if (rel) {
-        rel.sourceIndex = i;
+        rel.sourceIndex = lineOrigins[i];
         relationships.push(rel);
         continue;
       }
+
+      // Any other block (`together {`, `skinparam class {`) must not take a
+      // package's closing brace.
+      if (/\{\s*$/.test(line)) packageScope.openWrapper();
     }
 
     // Auto-upgrade: generalization targeting an interface becomes realization,
@@ -7839,6 +8188,7 @@
       classes: classes,
       relationships: relationships,
       notes: notes,
+      packages: packageScope.packages,
       direction: direction,
       layoutPreference: layoutPreference,
       shadowEnabled: shadowEnabled,
@@ -7923,6 +8273,7 @@
       stereotype: stereotype,
       highlight: highlight,
       texture: texture,
+      package: null,
       attributes: [],
       methods: [],
     };
@@ -9092,6 +9443,34 @@
 
 
 
+  // `endLabels` maps a class name to the label rectangles ({left, right,
+  // top, bottom}) drawn at its ends of relationships: multiplicities and
+  // role names belong inside the class's package.
+  function layoutClassPackages(parsed, entries, endLabels) {
+    if (!parsed.packages || !parsed.packages.length) return [];
+    return UMLShared.layoutPackageFrames(parsed.packages, function(id) {
+      var entry = entries[id];
+      if (!entry) return null;
+      var minX = entry.x, minY = entry.y;
+      var maxX = entry.x + entry.box.width, maxY = entry.y + entry.box.height;
+      ((endLabels && endLabels[id]) || []).forEach(function(rect) {
+        minX = Math.min(minX, rect.left); minY = Math.min(minY, rect.top);
+        maxX = Math.max(maxX, rect.right); maxY = Math.max(maxY, rect.bottom);
+      });
+      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
+  }
+
+  // Member note targets are derived from class positions: rebuild them once
+  // manual positions have moved the classes.
+  function refreshMemberNoteTargets(entries) {
+    for (var name in entries) {
+      if (Object.prototype.hasOwnProperty.call(entries, name) && entries[name].cls) {
+        entries[name].noteTargets = buildMemberNoteTargets(entries[name]);
+      }
+    }
+  }
+
   /**
    * Generate full SVG string from layout and relationships.
    */
@@ -9120,6 +9499,18 @@
         name: obstacleName
       });
     }
+
+    // Packages enclose their classes as placed, manual positions included,
+    // and are drawn behind everything. Their name tabs are labels too:
+    // relationship labels, multiplicities, and notes keep clear of them.
+    // The shapes fill this slot once the end labels are placed, so that
+    // each frame also encloses the labels at its classes.
+    var packageFrames = layoutClassPackages(parsed, entries);
+    var packageShapesSlot = svg.length;
+    svg.push('');
+    packageFrames.forEach(function(frame) {
+      placedLabels.push({ left: frame.tab.x, right: frame.tab.x + frame.tab.width, top: frame.tab.y, bottom: frame.tab.y + frame.tab.height });
+    });
 
     function classNotePressureBaseName(targetName) {
       if (!targetName) return '';
@@ -10908,6 +11299,21 @@
       }
     }
 
+    // ── Fit the packages to their classes and the end labels drawn at them;
+    // draw the shapes behind everything and the names over the lines that
+    // cross their tabs ──
+    var endLabelsAt = {};
+    classRelationTextQueue.forEach(function(routeInfo) {
+      [[routeInfo.rel.from, routeInfo.fromMultPlacement], [routeInfo.rel.to, routeInfo.toMultPlacement]].forEach(function(end) {
+        if (end[1] && end[1].rect) (endLabelsAt[end[0]] = endLabelsAt[end[0]] || []).push(end[1].rect);
+      });
+    });
+    packageFrames = layoutClassPackages(parsed, entries, endLabelsAt);
+    var packageShapes = [];
+    UMLShared.drawPackageFrames(packageShapes, packageFrames, colors);
+    svg[packageShapesSlot] = packageShapes.join('');
+    UMLShared.drawPackageNames(svg, packageFrames, colors);
+
     // ── Draw class boxes (on top of lines) ──
 
     for (var en in entries) {
@@ -11030,6 +11436,17 @@
       if (routeObstacle) noteObstacles.push(routeObstacle);
     }
     for (var nmi = 0; nmi < noteMarkerObstacles.length; nmi++) noteObstacles.push(noteMarkerObstacles[nmi]);
+    // A note lies inside a package or outside it, never across its outline.
+    packageFrames.forEach(function(frame) {
+      var b = frame.body;
+      [
+        { isH: true, y: b.y, x1: b.x, x2: b.x + b.width },
+        { isH: true, y: b.y + b.height, x1: b.x, x2: b.x + b.width },
+        { isH: false, x: b.x, y1: b.y, y2: b.y + b.height },
+        { isH: false, x: b.x + b.width, y1: b.y, y2: b.y + b.height }
+      ].forEach(function(edge) { noteObstacles.push(segmentObstacleRect(edge, 2)); });
+      noteObstacles.push({ x: frame.tab.x, y: frame.tab.y, w: frame.tab.width, h: frame.tab.height });
+    });
 
     // The fixed local search can be surrounded by classes in a fan-out. Let
     // notes reach a clear lane outside the drawing, including space occupied
@@ -11426,6 +11843,9 @@
     }
     for (var elbi = 0; elbi < placedLabels.length; elbi++) {
       expandClassExtraForRect(placedLabels[elbi], CFG.svgPad);
+    }
+    for (var pkbi = 0; pkbi < packageFrames.length; pkbi++) {
+      expandClassExtraForRect(packageFrames[pkbi].outer, CFG.svgPad);
     }
     for (var embi = 0; embi < noteMarkerObstacles.length; embi++) {
       expandClassExtraForRect(noteMarkerObstacles[embi], CFG.svgPad);
@@ -12283,6 +12703,7 @@
     var rendered = withAdaptiveClassTypography(parsed, function() {
       var layout = computeLayout(parsed);
       UMLShared.applyLayoutPositions(layout, parsed.layout);
+      refreshMemberNoteTargets(layout.entries);
       return generateSVG(layout, parsed, colors);
     });
     var svgStr = rendered;
@@ -12793,6 +13214,16 @@
   // A label centered on a message between neighboring lanes straddles their
   // dividing line. A backdrop in the label halo's color keeps the line out
   // of the words; labels inside one lane keep the plain halo.
+  // A rectangle in the diagram's fill behind a one-line label of `width` that
+  // starts at `left` with its baseline at `y`, so that lines drawn before it
+  // do not run through the text. Below full opacity they still show faintly.
+  // `attrs` adds attributes such as a marker for a later refit.
+  function labelBackdropMarkup(left, width, y, fontSize, fill, opacity, attrs) {
+    return '<rect data-layout-route-decorative="true"' + (attrs || '') + ' x="' + (left - 3) + '" y="' + (y - fontSize) +
+      '" width="' + (width + 6) + '" height="' + (fontSize + 4) + '" rx="2" fill="' + fill + '"' +
+      (opacity < 1 ? ' fill-opacity="' + opacity + '"' : '') + '/>';
+  }
+
   function pushLaneLabelBackdrop(svg, lanes, text, x, y, anchor, colors) {
     if (!text || !lanes.length) return;
     var w = UMLShared.textWidth(text, false, CFG.fontSize);
@@ -12803,8 +13234,36 @@
       crosses = (lanes[i].left > left && lanes[i].left < right) || (lanes[i].right > left && lanes[i].right < right);
     }
     if (!crosses) return;
-    svg.push('<rect data-layout-route-decorative="true" x="' + (left - 3) + '" y="' + (y - CFG.fontSize) +
-      '" width="' + (w + 6) + '" height="' + (CFG.fontSize + 4) + '" rx="2" fill="' + colors.fill + '" fill-opacity="0.85"/>');
+    svg.push(labelBackdropMarkup(left, w, y, CFG.fontSize, colors.fill, 0.85));
+  }
+
+  // A combined fragment's guard, `[condition]`, starting at `x` with its
+  // baseline at `y`. It covers the lifelines and activation bars it crosses
+  // (UML 2.5.1, 17.6.4), so an opaque backdrop lies under the text.
+  function pushFragmentGuard(out, attrs, x, y, condition, colors) {
+    var text = '[' + condition + ']';
+    out.push(labelBackdropMarkup(x, UMLShared.textWidth(text, false, CFG.fontSizeFragment), y,
+      CFG.fontSizeFragment, colors.fill, 1, ' data-uml-guard-backdrop="true"'));
+    out.push('<text' + attrs + ' x="' + x + '" y="' + y +
+      '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
+      '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
+      UMLShared.escapeXml(text) + '</text>');
+  }
+
+  // The canvas measures a guard slightly narrower than the browser draws it
+  // at the diagram's scale, so once the SVG is in the page each backdrop
+  // takes the width of its drawn text. A drawing that cannot be measured yet
+  // (a hidden container) keeps the measured estimate.
+  function refitFragmentGuardBackdrops(container) {
+    var backdrops = container.querySelectorAll('svg rect[data-uml-guard-backdrop]');
+    for (var i = 0; i < backdrops.length; i++) {
+      var text = backdrops[i].nextElementSibling;
+      var box = null;
+      try { box = text && text.getBBox(); } catch (e) { /* not measurable */ }
+      if (!box || !box.width) continue;
+      backdrops[i].setAttribute('x', box.x - 3);
+      backdrops[i].setAttribute('width', box.width + 6);
+    }
   }
 
   function computeSequenceSpacing(participants) {
@@ -12873,6 +13332,7 @@
     var svg = generateSequenceSVG(parsed, colors);
     container.innerHTML = svg;
     UMLShared.applyLayoutRoutes(container, parsed.layout);
+    refitFragmentGuardBackdrops(container);
     UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
@@ -13065,7 +13525,10 @@
           }
         }
       } else if (msg.type === 'fragment_start') {
-        var fragmentStartY = curY - 15;
+        // A frame reaches 15px up into the row above, which a message leaves
+        // free. A note fills its row to within 16px of the end, so a frame
+        // after a note starts at the row's end and stays clear of it.
+        var fragmentStartY = curY - (prevLayoutType === 'note' ? 0 : 15);
         fragmentStack.push({ startY: fragmentStartY, fragType: msg.fragType, condition: msg.condition, elseYs: [], minPIdx: Infinity, maxPIdx: -Infinity, depth: fragmentStack.length, lastMsgY: curY, sourceIndex: msg.sourceIndex, selfMessages: [], children: [] });
         // Reserve the tab, guard descent, and the first message label's
         // ascent plus its six-pixel offset above the message stroke.
@@ -13486,11 +13949,9 @@
       // Condition text — deferred to render on top of everything. Tag with the
       // fragment id so the editor can recognize it for inline editing.
       if (frag.condition) {
-        guardSvg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-fragment-role="condition"' : '') +
-          ' x="' + (fragL + 10) + '" y="' + (ly + lh + 14) +
-          '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
-          '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
-          UMLShared.escapeXml(frag.condition) + ']</text>');
+        pushFragmentGuard(guardSvg,
+          fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-fragment-role="condition"' : '',
+          fragL + 10, ly + lh + 14, frag.condition, colors);
       }
 
       // Else divider lines
@@ -13503,11 +13964,8 @@
         svg.push('<line' + elseLineAttrs + ' x1="' + fragL + '" y1="' + ey + '" x2="' + fragR + '" y2="' + ey +
           '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="6,4"/>');
         if (frag.elseYs[ei].condition) {
-          guardSvg.push('<text' + (elseLineAttrs ? elseLineAttrs + ' data-layout-fragment-role="branch"' : '') +
-            ' x="' + (fragL + 10) + '" y="' + (ey + 16) +
-            '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
-            UMLShared.escapeXml(frag.elseYs[ei].condition) + ']</text>');
+          pushFragmentGuard(guardSvg, elseLineAttrs ? elseLineAttrs + ' data-layout-fragment-role="branch"' : '',
+            fragL + 10, ey + 16, frag.elseYs[ei].condition, colors);
         }
       }
     }
@@ -15998,10 +16456,13 @@
  *
  * Notation:
  *   component Name               Component box (no ports)
+ *   component Name <<Kind>>      Stereotyped component; <<A, B>> or <<A>> <<B>>
+ *                                show as one «A, B» pair above the name
  *   component Name {             Component with directional ports
  *     portin "name" as alias     Incoming port placed on the left edge
  *     portout "name" as alias    Outgoing port placed on the right edge
  *   }
+ *   package Name { ... }         UML package around the components declared in it
  *   port "name" as alias         Standalone labelled port
  *     provide "name" as alias    Provided interface (lollipop ○)
  *     require "name" as alias    Required interface (socket arc)
@@ -16011,6 +16472,7 @@
  *   provide --> require : label  Joined ball-and-socket assembly (○))
  *   A ..> B : label              Dependency (dashed arrow)
  *   A -- B : label               Plain link
+ *   A -- B : <<kind>> {p = "v"}  Connector stereotype («kind») and property string
  */
 (function () {
   'use strict';
@@ -16019,6 +16481,7 @@
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
     fontSize: 14,
     fontSizeBold: 15,
+    fontSizeStereotype: 13,
     lineHeight: 22,
     padX: 24,
     padY: 14,
@@ -16042,6 +16505,39 @@
   };
   var COMPONENT_CONNECTOR_LABEL_MAX_WIDTH = 180;
   var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
+
+  // A component's header. With a stereotype, UML 2.5.1 (9.2.4) centers the
+  // «keywords» in plain face above the centered bold name; the component
+  // icon stays in the corner (11.6.4). Without one, the header keeps its
+  // single line: a centered name, or a top-left name above the ports.
+  // `height` is where the port rows of a box with ports begin.
+  function componentHeader(comp, label) {
+    var stereotypeText = UMLShared.stereotypeDisplayText(comp.stereotype);
+    var nameWidth = UMLShared.textWidth(label, true, CFG.fontSizeBold);
+    return {
+      stereotypeText: stereotypeText,
+      centered: !!stereotypeText,
+      textWidth: stereotypeText
+        ? Math.max(nameWidth, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype))
+        : nameWidth,
+      height: CFG.lineHeight + CFG.padY + (stereotypeText ? CFG.lineHeight : 0),
+      minHeight: stereotypeText ? CFG.padY * 2 + CFG.lineHeight * 2 : CFG.compMinH
+    };
+  }
+
+  // Baselines of a stereotyped header's two lines: at the top of a box with
+  // ports, or centered in a box without.
+  function componentStereotypeBaselines(entry) {
+    if (entry.hasPorts) {
+      var first = entry.y + CFG.padY + CFG.fontSizeBold * 0.35 + 2;
+      return { stereotype: first, name: first + CFG.lineHeight };
+    }
+    var middle = entry.y + entry.box.height / 2;
+    return {
+      stereotype: middle - CFG.lineHeight / 2 + CFG.fontSize * 0.35,
+      name: middle + CFG.lineHeight / 2 + CFG.fontSize * 0.35
+    };
+  }
 
   function componentPortBottomInset() {
     var fontSize = CFG.fontSize - 1;
@@ -16149,6 +16645,7 @@
 
     var direction = 'LR'; // Component diagrams default to left-to-right
     var layoutPreference = null;
+    var packageScope = UMLShared.createPackageScope();
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
@@ -16168,10 +16665,24 @@
         layoutPreference = null;
         continue;
       }
-      // Group wrappers: together / package / frame / folder / node / rectangle { ... }
+      // UML packages contain the components declared inside them.
+      var packageOpener = UMLShared.parsePackageOpener(line);
+      if (packageOpener) {
+        packageScope.openPackage(packageOpener);
+        // A one-line block's statements are read as the lines that follow.
+        Array.prototype.splice.apply(lines, [i + 1, 0].concat(packageOpener.inlineLines));
+        continue;
+      }
+      // Other group wrappers: together / frame / folder / node / rectangle { ... }
       // — we don't render the wrapper, but its body IS parsed at top level.
-      if (/^(?:together|package|frame|folder|rectangle|cloud|database|node|artifact|file|group)\b[^{]*\{\s*$/i.test(line)) continue;
-      if (line === '}') continue; // closing brace of a wrapper
+      if (/^(?:together|frame|folder|rectangle|cloud|database|node|artifact|file|group)\b[^{]*\{\s*$/i.test(line)) {
+        packageScope.openWrapper();
+        continue;
+      }
+      if (line === '}') { // closing brace of a wrapper or package
+        packageScope.close();
+        continue;
+      }
       // Hidden/styled edge syntax like  A -[hidden]r- B  (PlantUML spacing hint)
       var hiddenMatch = line.match(/^(?:\[([^\]]+)\]|(\S+))\s+[.=-]*\[[^\]]*hidden[^\]]*\][.=-]*[lrud]?[.=-]\s+(?:\[([^\]]+)\]|(\S+))/i);
       if (hiddenMatch) {
@@ -16204,23 +16715,15 @@
         continue;
       }
 
-      // Strip optional `#color` highlight suffix before other declarations.
-      // Guard: don't swallow bare component/bracket names when they happen
-      // to collide with a texture keyword.
-      var compStyleInfo = stripComponentDashedStyle(line);
-      var compHl = UMLShared.parseHighlightColor(compStyleInfo.stripped);
-      var compLine = line;
-      var compHighlight = null;
-      var compTexture = null;
-      var compVisualStyle = compStyleInfo.visualStyle;
-      var looksLikeComponentDecl = /^(?:component\s+\S|\[[^\]]+\])/i.test(compHl.stripped);
-      if (looksLikeComponentDecl) {
-        compLine = compHl.stripped;
-        compHighlight = compHl.highlight;
-        compTexture = compHl.texture;
-      } else {
-        compVisualStyle = null;
-      }
+      // Strip a declaration's stereotypes and style suffixes before matching
+      // its name. Guard: don't swallow bare component/bracket names when they
+      // happen to collide with a texture keyword.
+      var compDecl = parseComponentDeclarationDecorations(line);
+      var compLine = compDecl ? compDecl.line : line;
+      var compHighlight = compDecl ? compDecl.highlight : null;
+      var compTexture = compDecl ? compDecl.texture : null;
+      var compVisualStyle = compDecl ? compDecl.visualStyle : null;
+      var compStereotype = compDecl ? compDecl.stereotype : null;
 
       // Component declaration with optional port block. Accepts any of:
       //   component Name                      → id=Name,  label=Name
@@ -16292,14 +16795,16 @@
 
         if (!Object.prototype.hasOwnProperty.call(componentMap, cName)) {
           componentMap[cName] = components.length;
-          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
+          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle, stereotype: compStereotype });
         } else {
           var existing = components[componentMap[cName]];
           if (compHighlight) existing.highlight = compHighlight;
           if (compTexture) existing.texture = compTexture;
           if (compVisualStyle) existing.visualStyle = compVisualStyle;
+          if (compStereotype) existing.stereotype = compStereotype;
           mergePortsInto(existing, ports, portAliasMap);
         }
+        packageScope.declare(components[componentMap[cName]], cName);
         continue;
       }
 
@@ -16312,12 +16817,14 @@
         if (bLabel !== bName) displayNameMap[bName] = bLabel;
         if (!Object.prototype.hasOwnProperty.call(componentMap, bName)) {
           componentMap[bName] = components.length;
-          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
+          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle, stereotype: compStereotype });
         } else {
           if (compHighlight) components[componentMap[bName]].highlight = compHighlight;
           if (compTexture) components[componentMap[bName]].texture = compTexture;
           if (compVisualStyle) components[componentMap[bName]].visualStyle = compVisualStyle;
+          if (compStereotype) components[componentMap[bName]].stereotype = compStereotype;
         }
+        packageScope.declare(components[componentMap[bName]], bName);
         continue;
       }
 
@@ -16347,6 +16854,7 @@
           if (standalonePort.visualStyle) spExisting.visualStyle = standalonePort.visualStyle;
           mergePortsInto(spExisting, [standalonePort], portAliasMap);
         }
+        packageScope.declare(components[componentMap[spName]], spName);
         continue;
       }
 
@@ -16367,7 +16875,9 @@
         var rawLabel = (connMatch[7] || '').trim();
         // Strip surrounding quotes on connector labels (`"get /users"` → `get /users`).
         var connLabelInfo = UMLShared.parseLabelDirectionCue(rawLabel.replace(/^"([^"]*)"$/, '$1'));
-        var label = connLabelInfo.text;
+        // A connector may carry stereotypes and a property string, such as
+        // `<<subscribe>> {binding = "trip.*"}` (UML 2.5.1 11.2.4).
+        var label = UMLShared.formatStereotypeLabels(connLabelInfo.text);
 
         // Resolve from: alias map → dot notation → bare component
         var from, fromPort = null;
@@ -16418,10 +16928,15 @@
       }
     }
 
+    for (var pci = 0; pci < components.length; pci++) {
+      if (!components[pci].package) components[pci].package = null;
+    }
+
     return {
       components: components,
       connectors: connectors,
       notes: notes,
+      packages: packageScope.packages,
       direction: direction,
       layoutPreference: layoutPreference,
       displayNameMap: displayNameMap,
@@ -16471,7 +16986,8 @@
       }
 
       var displayName = parsed.displayNameMap[c.name] || c.name;
-      var nameW = UMLShared.textWidth(displayName, true, CFG.fontSizeBold);
+      var header = componentHeader(c, displayName);
+      var nameW = header.textWidth;
       var hasPorts = leftPorts.length > 0 || rightPorts.length > 0;
       var maxSidePorts = Math.max(leftPorts.length, rightPorts.length);
 
@@ -16502,22 +17018,26 @@
         h = Math.max(standaloneSymbolH + 8, portLblFs + 12);
         hasPorts = false;
       } else if (hasPorts) {
-        // Width: must fit name+icon row OR left-labels + gap + right-labels row
-        var nameRowW = nameW + CFG.padX + CFG.iconW + 16;
+        // Width: must fit the header row(s) OR left-labels + gap + right-labels row.
+        // A top-left name needs one padding; centered header lines need two.
+        var nameRowW = header.centered
+          ? nameW + CFG.padX * 2 + CFG.iconW
+          : nameW + CFG.padX + CFG.iconW + 16;
         var portRowW = maxLeftLblW + maxRightLblW + CFG.portSize * 2 + 50;
         w = Math.max(CFG.compMinW, nameRowW, portRowW);
-        // Height: name area at top + port rows below
-        var nameAreaH = CFG.lineHeight + CFG.padY;
-        h = nameAreaH + maxSidePorts * CFG.portPad + CFG.padY;
+        // Height: header at top + port rows below
+        h = header.height + maxSidePorts * CFG.portPad + CFG.padY;
         h = Math.max(h, CFG.compMinH);
       } else {
         w = Math.max(CFG.compMinW, nameW + CFG.padX * 2 + CFG.iconW);
-        h = CFG.compMinH;
+        h = header.minHeight;
       }
 
       entries[c.name] = {
         comp: c,
         label: displayName,
+        stereotypeText: header.stereotypeText,
+        headerHeight: header.height,
         box: { width: Math.ceil(w), height: h },
         x: 0, y: 0,
         leftPorts: leftPorts,
@@ -17120,7 +17640,6 @@
 
     // Compute port positions (after x,y are finalized and ports are reordered)
     var portHalf = CFG.portSize / 2;
-    var nameAreaH = CFG.lineHeight + CFG.padY;
     function computeOrderedPortCenters(entry, sidePorts, portTop, portAreaH) {
       var centers = {};
       if (!sidePorts.length) return centers;
@@ -17170,11 +17689,11 @@
       }
 
       function portTopForEntry(entry) {
-        return entry.hasPorts ? entry.y + nameAreaH : entry.y;
+        return entry.hasPorts ? entry.y + entry.headerHeight : entry.y;
       }
 
       function portAreaHeightForEntry(entry) {
-        return entry.box.height - (entry.hasPorts ? nameAreaH : 0);
+        return entry.box.height - (entry.hasPorts ? entry.headerHeight : 0);
       }
 
       function computeGroupCenters(entry, side, ports) {
@@ -17433,8 +17952,8 @@
           continue;
         }
 
-        var portTop = e.hasPorts ? by + nameAreaH : by;
-        var portAreaH = bh - (e.hasPorts ? nameAreaH : 0);
+        var portTop = e.hasPorts ? by + e.headerHeight : by;
+        var portAreaH = bh - (e.hasPorts ? e.headerHeight : 0);
         var leftCenters = computeOrderedPortCenters(e, e.leftPorts, portTop, portAreaH);
         var rightCenters = computeOrderedPortCenters(e, e.rightPorts, portTop, portAreaH);
 
@@ -18791,17 +19310,112 @@
 
   // ─── SVG Renderer ─────────────────────────────────────────────────
 
+  // Port aliases joined by an assembly between a provided and a required
+  // interface. Their ball and socket are drawn on the connector instead of
+  // beside the component.
+  function joinedInterfacePorts(parsed) {
+    var portKindMap = {};
+    for (var pki = 0; pki < parsed.components.length; pki++) {
+      var pkComp = parsed.components[pki];
+      for (var pkpi = 0; pkpi < pkComp.ports.length; pkpi++) {
+        if (pkComp.ports[pkpi].kind)
+          portKindMap[pkComp.ports[pkpi].alias] = pkComp.ports[pkpi].kind;
+      }
+    }
+
+    var joinedPorts = {};
+    for (var jci = 0; jci < parsed.connectors.length; jci++) {
+      var jc = parsed.connectors[jci];
+      if (jc.type !== 'assembly') continue;
+      var jfk = jc.fromPort ? portKindMap[jc.fromPort] : null;
+      var jtk = jc.toPort ? portKindMap[jc.toPort] : null;
+      if ((jfk === 'provide' && jtk === 'require') || (jfk === 'require' && jtk === 'provide')) {
+        if (jc.fromPort) joinedPorts[jc.fromPort] = true;
+        if (jc.toPort) joinedPorts[jc.toPort] = true;
+      }
+    }
+    return joinedPorts;
+  }
+
+  function interfaceSymbolCenter(pos) {
+    if (!pos || (pos.kind !== 'provide' && pos.kind !== 'require')) return null;
+    var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
+    if (pos.standalone) {
+      return { x: pos.cx, y: pos.cy, r: radius };
+    }
+    if (pos.side === 'top') {
+      return { x: pos.cx, y: pos.cy - CFG.ifaceStick - radius, r: radius };
+    }
+    if (pos.side === 'bottom') {
+      return { x: pos.cx, y: pos.cy + CFG.ifaceStick + radius, r: radius };
+    }
+    return {
+      x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
+      y: pos.cy,
+      r: radius
+    };
+  }
+
+  // The area a component occupies: its box, the port squares on its border,
+  // and the interface symbols drawn beside it, with their names.
+  // `decorations` lists further rectangles drawn at the component, such as
+  // the joined ball and socket of an assembly and that interface's name.
+  function componentDrawnExtent(entry, joinedPorts, decorations) {
+    var minX = entry.x, minY = entry.y;
+    var maxX = entry.x + entry.box.width, maxY = entry.y + entry.box.height;
+    function include(x1, y1, x2, y2) {
+      minX = Math.min(minX, x1); minY = Math.min(minY, y1);
+      maxX = Math.max(maxX, x2); maxY = Math.max(maxY, y2);
+    }
+    (decorations || []).forEach(function(rect) {
+      include(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+    });
+    for (var alias in entry.portPositions) {
+      if (!Object.prototype.hasOwnProperty.call(entry.portPositions, alias)) continue;
+      var pos = entry.portPositions[alias];
+      if (pos.standalone) continue;
+      var symbol = joinedPorts[alias] ? null : interfaceSymbolCenter(pos);
+      if (!symbol) {
+        include(pos.x, pos.y, pos.x + CFG.portSize, pos.y + CFG.portSize);
+        continue;
+      }
+      var fontSize = CFG.fontSize - 1;
+      var halfLabel = UMLShared.textWidth(pos.label !== undefined ? pos.label : alias, false, fontSize) / 2;
+      var baseline = pos.side === 'top' ? symbol.y - symbol.r - 4 : symbol.y + symbol.r + fontSize + 2;
+      include(symbol.x - symbol.r, symbol.y - symbol.r, symbol.x + symbol.r, symbol.y + symbol.r);
+      include(symbol.x - halfLabel, baseline - fontSize, symbol.x + halfLabel, baseline + 4);
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  // `decorations` maps a component name to the rectangles drawn at it once
+  // connectors are routed (see componentDrawnExtent).
+  function layoutComponentPackages(parsed, entries, joinedPorts, decorations) {
+    if (!parsed.packages || !parsed.packages.length) return [];
+    return UMLShared.layoutPackageFrames(parsed.packages, function(id) {
+      return entries[id] ? componentDrawnExtent(entries[id], joinedPorts, decorations && decorations[id]) : null;
+    }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
+  }
+
   function generateSVG(layout, parsed, colors) {
     var entries = layout.entries;
     var connectors = parsed.connectors;
+    var joinedPorts = joinedInterfacePorts(parsed);
+    // Packages enclose their members as placed, manual positions included.
+    // Notes and connector labels keep clear of their name tabs.
+    var packageFrames = layoutComponentPackages(parsed, entries, joinedPorts);
+    var packageTabs = packageFrames.map(function(frame) { return frame.tab; });
 
     // Resolve note target — supports dotted paths to sub-elements
 
     // Pre-compute note positions for SVG bounds expansion
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, null, { layout: parsed.layout });
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, packageTabs, { layout: parsed.layout });
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
-    for (var nbi = 0; nbi < notePositions.length; nbi++) {
-      var npb = notePositions[nbi];
+    var extraBoundsRects = notePositions.concat(packageFrames.map(function(frame) {
+      return { x: frame.outer.x, y: frame.outer.y, w: frame.outer.width, h: frame.outer.height };
+    }));
+    for (var nbi = 0; nbi < extraBoundsRects.length; nbi++) {
+      var npb = extraBoundsRects[nbi];
       if (npb.x < -layout.offsetX) noteExtraL = Math.max(noteExtraL, -layout.offsetX - npb.x + CFG.svgPad);
       var nr = npb.x + npb.w - (layout.width - layout.offsetX);
       if (nr > 0) noteExtraR = Math.max(noteExtraR, nr + CFG.svgPad);
@@ -18856,52 +19470,11 @@
       return attrs;
     }
 
-    // Build port kind map for interface detection
-    var portKindMap = {};
-    for (var pki = 0; pki < parsed.components.length; pki++) {
-      var pkComp = parsed.components[pki];
-      for (var pkpi = 0; pkpi < pkComp.ports.length; pkpi++) {
-        if (pkComp.ports[pkpi].kind)
-          portKindMap[pkComp.ports[pkpi].alias] = pkComp.ports[pkpi].kind;
-      }
-    }
-
-    // Identify joined ports (assembly connectors between provide/require)
-    var joinedPorts = {};
-    for (var jci = 0; jci < connectors.length; jci++) {
-      var jc = connectors[jci];
-      if (jc.type !== 'assembly') continue;
-      var jfk = jc.fromPort ? portKindMap[jc.fromPort] : null;
-      var jtk = jc.toPort ? portKindMap[jc.toPort] : null;
-      if ((jfk === 'provide' && jtk === 'require') || (jfk === 'require' && jtk === 'provide')) {
-        if (jc.fromPort) joinedPorts[jc.fromPort] = true;
-        if (jc.toPort) joinedPorts[jc.toPort] = true;
-      }
-    }
     var sharedInterfaceConnectorLabels = {};
     var suppressInterfacePortLabel = {};
 
     function interfacePortLabel(pos, alias) {
       return pos && pos.label !== undefined ? pos.label : alias;
-    }
-
-    function interfaceSymbolCenter(pos) {
-      if (!pos || (pos.kind !== 'provide' && pos.kind !== 'require')) return null;
-      var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
-      if (pos.standalone) {
-        return { x: pos.cx, y: pos.cy, r: radius };
-      }
-      if (pos.side === 'top') {
-        return { x: pos.cx, y: pos.cy - CFG.ifaceStick - radius, r: radius };
-      }
-      if (pos.side === 'bottom') {
-        return { x: pos.cx, y: pos.cy + CFG.ifaceStick + radius, r: radius };
-      }
-      return {
-        x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
-        y: pos.cy,
-        r: radius
-      };
     }
 
     function componentPortObstacleRects(conn) {
@@ -18988,7 +19561,9 @@
     // Collect component bounding boxes as obstacles (with interface extensions)
     var obstaclePad = 18;
     var obstacles = [];
-    var labelObstacles = [];
+    var labelObstacles = packageTabs.map(function(tab, index) {
+      return { x1: tab.x, y1: tab.y, x2: tab.x + tab.width, y2: tab.y + tab.height, name: '__package_' + packageFrames[index].id };
+    });
     var standaloneSquareLabels = {};
     for (var obn in entries) {
       var obe = entries[obn];
@@ -19163,7 +19738,7 @@
       var portIdx = sidePorts.indexOf(alias);
       if (portIdx < 0) return null;
 
-      var headerHeight = CFG.lineHeight + CFG.padY;
+      var headerHeight = entry.headerHeight;
       var portTop = entry.hasPorts ? entry.y + headerHeight : entry.y;
       var portAreaH = entry.box.height - (entry.hasPorts ? headerHeight : 0);
       var halfPort = CFG.portSize / 2;
@@ -19177,7 +19752,10 @@
         var labelMetrics = UMLShared.textMetrics(pos.label || alias, false, labelFontSize, CFG.fontFamily, true);
         var headerDescent = isFinite(headerMetrics.fontBoundingBoxDescent) ? headerMetrics.fontBoundingBoxDescent : 4;
         var labelAscent = isFinite(labelMetrics.fontBoundingBoxAscent) ? labelMetrics.fontBoundingBoxAscent : labelFontSize + 6;
-        var titleBottom = CFG.padY + CFG.fontSizeBold * 0.35 + 2 + headerDescent;
+        var nameBaseline = entry.stereotypeText
+          ? componentStereotypeBaselines(entry).name - entry.y
+          : CFG.padY + CFG.fontSizeBold * 0.35 + 2;
+        var titleBottom = nameBaseline + headerDescent;
         var labelAboveCenter = labelAscent - labelFontSize * 0.35;
         if (isFinite(titleBottom) && isFinite(labelAboveCenter)) {
           lower = entry.y + titleBottom + 4 + Math.max(halfPort, labelAboveCenter);
@@ -21290,6 +21868,15 @@
         svg.push('<polyline points="' + pts2 +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + routeTargetDataAttr + '/>');
 
+        // The symbol and its name are drawn at the end nearer along the route,
+        // which runs from conn.from to conn.to. Mark that component so a
+        // package around it can enclose them (refitComponentPackageFrames).
+        var bsAlongRoute = Math.abs(bsMx - bsSeg0.x) + Math.abs(bsMy - bsSeg0.y);
+        for (var bsk = 0; bsk < bsSi; bsk++) {
+          bsAlongRoute += Math.abs(points[bsk + 1].x - points[bsk].x) + Math.abs(points[bsk + 1].y - points[bsk].y);
+        }
+        var bsDrawnAt = bsAlongRoute <= bsRouteLength / 2 ? conn.from : conn.to;
+        svg.push('<g data-uml-drawn-at="' + UMLShared.escapeXml(bsDrawnAt) + '">');
         // Draw ball (filled circle)
         svg.push('<circle cx="' + ballCx + '" cy="' + ballCy + '" r="' + ballR +
           '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
@@ -21312,6 +21899,7 @@
           Math.max(ballR, socketR),
           UMLShared.routeDirectionAtPlacement(points, { x: bsMx, y: bsMy })
         );
+        svg.push('</g>');
       } else {
         routeId = 'edge-' + renderedRouteCount++;
         routeDataAttr = connectorLayoutAttrs(conn, null, routeId);
@@ -21455,6 +22043,18 @@
       placedLabels.push(UMLShared.unionRects(componentLabelRect, componentDirectionRect));
     }
 
+    // ── Draw packages around the members' final extents (routing may have
+    // slid ports along their borders): shapes behind everything, names over
+    // the connectors that cross them. Once connector labels settle, render()
+    // refits them to the joined interfaces drawn at members. ──
+    var finalPackageFrames = layoutComponentPackages(parsed, entries, joinedPorts);
+    if (finalPackageFrames.length) {
+      var packageShapes = [];
+      UMLShared.drawPackageFrames(packageShapes, finalPackageFrames, colors);
+      Array.prototype.splice.apply(svg, [1, 0].concat(packageShapes));
+      UMLShared.drawPackageNames(svg, finalPackageFrames, colors);
+    }
+
     // ── Draw component boxes ──
     var nameAreaH2 = CFG.lineHeight + CFG.padY;
     for (var en in entries) {
@@ -21519,7 +22119,8 @@
       // Main rectangle
       svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
         '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' +
-        compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
+        compDashAttr + componentLayoutAttr(e.comp.name) +
+        ' data-layout-bounds-id="' + UMLShared.escapeXml(e.comp.name) + '"/>');
       if (compFills.textureUrl) {
         svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
           '" fill="' + compFills.textureUrl + '" stroke="none"' + componentLayoutAttr(e.comp.name) + '/>');
@@ -21535,7 +22136,18 @@
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + CFG.iconH - CFG.iconTabH - 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
 
-      if (e.hasPorts) {
+      if (e.stereotypeText) {
+        // «Keywords» in plain face, centered above the centered bold name,
+        // both left of the icon.
+        var headerCx = bx + (bw - CFG.iconW - 8) / 2;
+        var headerBaselines = componentStereotypeBaselines(e);
+        svg.push('<text x="' + headerCx + '" y="' + headerBaselines.stereotype +
+          '" text-anchor="middle" font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.stereotypeText) + '</text>');
+        svg.push('<text x="' + headerCx + '" y="' + headerBaselines.name +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.label) + '</text>');
+      } else if (e.hasPorts) {
         // Name at top-left when component has ports
         svg.push('<text x="' + (bx + CFG.padX) + '" y="' + (by + CFG.padY + CFG.fontSizeBold * 0.35 + 2) +
           '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
@@ -21783,6 +22395,26 @@
     }
   }
 
+  // A package frame encloses what is drawn at its members, joined interfaces
+  // included. Their names settle only after rendering (labels move off
+  // components, authors pin label positions), so the frames are refitted to
+  // the groups that generateSVG marks with the component they are drawn at.
+  function refitComponentPackageFrames(container, parsed, entries) {
+    if (!parsed.packages || !parsed.packages.length) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    var drawnAt = {};
+    var groups = svg.querySelectorAll('g[data-uml-drawn-at]');
+    for (var gi = 0; gi < groups.length; gi++) {
+      var box = null;
+      try { box = groups[gi].getBBox(); } catch (e) { /* not measurable */ }
+      if (!box || (!box.width && !box.height)) continue;
+      var id = groups[gi].getAttribute('data-uml-drawn-at');
+      (drawnAt[id] = drawnAt[id] || []).push({ x: box.x, y: box.y, width: box.width, height: box.height });
+    }
+    UMLShared.updatePackageFrames(svg, layoutComponentPackages(parsed, entries, joinedInterfacePorts(parsed), drawnAt));
+  }
+
   function componentLabelLayout(layoutMetadata) {
     var positions = {};
     var source = layoutMetadata && layoutMetadata.positions ? layoutMetadata.positions : {};
@@ -21813,6 +22445,7 @@
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     adjustRenderedComponentLabels(container);
     UMLShared.applyRenderedPositions(container, componentLabelLayout(parsed.layout));
+    refitComponentPackageFrames(container, parsed, layout.entries);
     UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     // Compact: trim the auto-fit padding so the final viewBox sits closer
     // to the actual content. The layout itself (node positions, edge
