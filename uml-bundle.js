@@ -5528,8 +5528,22 @@
     return adjusted;
   }
 
+  // Ascending, as Array#sort with an (a - b) comparator orders them. A typed
+  // array sorts several times faster and in the same order, except for NaN,
+  // which the comparator leaves unordered, and -0, which it keeps in input
+  // order beside 0; values with either keep the comparator.
+  function sortedNumbers(values) {
+    for (var i = 0; i < values.length; i++) {
+      var value = values[i];
+      if (value !== value || (value === 0 && 1 / value < 0)) {
+        return values.slice().sort(function(a, b) { return a - b; });
+      }
+    }
+    return new Float64Array(values).sort();
+  }
+
   function uniqueSortedNumbers(values, requiredValues) {
-    var sorted = values.slice().sort(function(a, b) { return a - b; });
+    var sorted = sortedNumbers(values);
     var out = [];
     for (var i = 0; i < sorted.length; i++) {
       var value = sorted[i];
@@ -5541,7 +5555,7 @@
     for (const required of requiredValues) {
       if (out.indexOf(required) < 0) out.push(required);
     }
-    return out.sort(function(a, b) { return a - b; });
+    return Array.prototype.slice.call(sortedNumbers(out));
   }
 
   function findCoordinateIndex(coords, value) {
@@ -5559,61 +5573,83 @@
     return false;
   }
 
-  function createPriorityQueue() {
-    var heap = [];
+  /**
+   * A binary min-heap of grid search states (integers) by priority f, held in
+   * typed arrays so a search allocates nothing per state. Which of two
+   * equal-priority states pops first decides between equally short routes,
+   * so the sift rules are fixed: a parent stays above an equal child, and
+   * sifting down moves to the left child on a tie. Sifting carries the
+   * moving entry in a hole instead of swapping, which ends in the same
+   * arrangement with fewer writes.
+   */
+  function createStateQueue() {
+    var priority = new Float64Array(64);
+    var state = new Int32Array(64);
+    var size = 0;
 
-    function swap(i, j) {
-      var temp = heap[i];
-      heap[i] = heap[j];
-      heap[j] = temp;
+    function grow() {
+      var morePriority = new Float64Array(priority.length * 2);
+      var moreState = new Int32Array(state.length * 2);
+      morePriority.set(priority);
+      moreState.set(state);
+      priority = morePriority;
+      state = moreState;
     }
 
-    function bubbleUp(index) {
+    function moveTo(index, from) {
+      priority[index] = priority[from];
+      state[index] = state[from];
+    }
+
+    function bubbleUp(index, f, s) {
       while (index > 0) {
-        var parent = Math.floor((index - 1) / 2);
-        if (heap[parent].f <= heap[index].f) break;
-        swap(parent, index);
+        var parent = (index - 1) >> 1;
+        if (priority[parent] <= f) break;
+        moveTo(index, parent);
         index = parent;
       }
+      priority[index] = f;
+      state[index] = s;
     }
 
-    function bubbleDown(index) {
+    function bubbleDown(index, f, s) {
       while (true) {
         var left = index * 2 + 1;
         var right = left + 1;
-        var smallest = index;
-        if (left < heap.length && heap[left].f < heap[smallest].f) smallest = left;
-        if (right < heap.length && heap[right].f < heap[smallest].f) smallest = right;
+        var smallest = index, smallestF = f;
+        if (left < size && priority[left] < smallestF) { smallest = left; smallestF = priority[left]; }
+        if (right < size && priority[right] < smallestF) smallest = right;
         if (smallest === index) break;
-        swap(index, smallest);
+        moveTo(index, smallest);
         index = smallest;
       }
+      priority[index] = f;
+      state[index] = s;
     }
 
     return {
-      push: function(item) {
-        heap.push(item);
-        bubbleUp(heap.length - 1);
-      },
-      pop: function() {
-        if (!heap.length) return null;
-        var first = heap[0];
-        var last = heap.pop();
-        if (heap.length) {
-          heap[0] = last;
-          bubbleDown(0);
-        }
-        return first;
+      push: function(s, f) {
+        if (size === state.length) grow();
+        bubbleUp(size++, f, s);
       },
       isEmpty: function() {
-        return heap.length === 0;
+        return size === 0;
+      },
+      // The priority of the state pop() returns next.
+      peekPriority: function() {
+        return priority[0];
+      },
+      pop: function() {
+        var first = state[0];
+        size--;
+        if (size) bubbleDown(0, priority[size], state[size]);
+        return first;
       }
     };
   }
 
-  // The rectangles routing must avoid, resolved once. The grid search tests
-  // every grid point and edge against every obstacle, so resolving them per
-  // test would dominate a diagram's render time.
+  // The rectangles routing must avoid, resolved once per search: they place
+  // the grid lanes and index the grid's obstacle tests.
   function activeObstacleRects(obstacles, skipNames) {
     var rects = [];
     for (var i = 0; i < obstacles.length; i++) {
@@ -5625,36 +5661,133 @@
     return rects;
   }
 
-  function pointInsideRects(x, y, rects) {
+  function pointInsideRects(point, rects) {
     for (var i = 0; i < rects.length; i++) {
       var rect = rects[i];
-      if (x > rect.left && x < rect.right && y > rect.top && y < rect.bottom) return true;
+      if (point.x > rect.left && point.x < rect.right && point.y > rect.top && point.y < rect.bottom) return true;
     }
     return false;
   }
 
-  // Same rules as routeHitsObstacle for a single segment.
-  function segmentHitsRects(p0, p1, rects, occupied) {
-    var i, rect;
-    if (Math.abs(p0.x - p1.x) < 1) {
-      var yMin = Math.min(p0.y, p1.y), yMax = Math.max(p0.y, p1.y);
-      for (i = 0; i < rects.length; i++) {
-        rect = rects[i];
-        if (p0.x > rect.left && p0.x < rect.right && yMax > rect.top && yMin < rect.bottom) return true;
-      }
-      return vSegHitsOccupied(p0.x, yMin, yMax, occupied) ||
-        vSegCrossesOccupiedH(p0.x, yMin, yMax, occupied);
+  // What can block points and links on one grid line: the rectangles the
+  // line passes through, the reserved segments running within the lane
+  // clearance alongside it, and the reserved segments it would cross.
+  // Each filter is the matching half of a routeHitsObstacle test, with the
+  // same arithmetic, so the remaining half decides exactly as the full scan.
+  function horizontalGridLine(y, rects, occupied) {
+    var line = { rects: [], alongside: [], across: [] };
+    var i, seg;
+    for (i = 0; i < rects.length; i++) {
+      if (y > rects[i].top && y < rects[i].bottom) line.rects.push(rects[i]);
     }
-    if (Math.abs(p0.y - p1.y) < 1) {
-      var xMin = Math.min(p0.x, p1.x), xMax = Math.max(p0.x, p1.x);
-      for (i = 0; i < rects.length; i++) {
-        rect = rects[i];
-        if (p0.y > rect.top && p0.y < rect.bottom && xMax > rect.left && xMin < rect.right) return true;
-      }
-      return hSegHitsOccupied(p0.y, xMin, xMax, occupied) ||
-        hSegCrossesOccupiedV(p0.y, xMin, xMax, occupied);
+    if (!occupied) return line;
+    for (i = 0; i < occupied.h.length; i++) {
+      seg = occupied.h[i];
+      if (Math.abs(seg.y - y) < ORTHO_ROUTE_LANE_CLEARANCE) line.alongside.push(seg);
     }
-    return true;
+    for (i = 0; i < occupied.v.length; i++) {
+      seg = occupied.v[i];
+      if (y > seg.y1 + 2 && y < seg.y2 - 2) line.across.push(seg);
+    }
+    return line;
+  }
+
+  function verticalGridLine(x, rects, occupied) {
+    var line = { rects: [], alongside: [], across: [] };
+    var i, seg;
+    for (i = 0; i < rects.length; i++) {
+      if (x > rects[i].left && x < rects[i].right) line.rects.push(rects[i]);
+    }
+    if (!occupied) return line;
+    for (i = 0; i < occupied.v.length; i++) {
+      seg = occupied.v[i];
+      if (Math.abs(seg.x - x) < ORTHO_ROUTE_LANE_CLEARANCE) line.alongside.push(seg);
+    }
+    for (i = 0; i < occupied.h.length; i++) {
+      seg = occupied.h[i];
+      if (x > seg.x1 + 2 && x < seg.x2 - 2) line.across.push(seg);
+    }
+    return line;
+  }
+
+  function horizontalSpanBlocked(line, xMin, xMax) {
+    var i, seg;
+    for (i = 0; i < line.rects.length; i++) {
+      if (xMax > line.rects[i].left && xMin < line.rects[i].right) return true;
+    }
+    for (i = 0; i < line.alongside.length; i++) {
+      seg = line.alongside[i];
+      if (rangesOverlap(xMin, xMax, seg.x1, seg.x2, 6)) return true;
+    }
+    for (i = 0; i < line.across.length; i++) {
+      seg = line.across[i];
+      if (seg.x > xMin + 2 && seg.x < xMax - 2) return true;
+    }
+    return false;
+  }
+
+  function verticalSpanBlocked(line, yMin, yMax) {
+    var i, seg;
+    for (i = 0; i < line.rects.length; i++) {
+      if (yMax > line.rects[i].top && yMin < line.rects[i].bottom) return true;
+    }
+    for (i = 0; i < line.alongside.length; i++) {
+      seg = line.alongside[i];
+      if (rangesOverlap(yMin, yMax, seg.y1, seg.y2, 6)) return true;
+    }
+    for (i = 0; i < line.across.length; i++) {
+      seg = line.across[i];
+      if (seg.y > yMin + 2 && seg.y < yMax - 2) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Obstacle tests for the points and links of a routing grid, answered as
+   * routeHitsObstacle answers them for the same point or segment. A grid
+   * search makes hundreds of these tests; scanning every rectangle and
+   * reserved segment for each dominated routing time, while only the few
+   * that touch the test's grid line can matter. Lines are indexed on first
+   * use. A link runs from grid index `from` to `to` on row `yi` or column
+   * `xi`.
+   */
+  function createOrthogonalGridLineIndex(xs, ys, rects, occupied) {
+    var rows = new Array(ys.length);
+    var columns = new Array(xs.length);
+
+    function row(yi) {
+      return rows[yi] || (rows[yi] = horizontalGridLine(ys[yi], rects, occupied));
+    }
+
+    function column(xi) {
+      return columns[xi] || (columns[xi] = verticalGridLine(xs[xi], rects, occupied));
+    }
+
+    function pointInside(xi, yi) {
+      var y = ys[yi], inColumn = column(xi).rects;
+      for (var i = 0; i < inColumn.length; i++) {
+        if (y > inColumn[i].top && y < inColumn[i].bottom) return true;
+      }
+      return false;
+    }
+
+    function horizontalLinkBlocked(yi, from, to) {
+      // routeHitsObstacle tests a segment under a pixel wide as vertical.
+      // Spanning no height, it can neither run along nor cross a reserved
+      // segment, so only a rectangle around its start blocks it.
+      if (Math.abs(xs[from] - xs[to]) < 1) return pointInside(from, yi);
+      return horizontalSpanBlocked(row(yi), Math.min(xs[from], xs[to]), Math.max(xs[from], xs[to]));
+    }
+
+    function verticalLinkBlocked(xi, from, to) {
+      return verticalSpanBlocked(column(xi), Math.min(ys[from], ys[to]), Math.max(ys[from], ys[to]));
+    }
+
+    return {
+      pointInside: pointInside,
+      horizontalLinkBlocked: horizontalLinkBlocked,
+      verticalLinkBlocked: verticalLinkBlocked
+    };
   }
 
   /**
@@ -5664,41 +5797,57 @@
    * usually visits a small part of the grid, and testing every grid edge
    * against every obstacle up front dominated a diagram's render time.
    * Node `xi * ys.length + yi` is the crossing of xs[xi] and ys[yi];
-   * `neighbors(n)` lists left, right, above, below, in that order.
+   * `neighbors(n)` lists left, right, above, below, in that order, each as
+   * { to, dir, cost } with dir GRID_ACROSS or GRID_DOWN.
    */
-  function createOrthogonalGrid(xs, ys, obstacles, skipNames, occupied) {
-    var rects = activeObstacleRects(obstacles, skipNames);
+  var GRID_ACROSS = 1;
+  var GRID_DOWN = 2;
+
+  function createOrthogonalGrid(xs, ys, rects, occupied) {
+    var lines = createOrthogonalGridLineIndex(xs, ys, rects, occupied);
     var rowCount = ys.length;
     var openAt = new Int8Array(xs.length * rowCount);   // 0 unknown, 1 open, 2 inside
     var adjacency = new Array(xs.length * rowCount);
 
     function isOpen(xi, yi) {
       var n = xi * rowCount + yi;
-      if (!openAt[n]) openAt[n] = pointInsideRects(xs[xi], ys[yi], rects) ? 2 : 1;
+      if (!openAt[n]) openAt[n] = lines.pointInside(xi, yi) ? 2 : 1;
       return openAt[n] === 1;
     }
 
-    function point(n) {
-      return { x: xs[Math.floor(n / rowCount)], y: ys[n % rowCount] };
+    function x(n) {
+      return xs[Math.floor(n / rowCount)];
     }
 
-    function link(list, n, xi, yi, dir) {
-      var a = point(n), b = { x: xs[xi], y: ys[yi] };
-      if (segmentHitsRects(a, b, rects, occupied)) return;
-      list.push({ to: xi * rowCount + yi, dir: dir, cost: Math.abs(a.x - b.x) + Math.abs(a.y - b.y) });
+    function y(n) {
+      return ys[n % rowCount];
+    }
+
+    function point(n) {
+      return { x: x(n), y: y(n) };
+    }
+
+    function linkAcross(list, xi, yi, toXi) {
+      if (lines.horizontalLinkBlocked(yi, xi, toXi)) return;
+      list.push({ to: toXi * rowCount + yi, dir: GRID_ACROSS, cost: Math.abs(xs[xi] - xs[toXi]) });
+    }
+
+    function linkDown(list, xi, yi, toYi) {
+      if (lines.verticalLinkBlocked(xi, yi, toYi)) return;
+      list.push({ to: xi * rowCount + toYi, dir: GRID_DOWN, cost: Math.abs(ys[yi] - ys[toYi]) });
     }
 
     function neighbors(n) {
       if (adjacency[n]) return adjacency[n];
       var xi = Math.floor(n / rowCount), yi = n % rowCount, list = [], k;
       for (k = xi - 1; k >= 0 && !isOpen(k, yi); k--) {}
-      if (k >= 0) link(list, n, k, yi, 'H');
+      if (k >= 0) linkAcross(list, xi, yi, k);
       for (k = xi + 1; k < xs.length && !isOpen(k, yi); k++) {}
-      if (k < xs.length) link(list, n, k, yi, 'H');
+      if (k < xs.length) linkAcross(list, xi, yi, k);
       for (k = yi - 1; k >= 0 && !isOpen(xi, k); k--) {}
-      if (k >= 0) link(list, n, xi, k, 'V');
+      if (k >= 0) linkDown(list, xi, yi, k);
       for (k = yi + 1; k < rowCount && !isOpen(xi, k); k++) {}
-      if (k < rowCount) link(list, n, xi, k, 'V');
+      if (k < rowCount) linkDown(list, xi, yi, k);
       adjacency[n] = list;
       return list;
     }
@@ -5709,7 +5858,7 @@
       return xi * rowCount + yi;
     }
 
-    return { point: point, neighbors: neighbors, nodeAt: nodeAt };
+    return { x: x, y: y, point: point, neighbors: neighbors, nodeAt: nodeAt };
   }
 
   // Per-state records of one grid search, reused from search to search:
@@ -5748,13 +5897,13 @@
     for (var exi = 0; exi < extraXs.length; exi++) xs.push(extraXs[exi]);
     for (var eyi = 0; eyi < extraYs.length; eyi++) ys.push(extraYs[eyi]);
 
-    for (var oi = 0; oi < obstacles.length; oi++) {
-      var obstacle = obstacles[oi];
-      if (skipNames && obstacle.name && skipNames[obstacle.name]) continue;
-      var rect = obstacleToRect(obstacle);
-      if (!rect) continue;
-      xs.push(rect.left - clearance, rect.right + clearance);
-      ys.push(rect.top - clearance, rect.bottom + clearance);
+    var rects = activeObstacleRects(obstacles, skipNames);
+    // An endpoint inside a rectangle is no grid node, so no path exists;
+    // knowing it before the grid is built saves building it.
+    if (pointInsideRects(start, rects) || pointInsideRects(end, rects)) return null;
+    for (var ri = 0; ri < rects.length; ri++) {
+      xs.push(rects[ri].left - clearance, rects[ri].right + clearance);
+      ys.push(rects[ri].top - clearance, rects[ri].bottom + clearance);
     }
 
     if (occupied) {
@@ -5774,61 +5923,56 @@
     xs = uniqueSortedNumbers(xs, [start.x, end.x]);
     ys = uniqueSortedNumbers(ys, [start.y, end.y]);
 
-    var graph = createOrthogonalGrid(xs, ys, obstacles, skipNames, occupied);
+    var graph = createOrthogonalGrid(xs, ys, rects, occupied);
     var startIndex = graph.nodeAt(findCoordinateIndex(xs, start.x), findCoordinateIndex(ys, start.y));
     var endIndex = graph.nodeAt(findCoordinateIndex(xs, end.x), findCoordinateIndex(ys, end.y));
     if (startIndex === undefined || endIndex === undefined) return null;
 
     // A search state is a node and the direction it was entered in
-    // (0 at the start, 1 across, 2 down), as node * 3 + direction.
-    var DIRECTION_CODE = { N: 0, H: 1, V: 2 };
-    var queue = createPriorityQueue();
+    // (0 at the start, else GRID_ACROSS or GRID_DOWN), as node * 3 + direction.
+    var queue = createStateQueue();
     var startState = startIndex * 3;
     var search = startGridSearch(xs.length * ys.length * 3);
     var dist = search.dist, prev = search.prev;
     search.reach(startState);
     dist[startState] = 0;
     prev[startState] = -1;
-    queue.push({ state: startState, nodeIndex: startIndex, dir: 'N', f: Math.abs(start.x - end.x) + Math.abs(start.y - end.y) });
+    queue.push(startState, Math.abs(start.x - end.x) + Math.abs(start.y - end.y));
 
     while (!queue.isEmpty()) {
-      var current = queue.pop();
-      if (!current) break;
-      if (current.nodeIndex === endIndex) {
+      var currentF = queue.peekPriority();
+      var currentState = queue.pop();
+      var currentNode = Math.floor(currentState / 3);
+      var currentDir = currentState % 3;
+      if (currentNode === endIndex) {
         var path = [];
-        for (var stateCursor = current.state; stateCursor >= 0; stateCursor = prev[stateCursor]) {
+        for (var stateCursor = currentState; stateCursor >= 0; stateCursor = prev[stateCursor]) {
           path.push(graph.point(Math.floor(stateCursor / 3)));
         }
         path.reverse();
         return simplifyOrthogonalPath(path);
       }
 
-      var at = graph.point(current.nodeIndex);
-      if (current.f - (Math.abs(at.x - end.x) + Math.abs(at.y - end.y)) > (dist[current.state] || 0) + 0.001) {
+      var atX = graph.x(currentNode), atY = graph.y(currentNode);
+      if (currentF - (Math.abs(atX - end.x) + Math.abs(atY - end.y)) > (dist[currentState] || 0) + 0.001) {
         continue;
       }
 
-      var neighbors = graph.neighbors(current.nodeIndex);
+      var neighbors = graph.neighbors(currentNode);
       for (var ni = 0; ni < neighbors.length; ni++) {
         var edge = neighbors[ni];
-        var nextState = edge.to * 3 + DIRECTION_CODE[edge.dir];
-        var bendCost = current.dir !== 'N' && current.dir !== edge.dir ? bendPenalty : 0;
-        var corridorPenalty = edge.dir === 'H'
-          ? Math.abs(at.y - end.y) * 0.05
-          : Math.abs(at.x - end.x) * 0.05;
-        var candidateDist = dist[current.state] + edge.cost + bendCost + corridorPenalty;
+        var nextState = edge.to * 3 + edge.dir;
+        var bendCost = currentDir !== 0 && currentDir !== edge.dir ? bendPenalty : 0;
+        var corridorPenalty = edge.dir === GRID_ACROSS
+          ? Math.abs(atY - end.y) * 0.05
+          : Math.abs(atX - end.x) * 0.05;
+        var candidateDist = dist[currentState] + edge.cost + bendCost + corridorPenalty;
         if (!search.reached(nextState) || candidateDist + 0.01 < dist[nextState]) {
           search.reach(nextState);
           dist[nextState] = candidateDist;
-          prev[nextState] = current.state;
-          var next = graph.point(edge.to);
-          var heuristic = Math.abs(next.x - end.x) + Math.abs(next.y - end.y);
-          queue.push({
-            state: nextState,
-            nodeIndex: edge.to,
-            dir: edge.dir,
-            f: candidateDist + heuristic
-          });
+          prev[nextState] = currentState;
+          var heuristic = Math.abs(graph.x(edge.to) - end.x) + Math.abs(graph.y(edge.to) - end.y);
+          queue.push(nextState, candidateDist + heuristic);
         }
       }
     }
@@ -6060,6 +6204,26 @@
     };
   }
 
+  // ─── Nudge passes ───────────────────────────────────────────
+
+  /**
+   * The shifts a nudge pass tries for one box: each candidate clamped to
+   * [-maxShift, maxShift] and then to [lower, upper], without non-finite or
+   * sub-pixel shifts, each distinct shift once, in candidate order. Clamping
+   * makes candidates coincide; a repeated shift would be routed and scored
+   * again only to tie with itself, which never replaces the best shift.
+   */
+  function distinctNudgeDeltas(candidates, maxShift, lower, upper) {
+    var deltas = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var delta = Math.max(-maxShift, Math.min(maxShift, candidates[i]));
+      delta = Math.max(lower, Math.min(upper, delta));
+      if (!isFinite(delta) || Math.abs(delta) < 1) continue;
+      if (deltas.indexOf(delta) < 0) deltas.push(delta);
+    }
+    return deltas;
+  }
+
   // ─── Actor Stick Figure ──────────────────────────────────────
 
   /**
@@ -6167,6 +6331,8 @@
     reserveOrthogonalRoute: reserveOrthogonalRoute,
     spreadRouteToFreeLanes: spreadRouteToFreeLanes,
     routeOrthogonalConnector: routeOrthogonalConnector,
+    distinctNudgeDeltas: distinctNudgeDeltas,
+    createOrthogonalGridLineIndex: createOrthogonalGridLineIndex,
     optimizeEndpointSlides: optimizeEndpointSlides,
 
     // ─── Drawing Utilities ───────────────────────────────────────
@@ -11358,13 +11524,11 @@
               upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
             }
 
-            var candidateDeltas = collectShiftCandidates(currentName);
+            var candidateDeltas = UMLShared.distinctNudgeDeltas(collectShiftCandidates(currentName), maxShift, lower, upper);
             var bestDelta = 0;
             var bestScore = currentScore;
             for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
-              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
-              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
-              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+              var candidateDelta = candidateDeltas[cdi];
 
               var candidateScore = entryRouteScore(currentName, candidateDelta);
               if (candidateScore + 4 < bestScore) {
@@ -22003,13 +22167,11 @@
               upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
             }
 
-            var candidateDeltas = collectShiftCandidates(currentName);
+            var candidateDeltas = UMLShared.distinctNudgeDeltas(collectShiftCandidates(currentName), maxShift, lower, upper);
             var bestDelta = 0;
             var bestScore = currentScore;
             for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
-              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
-              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
-              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+              var candidateDelta = candidateDeltas[cdi];
 
               var candidateScore = componentRouteScore(currentName, candidateDelta);
               if (candidateScore + 6 < bestScore) {
