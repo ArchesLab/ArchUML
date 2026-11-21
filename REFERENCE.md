@@ -74,13 +74,32 @@ layout horizontal      ← left-to-right (alias: layout LR, layout left-to-right
 layout vertical        ← top-to-bottom (alias: layout TB, layout top-to-bottom)
 layout landscape       ← alias for horizontal
 layout portrait        ← alias for vertical
-layout compact         ← minimise whitespace
+layout compact [WxH]   ← largest readable text in the pane (see below)
 layout square          ← prefer square aspect ratio
 layout auto            ← auto-select (default)
 layout none            ← disable layout engine
 layout shadows on      ← enable drop shadows
 layout shadows off     ← disable drop shadows
 ```
+
+### Compact Layout
+
+`layout compact` lays the diagram out for the largest readable text in its pane: minimal whitespace, no overlapping boxes or labels, and no crossings or bends added in exchange for the smaller drawing. Text is never shrunk or wrapped; the drawing is made smaller around it, and shaped like the pane, so that it needs less scaling to fit.
+
+```
+layout compact           ← pane: the live container, or 900×600 when there is none
+layout compact 600x700   ← pane: 600 by 700 CSS pixels
+```
+
+Give the size when the drawing is rendered somewhere other than where it is shown, for example at build time for a narrow column. A size that is zero or not of the form `WxH` is ignored, and the container is used.
+
+This applies to class, state, sequence, and component diagrams so far. Other diagram types, deployment included, keep the earlier behaviour of `layout compact`: fixed, smaller gaps. A spec with an `@layout` block (positions saved by the visual editor) keeps its authored geometry; the earlier compact spacing is used there and the pane is ignored. A compact drawing that could not be made free of overlaps carries `data-uml-layout-issues` with their count.
+
+In a sequence diagram, a fragment's guard stays at the head of the operand it guards: beside the operator tab when it fits there inside the frame and clear of every lifeline, otherwise on its own line under the tab. An `else` guard starts the line under its divider. A guard widens its frame only when it is wider than the frame its messages need.
+
+In a component diagram, compact may turn and wrap the chain of components to suit the pane: into rows, read row by row and left to right within a row, or top to bottom, one component per row. The author's arrangement and the one the layout would take for a container of the pane's shape are candidates too, and are kept when they read best. To do this, `layout compact` overrides `left to right direction` and `top to bottom direction`, the direction letter of hidden constraints such as `a -[hidden]r- b`, and `skinparam ranksep` / `nodesep` (which ArchUML ignores anyway). It keeps their order: read row by row, the components come in the order the hidden constraints and the authored direction give them. `layout compact` keeps this meaning when a direction line follows it. A port stays on the side of its component that its connectors arrive from, port names are set at the connector-label size, and each connector label sits by its own connector.
+
+Teaching callouts are part of a compact drawing (class, state, sequence, and component diagrams). Their text is set at the diagram's base text size, never below the usual callout size; the layout is judged with its callouts in place and keeps the gaps they sit in; and they are drawn with the diagram rather than afterwards in the page, so they are also present when the diagram is rendered in a worker or a hidden tab. The frame keeps the drawing's compact margin around them.
 
 ### Label Direction Cues
 
@@ -2814,7 +2833,7 @@ Load `css/callouts.css` from the ArchUML package alongside `uml-bundle.js`. SEBo
 callout <side> of <target> : <brief explanation>
 ```
 
-The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, leaves a neighbour's nearby approach clear so one wide box cannot starve the next, checks the triangular pointer for collisions, and favors short pointers. When every short path is blocked, it would rather graze a connector than run through a relationship name. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
+The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, leaves a neighbour's nearby approach clear so one wide box cannot starve the next, checks the triangular pointer for collisions, and favors short pointers. When every short path is blocked, it would rather graze a connector than run through a relationship name. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships. In a `layout compact` class, state, sequence, or component diagram they are placed with the same rules while the layout is chosen, and set at the diagram's base text size (see [Compact Layout](#compact-layout)).
 
 | Target | Example | Meaning |
 | --- | --- | --- |
@@ -3239,7 +3258,7 @@ Output JSON format:
 
 ### Layout Hints
 
-`layout horizontal` · `layout vertical` · `layout landscape` · `layout portrait` · `layout compact` · `layout square` · `layout auto`
+`layout horizontal` · `layout vertical` · `layout landscape` · `layout portrait` · `layout compact [WxH]` · `layout square` · `layout auto`
 
 ### Note Targets
 
