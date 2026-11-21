@@ -2,18 +2,17 @@
 // largest in its pane, with nothing overlapping, every edge label by its own
 // edge, and no more bends or crossings than the drawing without a layout line.
 // Every geometric claim is measured from the rendered DOM (getBBox + CTM),
-// never from the renderer's own scene record. "Before" is the submodule's
-// committed bundle (git HEAD), rendered in the same browser.
+// never from the renderer's own scene record. "Before" is the pre-compact
+// bundle (support/pre-compact-bundle.js), rendered in the same browser.
 
 const assert = require('node:assert/strict');
 const { before, after, test } = require('node:test');
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const CORPUS = require('./support/test-uml-components.js');
 const SITE = require('./support/site-component-specs.js');
+const { writePreCompactBundle } = require('./support/pre-compact-bundle');
 
 const BUNDLE = path.join(__dirname, '../uml-bundle.js');
 const BASE_FONT = 14;            // connector labels, the component type's base size
@@ -38,9 +37,7 @@ const compactFor = (spec, pane) => withLayout(spec, `layout compact ${pane.width
 let browser;
 let previousBundle;
 before(async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archuml-component-'));
-  previousBundle = path.join(dir, 'uml-bundle-head.js');
-  fs.writeFileSync(previousBundle, execFileSync('git', ['-C', path.join(__dirname, '..'), 'show', 'HEAD:uml-bundle.js'], { maxBuffer: 64 * 1024 * 1024 }));
+  previousBundle = writePreCompactBundle('archuml-component-');
   browser = await chromium.launch();
 });
 after(async () => {

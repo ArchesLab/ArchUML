@@ -1,17 +1,16 @@
 // `layout compact` for state machine diagrams: the drawing whose smallest
 // label is largest in its pane, without overlap and without extra bends.
 // Every geometric claim is measured from the rendered DOM (getBBox), never
-// from the renderer's own scene record. "Today's" output is the pre-change
-// bundle (git HEAD of the submodule) rendered in the same browser, so pixel
+// from the renderer's own scene record. "Today's" output is the pre-compact
+// bundle (support/pre-compact-bundle.js) rendered in the same browser, so pixel
 // values are not hard-coded unless the plan states the number.
 
 const assert = require('node:assert/strict');
 const { before, after, test } = require('node:test');
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { writePreCompactBundle } = require('./support/pre-compact-bundle');
 
 const BUNDLE = path.join(__dirname, '../uml-bundle.js');
 const STATE_FONT = 20;
@@ -86,9 +85,7 @@ const spec = (layoutLine, body) => `@startuml\n${layoutLine ? layoutLine + '\n' 
 let browser;
 let previousBundle;
 before(async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archuml-state-'));
-  previousBundle = path.join(dir, 'uml-bundle-head.js');
-  fs.writeFileSync(previousBundle, execFileSync('git', ['-C', path.join(__dirname, '..'), 'show', 'HEAD:uml-bundle.js'], { maxBuffer: 64 * 1024 * 1024 }));
+  previousBundle = writePreCompactBundle('archuml-state-');
   browser = await chromium.launch();
 });
 after(async () => {

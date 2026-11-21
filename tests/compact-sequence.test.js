@@ -1,16 +1,15 @@
 // `layout compact` for sequence diagrams: exact spacing on a fixed grid.
 // Every geometric claim is measured from the rendered DOM (getBBox + CTM), so
 // a gap in the renderer's own scene record cannot hide an overlap. "Today's
-// compact" is the pre-change bundle (git HEAD of the submodule), rendered in
+// compact" is the pre-compact bundle (support/pre-compact-bundle.js), rendered in
 // the same browser, so no pixel value is hard-coded here.
 
 const assert = require('node:assert/strict');
 const { before, after, test } = require('node:test');
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { writePreCompactBundle } = require('./support/pre-compact-bundle');
 
 const BUNDLE = path.join(__dirname, '../uml-bundle.js');
 const MESSAGE_FONT = 13;
@@ -113,10 +112,7 @@ const compactSource = body => `@startuml\nlayout compact\n${body}\n@enduml`;
 let browser;
 let previousBundle;
 before(async () => {
-  // The pre-change renderer: the submodule's committed bundle.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archuml-seq-'));
-  previousBundle = path.join(dir, 'uml-bundle-head.js');
-  fs.writeFileSync(previousBundle, execFileSync('git', ['-C', path.join(__dirname, '..'), 'show', 'HEAD:uml-bundle.js'], { maxBuffer: 64 * 1024 * 1024 }));
+  previousBundle = writePreCompactBundle('archuml-seq-');
   browser = await chromium.launch();
 });
 after(async () => {

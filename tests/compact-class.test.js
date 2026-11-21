@@ -2,16 +2,15 @@
 // (largest smallest label, no overlap, no extra crossings or bends). Every
 // geometric claim is measured from the rendered DOM (getBBox + CTM), not from
 // the renderer's scene record, so a gap in the scene cannot hide a defect.
-// "Before" is the pre-change bundle (git HEAD of the submodule), rendered in
+// "Before" is the pre-compact bundle (support/pre-compact-bundle.js), rendered in
 // the same browser, so no pixel value is hard-coded here.
 
 const assert = require('node:assert/strict');
 const { before, after, test } = require('node:test');
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { writePreCompactBundle } = require('./support/pre-compact-bundle');
 
 const BUNDLE = path.join(__dirname, '../uml-bundle.js');
 
@@ -243,9 +242,7 @@ const source = (directive, body) => `@startuml\n${directive ? directive + '\n' :
 let browser;
 let previousBundle;
 before(async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archuml-class-'));
-  previousBundle = path.join(dir, 'uml-bundle-head.js');
-  fs.writeFileSync(previousBundle, execFileSync('git', ['-C', path.join(__dirname, '..'), 'show', 'HEAD:uml-bundle.js'], { maxBuffer: 64 * 1024 * 1024 }));
+  previousBundle = writePreCompactBundle('archuml-class-');
   browser = await chromium.launch();
 });
 after(async () => {
