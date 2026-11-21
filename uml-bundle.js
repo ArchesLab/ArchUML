@@ -2817,6 +2817,55 @@
     });
   }
 
+  // ─── Theme Re-render Scheduler ─────────────────────────────────
+  //
+  // Theme colors are baked into the SVG, so a theme change re-renders every
+  // diagram. Layout and routing make one render cost up to seconds, so the
+  // renders run one per task, nearest the viewport first: the page stays
+  // responsive and the diagrams the reader sees are recolored first.
+
+  var themeRerenderJobs = [];
+  var themeRerenderTimer = null;
+
+  function viewportDistance(container) {
+    var rect = container.getBoundingClientRect();
+    if (rect.bottom < 0) return -rect.bottom;
+    if (rect.top > window.innerHeight) return rect.top - window.innerHeight;
+    return 0;
+  }
+
+  function runNextThemeRerender() {
+    themeRerenderTimer = null;
+    themeRerenderJobs = themeRerenderJobs.filter(function (job) { return job.container.isConnected; });
+    if (!themeRerenderJobs.length) {
+      queueRefitAll();
+      startSettleLoop();
+      return;
+    }
+    var next = 0;
+    var nearest = Infinity;
+    for (var i = 0; i < themeRerenderJobs.length; i++) {
+      var distance = viewportDistance(themeRerenderJobs[i].container);
+      if (distance < nearest) { nearest = distance; next = i; }
+    }
+    var job = themeRerenderJobs.splice(next, 1)[0];
+    try {
+      job.render();
+    } finally {
+      themeRerenderTimer = setTimeout(runNextThemeRerender, 0);
+    }
+  }
+
+  // A newer theme change replaces any pending render of the same container.
+  function queueThemeRerenders(jobs, delay) {
+    var queued = jobs.map(function (job) { return job.container; });
+    themeRerenderJobs = themeRerenderJobs.filter(function (job) {
+      return queued.indexOf(job.container) === -1;
+    }).concat(jobs);
+    if (themeRerenderTimer) clearTimeout(themeRerenderTimer);
+    themeRerenderTimer = setTimeout(runNextThemeRerender, delay);
+  }
+
   // ─── Auto-Init Factory ─────────────────────────────────────────
 
   /**
@@ -2856,15 +2905,16 @@
       var observer = new MutationObserver(function (mutations) {
         for (var m = 0; m < mutations.length; m++) {
           if (mutations[m].attributeName === 'class') {
-            setTimeout(function () {
-              for (var d = 0; d < diagrams.length; d++) {
-                renderFn(diagrams[d].container, diagrams[d].text);
-                hideNestedSvgFromAccessibility(diagrams[d].container);
-                if (visibilityObserver) visibilityObserver.observe(diagrams[d].container);
-              }
-              queueRefitAll();
-              startSettleLoop();
-            }, 50);
+            queueThemeRerenders(diagrams.map(function (diagram) {
+              return {
+                container: diagram.container,
+                render: function () {
+                  renderFn(diagram.container, diagram.text);
+                  hideNestedSvgFromAccessibility(diagram.container);
+                  if (visibilityObserver) visibilityObserver.observe(diagram.container);
+                },
+              };
+            }), 50);
             break;
           }
         }
@@ -4755,16 +4805,63 @@
     };
   }
 
+  // The rectangles routing must avoid, resolved once. The grid search tests
+  // every grid point and edge against every obstacle, so resolving them per
+  // test would dominate a diagram's render time.
+  function activeObstacleRects(obstacles, skipNames) {
+    var rects = [];
+    for (var i = 0; i < obstacles.length; i++) {
+      var rect = obstacleToRect(obstacles[i]);
+      if (!rect) continue;
+      if (skipNames && obstacles[i].name && skipNames[obstacles[i].name]) continue;
+      rects.push(rect);
+    }
+    return rects;
+  }
+
+  function pointInsideRects(x, y, rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var rect = rects[i];
+      if (x > rect.left && x < rect.right && y > rect.top && y < rect.bottom) return true;
+    }
+    return false;
+  }
+
+  // Same rules as routeHitsObstacle for a single segment.
+  function segmentHitsRects(p0, p1, rects, occupied) {
+    var i, rect;
+    if (Math.abs(p0.x - p1.x) < 1) {
+      var yMin = Math.min(p0.y, p1.y), yMax = Math.max(p0.y, p1.y);
+      for (i = 0; i < rects.length; i++) {
+        rect = rects[i];
+        if (p0.x > rect.left && p0.x < rect.right && yMax > rect.top && yMin < rect.bottom) return true;
+      }
+      return vSegHitsOccupied(p0.x, yMin, yMax, occupied) ||
+        vSegCrossesOccupiedH(p0.x, yMin, yMax, occupied);
+    }
+    if (Math.abs(p0.y - p1.y) < 1) {
+      var xMin = Math.min(p0.x, p1.x), xMax = Math.max(p0.x, p1.x);
+      for (i = 0; i < rects.length; i++) {
+        rect = rects[i];
+        if (p0.y > rect.top && p0.y < rect.bottom && xMax > rect.left && xMin < rect.right) return true;
+      }
+      return hSegHitsOccupied(p0.y, xMin, xMax, occupied) ||
+        hSegCrossesOccupiedV(p0.y, xMin, xMax, occupied);
+    }
+    return true;
+  }
+
   function buildOrthogonalGraph(xs, ys, obstacles, skipNames, occupied) {
     var nodes = [];
     var nodeMap = {};
     var rows = {};
     var cols = {};
+    var rects = activeObstacleRects(obstacles, skipNames);
 
     for (var xi = 0; xi < xs.length; xi++) {
       for (var yi = 0; yi < ys.length; yi++) {
         var x = xs[xi], y = ys[yi];
-        if (pointInsideObstacle(x, y, obstacles, skipNames)) continue;
+        if (pointInsideRects(x, y, rects)) continue;
         var key = xi + ':' + yi;
         var nodeIndex = nodes.length;
         nodes.push({ x: x, y: y, xi: xi, yi: yi });
@@ -4781,9 +4878,7 @@
 
     function connect(aIdx, bIdx, dir) {
       var a = nodes[aIdx], b = nodes[bIdx];
-      var p0 = { x: a.x, y: a.y };
-      var p1 = { x: b.x, y: b.y };
-      if (routeHitsObstacle([p0, p1], obstacles, skipNames, occupied)) return;
+      if (segmentHitsRects(a, b, rects, occupied)) return;
       var cost = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
       adjacency[aIdx].push({ to: bIdx, dir: dir, cost: cost });
       adjacency[bIdx].push({ to: aIdx, dir: dir, cost: cost });
@@ -5150,17 +5245,15 @@
     var bodyBot = bodyTop + bodyLen;
     var armBaseY = bodyTop + armY;
 
+    // The limbs are artwork: editors must not offer them as relation routes.
+    var limb = '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '" data-layout-route-decorative="true"/>';
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<circle cx="' + cx + '" cy="' + headCy + '" r="' + headR +
       '" fill="' + headFill + '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + (cx - armSpan) + '" y1="' + armBaseY + '" x2="' + (cx + armSpan) + '" y2="' + armBaseY +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx - legSpan) + '" y2="' + (bodyBot + legLen) +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx + legSpan) + '" y2="' + (bodyBot + legLen) +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
+    svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot + limb);
+    svg.push('<line x1="' + (cx - armSpan) + '" y1="' + armBaseY + '" x2="' + (cx + armSpan) + '" y2="' + armBaseY + limb);
+    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx - legSpan) + '" y2="' + (bodyBot + legLen) + limb);
+    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx + legSpan) + '" y2="' + (bodyBot + legLen) + limb);
     svg.push('</g>');
     return bodyBot + legLen - topY; // total height
   }
@@ -13858,6 +13951,108 @@
     labelBgPad: 4,
   };
 
+  // ─── Pseudostates ─────────────────────────────────────────────────
+  //
+  // `state Name <<kind>>` declares a pseudostate (UML 2.5.1, 14.2.3.7). Its
+  // name identifies it in transitions; the diagram shows only its symbol.
+  // Keys are the accepted spellings in lower case; values are state types.
+  // No prototype: any other stereotype, `<<constructor>>` included, is a miss.
+  var PSEUDOSTATE_KINDS = Object.assign(Object.create(null), {
+    'choice': 'choice',
+    'junction': 'junction',
+    'history': 'history',
+    'shallowhistory': 'history',
+    'deephistory': 'deepHistory',
+    'history*': 'deepHistory',
+    'fork': 'fork',
+    'join': 'join',
+    'terminate': 'terminate'
+  });
+  var PSEUDOSTATE_SIZE = {
+    choice: { width: 30, height: 30 },
+    junction: { width: 16, height: 16 },
+    history: { width: 30, height: 30 },
+    deepHistory: { width: 30, height: 30 },
+    terminate: { width: 22, height: 22 }
+  };
+  var FORK_BAR = { length: 80, thickness: 8 };
+
+  function isPseudostate(state) {
+    return state.type !== 'state';
+  }
+
+  // A fork or join bar lies across the direction the transitions flow in.
+  function pseudostateSize(state, direction) {
+    if (state.type === 'fork' || state.type === 'join') {
+      return direction === 'LR'
+        ? { width: FORK_BAR.thickness, height: FORK_BAR.length }
+        : { width: FORK_BAR.length, height: FORK_BAR.thickness };
+    }
+    return PSEUDOSTATE_SIZE[state.type];
+  }
+
+  // The layout engine may rotate a diagram to suit its container, so a bar
+  // measured for the authored direction can end up lying along the flow.
+  // Turn each one about its centre to lie across the direction the layout
+  // actually chose.
+  function orientForkBars(layoutResult, entries, authoredDirection) {
+    var direction = layoutResult.direction || authoredDirection;
+    for (var id in layoutResult.nodes) {
+      var entry = entries[id];
+      if (!entry || (entry.state.type !== 'fork' && entry.state.type !== 'join')) continue;
+      var size = pseudostateSize(entry.state, direction);
+      if (size.width === entry.box.width) continue;
+      var node = layoutResult.nodes[id];
+      node.x += (entry.box.width - size.width) / 2;
+      node.y += (entry.box.height - size.height) / 2;
+      node.width = size.width;
+      node.height = size.height;
+      entry.box = size;
+    }
+  }
+
+  // The «stereotype» line a state shows above its name, and the room it takes.
+  function stateStereotypeText(state) {
+    return state.stereotype ? '\u00ab' + state.stereotype + '\u00bb' : '';
+  }
+  function stateStereotypeHeight(state) {
+    return state.stereotype ? CFG.lineHeight : 0;
+  }
+
+  // The symbol for a pseudostate declared with `<<kind>>`, centred on (cx, cy).
+  function drawPseudostate(svg, entry, id, cx, cy, colors) {
+    var state = entry.state;
+    var attrs = stateLayoutAttrs(id);
+    var fills = UMLShared.highlightFills(colors, state.highlight, state.texture);
+    var half = entry.box.width / 2;
+    if (state.type === 'choice') {
+      var points = cx + ',' + (cy - half) + ' ' + (cx + half) + ',' + cy + ' ' +
+        cx + ',' + (cy + half) + ' ' + (cx - half) + ',' + cy;
+      svg.push('<polygon' + attrs + ' filter="url(#uml-node-shadow)" points="' + points +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"/>');
+      if (fills.textureUrl) svg.push('<polygon points="' + points + '" fill="' + fills.textureUrl + '" stroke="none"/>');
+    } else if (state.type === 'junction') {
+      svg.push('<circle' + attrs + ' cx="' + cx + '" cy="' + cy + '" r="' + half +
+        '" fill="' + colors.line + '" stroke="none"/>');
+    } else if (state.type === 'history' || state.type === 'deepHistory') {
+      svg.push('<circle' + attrs + ' filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" r="' + half +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      svg.push('<text' + attrs + ' x="' + cx + '" y="' + (cy + CFG.fontSizeBold * 0.35) +
+        '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+        (state.type === 'deepHistory' ? 'H*' : 'H') + '</text>');
+    } else if (state.type === 'fork' || state.type === 'join') {
+      svg.push('<rect' + attrs + ' data-layout-route-decorative="true" x="' + entry.x + '" y="' + entry.y +
+        '" width="' + entry.box.width + '" height="' + entry.box.height + '" rx="2" ry="2" fill="' + colors.line + '" stroke="none"/>');
+    } else if (state.type === 'terminate') {
+      // The strokes are artwork: editors must not offer them as transitions.
+      var cross = '" stroke="' + colors.line + '" stroke-width="' + (CFG.strokeWidth * 1.5) +
+        '" stroke-linecap="round" data-layout-route-decorative="true"/>';
+      svg.push('<line' + attrs + ' x1="' + (cx - half) + '" y1="' + (cy - half) + '" x2="' + (cx + half) + '" y2="' + (cy + half) + cross);
+      svg.push('<line' + attrs + ' x1="' + (cx - half) + '" y1="' + (cy + half) + '" x2="' + (cx + half) + '" y2="' + (cy - half) + cross);
+    }
+  }
+
   // ─── Parser ───────────────────────────────────────────────────────
 
   // Expand compact declarations while keeping note text and action code
@@ -14008,19 +14203,23 @@
       // A texture keyword may itself be a state identifier.
       const hasStateHighlight = /^state\s+\S/i.test(stateHl.stripped);
       const declarationText = hasStateHighlight ? stateHl.stripped : line;
-      const declaration = declarationText.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
+      const declaration = declarationText.match(/^state\s+([^\s{};]+)((?:\s*<<[^<>]*>>)*)\s*(\{)?\s*$/i);
       if (declaration) {
+        const stereotypes = (declaration[2].match(/<<[^<>]*>>/g) || []).map(text => text.slice(2, -2).trim()).filter(Boolean);
+        const pseudostateKind = stereotypes.length === 1 ? PSEUDOSTATE_KINDS[stereotypes[0].toLowerCase()] : null;
+        const opensRegion = Boolean(declaration[3]);
         // A top-level highlight of a state already nested in a composite (such
         // as an appended emphasis line) restyles it where it is; it must not
         // move the state out of its composite.
         const existing = states[declaration[1]];
         const restyleOnly = Boolean(existing && existing.parent) && parent === null &&
-          Boolean(stateHl.highlight || stateHl.texture) && !declaration[2];
+          Boolean(stateHl.highlight || stateHl.texture) && !opensRegion;
         const state = restyleOnly ? states[declaration[1]] : ensureState(declaration[1], parent, true);
-        if (/<<choice>>/i.test(declarationText)) state.type = 'choice';
+        if (pseudostateKind) state.type = pseudostateKind;
+        else if (stereotypes.length) state.stereotype = stereotypes.join(', ');
         if (hasStateHighlight && stateHl.highlight) state.highlight = stateHl.highlight;
         if (hasStateHighlight && stateHl.texture) state.texture = stateHl.texture;
-        if (declaration[2]) stateStack.push(state.name);
+        if (opensRegion) stateStack.push(state.name);
         continue;
       }
 
@@ -14117,12 +14316,13 @@
 
   // ─── Layout ───────────────────────────────────────────────────────
 
-  function measureState(s) {
+  function measureState(s, direction) {
     if (s.type === 'initial') return { width: CFG.initialR * 2, height: CFG.initialR * 2 };
     if (s.type === 'final') return { width: CFG.finalRingR * 2 + 4, height: CFG.finalRingR * 2 + 4 };
-    if (s.type === 'choice') return { width: 30, height: 30 };
+    if (isPseudostate(s)) return pseudostateSize(s, direction);
 
-    var nameW = UMLShared.textWidth(s.name, true, CFG.fontSizeBold);
+    var nameW = Math.max(UMLShared.textWidth(s.name, true, CFG.fontSizeBold),
+      UMLShared.textWidth(stateStereotypeText(s), false, CFG.fontSize));
     var internals = s.internalTransitions || [];
     var hasActions = s.entryAction || s.exitAction || s.doActivity || internals.length > 0;
     var actionLines = internals.length;
@@ -14139,7 +14339,7 @@
     });
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
-    var height = CFG.padY * 2 + CFG.lineHeight;
+    var height = CFG.padY * 2 + CFG.lineHeight + stateStereotypeHeight(s);
     if (hasActions) height += 4 + actionLines * CFG.actionLineHeight;
 
     return { width: Math.ceil(width), height: Math.ceil(height), hasActions: hasActions, actionLines: actionLines };
@@ -14285,7 +14485,7 @@
     // Measure all states (children get measured individually)
     for (var i = 0; i < stateList.length; i++) {
       var s = stateList[i];
-      var box = measureState(s);
+      var box = measureState(s, parsed.direction);
       entries[s.name] = { state: s, box: box, x: 0, y: 0 };
     }
 
@@ -14297,7 +14497,7 @@
     var compositePad = 20;
     for (var parentIndex = 0; parentIndex < compositeNames.length; parentIndex++) {
       var pName = compositeNames[parentIndex];
-      var parentHeader = measureState(entries[pName].state);
+      var parentHeader = measureState(entries[pName].state, parsed.direction);
       var compositeHeaderH = parentHeader.height + 4;
       var kids = compositeChildren[pName];
       var subNodes = [], subEdges = [];
@@ -14347,6 +14547,7 @@
             };
           })
         });
+        orientForkBars(subResult, entries, parsed.direction);
         reserveHorizontalStateLabels(subResult, stateTransitionsInScope(parsed, pName));
         // Compute sub-bounding box
         var sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
@@ -14457,6 +14658,7 @@
       edgeSizes: stateEdgeSizes
     });
 
+    orientForkBars(result, entries, parsed.direction);
     reserveHorizontalStateLabels(result, stateTransitionsInScope(parsed, null));
 
     // Map coords back for top-level states
@@ -14516,7 +14718,7 @@
   function drawStateActions(svg, entry, colors) {
     if (!entry.box.hasActions) return;
     var attrs = stateLayoutAttrs(entry.state.name);
-    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
+    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight + stateStereotypeHeight(entry.state);
     svg.push('<line' + attrs + ' x1="' + entry.x + '" y1="' + dividerY + '" x2="' + (entry.x + entry.box.width) + '" y2="' + dividerY +
       '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     var actionY = dividerY + CFG.fontSizeAction;
@@ -14727,7 +14929,7 @@
         var fromEntry = entries[tr.from];
         var toEntry = entries[tr.to];
         if (!fromEntry || !toEntry || tr.from === tr.to) continue;
-        if (toEntry.state.type === 'initial' || toEntry.state.type === 'final' || toEntry.state.type === 'choice') continue;
+        if (isPseudostate(toEntry.state)) continue;
 
         var side = transitionTargetSide(ti);
         if (!side) continue;
@@ -15663,8 +15865,13 @@
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + cFills.textureUrl + '" stroke="none"/>');
       }
-      // Header with name
-      var chY = ce.y + CFG.padY + CFG.lineHeight * 0.75;
+      // Header: the stereotype, when there is one, above the name
+      if (ce.state.stereotype) {
+        svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + (ce.y + CFG.padY + CFG.lineHeight * 0.75) +
+          '" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
+          UMLShared.escapeXml(stateStereotypeText(ce.state)) + '</text>');
+      }
+      var chY = ce.y + CFG.padY + stateStereotypeHeight(ce.state) + CFG.lineHeight * 0.75;
       svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + chY +
         '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(ce.state.name) + '</text>');
@@ -15700,18 +15907,8 @@
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
         svg.push('<circle' + stateLayoutAttrs(en) + ' cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
           '" fill="' + colors.line + '" stroke="none"/>');
-      } else if (s.type === 'choice') {
-        var choiceFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
-        // Diamond (rotated square)
-        var dh = e.box.width / 2;
-        var choicePts = cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
-          cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy;
-        svg.push('<polygon' + stateLayoutAttrs(en) + ' filter="url(#uml-node-shadow)" points="' + choicePts +
-          '" fill="' + choiceFills.headerFill + '" stroke="' + colors.stroke +
-          '" stroke-width="' + CFG.strokeWidth + '"/>');
-        if (choiceFills.textureUrl) {
-          svg.push('<polygon points="' + choicePts + '" fill="' + choiceFills.textureUrl + '" stroke="none"/>');
-        }
+      } else if (isPseudostate(s)) {
+        drawPseudostate(svg, e, en, cx, cy, colors);
       } else {
         var stateFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
         // Regular state: rounded rectangle
@@ -15724,8 +15921,13 @@
             '" fill="' + stateFills.textureUrl + '" stroke="none"/>');
         }
 
-        // State name (centered in top area)
-        var nameY = e.y + CFG.padY + CFG.lineHeight * 0.75;
+        // The stereotype, when there is one, then the name (centered at the top)
+        if (s.stereotype) {
+          svg.push('<text' + stateLayoutAttrs(en) + ' x="' + cx + '" y="' + (e.y + CFG.padY + CFG.lineHeight * 0.75) +
+            '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
+            UMLShared.escapeXml(stateStereotypeText(s)) + '</text>');
+        }
+        var nameY = e.y + CFG.padY + stateStereotypeHeight(s) + CFG.lineHeight * 0.75;
         svg.push('<text' + stateLayoutAttrs(en) + ' x="' + cx + '" y="' + nameY +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
           UMLShared.escapeXml(s.name) + '</text>');
@@ -15863,6 +16065,34 @@
 
     var stripped = m[1].indexOf('{') !== -1 ? head + ' {' : head;
     return { stripped: stripped.trim(), visualStyle: 'dashed' };
+  }
+
+  var COMPONENT_DECLARATION_START = /^(?:component\s+\S|\[[^\]]+\])/i;
+
+  // Separate a component declaration from its decorations: stereotypes,
+  // `#color [texture]` before or after them, and a final `dashed`, any of
+  // which may precede the `{` of a port block. Returns null for a line that
+  // does not declare a component.
+  function parseComponentDeclarationDecorations(line) {
+    var styleInfo = stripComponentDashedStyle(line);
+    var hl = UMLShared.parseHighlightColor(styleInfo.stripped);
+    if (!COMPONENT_DECLARATION_START.test(hl.stripped)) return null;
+    var declaration = { line: hl.stripped, highlight: hl.highlight, texture: hl.texture, visualStyle: styleInfo.visualStyle, stereotype: null };
+    var brace = hl.stripped.indexOf('{');
+    var head = brace === -1 ? hl.stripped : hl.stripped.slice(0, brace);
+    var stereotypes = UMLShared.extractStereotypes(head);
+    if (!stereotypes.stereotype) return declaration;
+    declaration.stereotype = stereotypes.stereotype;
+    declaration.line = (stereotypes.stripped.trim() + (brace === -1 ? '' : ' ' + hl.stripped.slice(brace))).trim();
+    if (!declaration.highlight && !declaration.texture) {
+      var beforeStereotype = UMLShared.parseHighlightColor(declaration.line);
+      if (COMPONENT_DECLARATION_START.test(beforeStereotype.stripped)) {
+        declaration.line = beforeStereotype.stripped;
+        declaration.highlight = beforeStereotype.highlight;
+        declaration.texture = beforeStereotype.texture;
+      }
+    }
+    return declaration;
   }
 
   // Parse a single port line: (portin|portout|port) ["name"] [as alias]
@@ -22709,6 +22939,19 @@
       return aliasToId[ref] || ref;
     }
 
+    // A relationship names each end by alias, bare name, or quoted name:
+    // `User -- "Log In"`.
+    var END = '("[^"]+"|\\S+)';
+    var LABEL = '\\s*(?::\\s*(.*))?$';
+    var generalizationRe = new RegExp('^' + END + '\\s+--\\|>\\s+' + END + '\\s*$');
+    var reverseGeneralizationRe = new RegExp('^' + END + '\\s+<\\|--\\s+' + END + '\\s*$');
+    var dependencyRe = new RegExp('^' + END + '\\s+\\.\\.>\\s+' + END + LABEL);
+    var directedRe = new RegExp('^' + END + '\\s+-->\\s+' + END + LABEL);
+    var associationRe = new RegExp('^' + END + '\\s+--\\s+' + END + LABEL);
+    function endName(ref) {
+      return ref.replace(/^"(.*)"$/, '$1');
+    }
+
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
@@ -22833,21 +23076,21 @@
 
       // Relationships (order matters: longer patterns first)
       // Generalization: A --|> B
-      var genMatch = line.match(/^(\S+)\s+--\|>\s+(\S+)\s*$/);
+      var genMatch = line.match(generalizationRe);
       if (genMatch) {
         relationships.push({
-          from: genMatch[1],
-          to: genMatch[2],
+          from: endName(genMatch[1]),
+          to: endName(genMatch[2]),
           type: 'generalization',
           label: '',
         });
         continue;
       }
-      var reverseGenMatch = line.match(/^(\S+)\s+<\|--\s+(\S+)\s*$/);
+      var reverseGenMatch = line.match(reverseGeneralizationRe);
       if (reverseGenMatch) {
         relationships.push({
-          from: reverseGenMatch[2],
-          to: reverseGenMatch[1],
+          from: endName(reverseGenMatch[2]),
+          to: endName(reverseGenMatch[1]),
           type: 'generalization',
           label: '',
         });
@@ -22855,12 +23098,12 @@
       }
 
       // Include/Extend: A ..> B : <<include>>  or  A ..> B : <<extend>>
-      var dottedMatch = line.match(/^(\S+)\s+\.\.>\s+(\S+)\s*(?::\s*(.*))?$/);
+      var dottedMatch = line.match(dependencyRe);
       if (dottedMatch) {
         var dottedLabelInfo = UMLShared.parseLabelDirectionCue(dottedMatch[3] || '');
         relationships.push({
-          from: dottedMatch[1],
-          to: dottedMatch[2],
+          from: endName(dottedMatch[1]),
+          to: endName(dottedMatch[2]),
           type: 'dependency',
           label: dottedLabelInfo.text,
           labelDirection: dottedLabelInfo.hasDirection,
@@ -22869,12 +23112,12 @@
       }
 
       // Directed association: A --> B
-      var directedMatch = line.match(/^(\S+)\s+-->\s+(\S+)\s*(?::\s*(.*))?$/);
+      var directedMatch = line.match(directedRe);
       if (directedMatch) {
         var directedLabelInfo = UMLShared.parseLabelDirectionCue(directedMatch[3] || '');
         relationships.push({
-          from: directedMatch[1],
-          to: directedMatch[2],
+          from: endName(directedMatch[1]),
+          to: endName(directedMatch[2]),
           type: 'directed',
           label: directedLabelInfo.text,
           labelDirection: directedLabelInfo.hasDirection,
@@ -22883,12 +23126,12 @@
       }
 
       // Association: A -- B
-      var assocMatch = line.match(/^(\S+)\s+--\s+(\S+)\s*(?::\s*(.*))?$/);
+      var assocMatch = line.match(associationRe);
       if (assocMatch) {
         var assocLabelInfo = UMLShared.parseLabelDirectionCue(assocMatch[3] || '');
         relationships.push({
-          from: assocMatch[1],
-          to: assocMatch[2],
+          from: endName(assocMatch[1]),
+          to: endName(assocMatch[2]),
           type: 'association',
           label: assocLabelInfo.text,
           labelDirection: assocLabelInfo.hasDirection,
