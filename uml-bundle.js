@@ -3474,6 +3474,11 @@
     return chain;
   }
 
+  // Whether package `outerId` is package `innerId` or encloses it.
+  function packageEncloses(packages, outerId, innerId) {
+    return packageChain(packages || [], function() { return innerId; }, null).some(function(pkg) { return pkg.id === outerId; });
+  }
+
   // For the compact squeeze (UMLCompactLayout's `separation`): the extra gap
   // two elements keep on an axis for the frames between them, `a` before
   // `b` on it. Each package one of them is in and the other is not puts its
@@ -6554,6 +6559,7 @@
     packageSceneId: packageSceneId,
     recordPackageFrames: recordPackageFrames,
     packageHolding: packageHolding,
+    packageEncloses: packageEncloses,
     packageSeparation: packageSeparation,
     drawPackageFrames: drawPackageFrames,
     drawPackageNames: drawPackageNames,
@@ -12058,16 +12064,6 @@
     }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
   }
 
-  // Whether package `id` is `packageId` or one that encloses it.
-  function isClassPackageWithin(packages, packageId, id) {
-    var byId = {};
-    (packages || []).forEach(function(pkg) { byId[pkg.id] = pkg; });
-    for (var seen = 0, pkg = byId[packageId]; pkg && seen <= packages.length; pkg = byId[pkg.parent], seen++) {
-      if (pkg.id === id) return true;
-    }
-    return false;
-  }
-
   // Member note targets are derived from class positions: rebuild them once
   // manual positions have moved the classes.
   function refreshMemberNoteTargets(entries) {
@@ -14589,7 +14585,7 @@
         var noteTargetEntry = entries[noteTargetBaseName(sceneNote.note.target)];
         var noteTargetPackage = noteTargetEntry && noteTargetEntry.cls ? noteTargetEntry.cls.package : null;
         var notePackage = UMLShared.packageHolding(packageFrames, sceneNoteRect, function(id) {
-          return isClassPackageWithin(parsed.packages, noteTargetPackage, id);
+          return UMLShared.packageEncloses(parsed.packages, id, noteTargetPackage);
         });
         scene.addNode({ id: sceneNoteId, x: sceneNoteRect.x, y: sceneNoteRect.y, width: sceneNoteRect.width, height: sceneNoteRect.height,
           kind: 'note', parent: UMLShared.packageSceneId(notePackage) });
