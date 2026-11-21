@@ -1391,6 +1391,59 @@ Rejected --> [*]
 @enduml
 </code></pre>
 
+### Other Pseudostates
+
+A pseudostate is declared like a choice: `state Name <<kind>>`. The name
+identifies it in transitions; the diagram shows only its symbol.
+
+| Declaration | Symbol | Use |
+| --- | --- | --- |
+| `state Name <<choice>>` | diamond | Branch on guards evaluated when the transition reaches it |
+| `state Name <<junction>>` | small filled circle | Merge or split transition paths with static guards |
+| `state Name <<history>>` | circled **H** | Re-enter the sub-state its region was last in |
+| `state Name <<deepHistory>>` | circled **H\*** | The same, restoring nested sub-states as well |
+| `state Name <<fork>>` | bar | Split one transition into concurrent ones |
+| `state Name <<join>>` | bar | Merge concurrent transitions into one |
+| `state Name <<terminate>>` | cross | End the state machine's own lifetime |
+
+`<<shallowHistory>>` and `<<history*>>` are accepted spellings of the two
+history kinds. A fork or join bar lies across the layout direction: horizontal
+under `layout vertical`, vertical under `layout horizontal`. Declare a history
+pseudostate inside the composite state whose region it remembers.
+
+<pre><code class="language-uml-state">
+@startuml
+[*] --> Idle
+state Split <<fork>>
+state Merge <<join>>
+state Printing {
+  state Resume <<history>>
+  [*] --> Feeding
+  Feeding --> Inking : sheet ready
+}
+Idle --> Split : print
+Split --> Printing
+Split --> Logging
+Printing --> Merge : done
+Logging --> Merge : written
+Merge --> [*]
+Paused --> Resume : resume
+Printing --> Paused : pause
+@enduml
+</code></pre>
+
+### State Stereotypes
+
+Any other `<<name>>` on a state declaration is a stereotype, shown in
+guillemets above the state's name. It works on simple and composite states.
+
+```
+state Ready <<stable>>
+state Active <<subsystem>> {
+  state Running
+}
+```
+
 ---
 
 ## Component Diagrams
@@ -1767,6 +1820,7 @@ its relationships in the diagram.
 
 ```
 Actor -- UseCase                          ← association (no arrow)
+Actor -- "Use Case Name"                  ← an end may be a quoted name
 Actor --> UseCase                         ← directed association
 UseCase ..> UseCase : <<include>>         ← include (mandatory sub-flow)
 UseCase ..> UseCase : <<extend>>          ← extend (inserted when its condition is true)
