@@ -337,3 +337,46 @@ test('compact drawings carry their callouts where there is no DOM, as in the wor
     assert.doesNotMatch(container.markup(), /data-uml-callouts=/, `${type}: nothing is left for the page to place`);
   }
 });
+
+// A compact drawing is shown scaled to fit its pane, so a callout that widens
+// a drawing whose width already limits that scale makes every label smaller.
+// Here the target's nearest clear spot is beside the drawing (a wall blocks
+// its right, nothing blocks its left), and a slightly longer pointer reaches
+// room below it inside the frame. The stub canvas measures 8 units per
+// character.
+const WALLED_TARGET = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300" viewBox="0 0 200 300">' +
+  '<text x="20" y="160" font-size="14">Target</text>' +
+  '<rect x="80" y="20" width="110" height="180" fill="white" stroke="black"/></svg>';
+const viewBoxOf = markup => /viewBox="([^"]*)"/.exec(markup)[1].split(' ').map(Number);
+const scaleIn = (pane, [, , width, height]) => Math.min(pane.width / width, pane.height / height);
+
+test('a compact callout takes room inside the frame over a shorter pointer that would shrink the drawing in its pane', () => {
+  const { UMLCallouts } = loadBundle();
+  const pane = { width: 300, height: 700 };
+  const { callouts } = UMLCallouts.extract('callout right of text "Target" : Room below');
+  const markup = UMLCallouts.drawCompact(WALLED_TARGET, null, callouts, { fontSize: 14, margin: 10, pane });
+  assert.equal(scaleIn(pane, viewBoxOf(markup)), scaleIn(pane, viewBoxOf(WALLED_TARGET)),
+    `framed as ${viewBoxOf(markup).join(' ')}`);
+});
+
+test('without a pane a callout keeps its shortest clear pointer, as on the page', () => {
+  const { UMLCallouts } = loadBundle();
+  const { callouts } = UMLCallouts.extract('callout right of text "Target" : Room below');
+  const [x] = viewBoxOf(UMLCallouts.drawCompact(WALLED_TARGET, null, callouts, { fontSize: 14, margin: 10 }));
+  assert.ok(x < 0, `the callout sits left of the drawing, framed from x = ${x}`);
+});
+
+// Each of these callouts alone fits above or below the drawing without
+// making it smaller in the pane (its height has room to spare), but the two
+// together would: one of them takes the room inside instead.
+const TWO_LABELS = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300" viewBox="0 0 600 300">' +
+  '<text x="280" y="30" font-size="14">Top</text><text x="280" y="285" font-size="14">Low</text></svg>';
+
+test('compact callouts are priced together for the room they take in the pane', () => {
+  const { UMLCallouts } = loadBundle();
+  const pane = { width: 600, height: 400 };
+  const { callouts } = UMLCallouts.extract(['callout top of text "Top" : The first note, long enough to wrap',
+    'callout bottom of text "Low" : The second note, long enough to wrap'].join('\n'));
+  const markup = UMLCallouts.drawCompact(TWO_LABELS, null, callouts, { fontSize: 14, margin: 10, pane });
+  assert.equal(scaleIn(pane, viewBoxOf(markup)), scaleIn(pane, viewBoxOf(TWO_LABELS)), `framed as ${viewBoxOf(markup).join(' ')}`);
+});

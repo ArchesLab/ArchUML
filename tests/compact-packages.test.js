@@ -33,7 +33,6 @@ const SHORTFALLS = {
   'component a package with one member 600x750 size': 'compact 28.77 px, default 31.46 px; not the package: without it compact gives 30.88 px against 32.41 px',
   'component relationships crossing between packages 600x750 size': 'compact 19.58 px, default 20.96 px with Sales and Stock interleaved',
   'component relationships crossing between packages 600x750 edges': 'compact 6 bends, default 4 with Sales and Stock interleaved',
-  'component a note and a callout inside a package 600x750 size': 'compact 15.97 px, default 18.35 px: the compact callout placer puts the callout beside the drawing, outside the package frame; without the package compact gives 21.93 px',
 };
 const shortfall = (key) => (SHORTFALLS[key] ? { todo: SHORTFALLS[key] } : {});
 

@@ -592,16 +592,22 @@
   // The nearest a box comes to its target: the shortest pointer, and the tip's clearance.
   const BOX_GAP = POINTER_LENGTH + TIP_CLEARANCE;
 
-  /** A box's placement on one side of the target, priced mostly by pointer length. */
-  function candidateAt(callout, target, side, size, box) {
+  /**
+   * A box's placement on one side of the target, priced mostly by pointer
+   * length, plus what it alone costs the drawing's size (`growth`) when the
+   * search prices that (compact drawings).
+   */
+  function candidateAt(search, side, size, box) {
+    const { callout, target, sizing } = search;
     const horizontal = side === 'left' || side === 'right';
     const tip = tipFor(target, side, box);
     const pointer = pointerShape(box, tip, POINTER_ASPECTS[0]);
     const length = Math.hypot(tip.x - pointer.base.x, tip.y - pointer.base.y);
     const offCentre = horizontal ? pointer.base.y - (box.y + box.height / 2) : pointer.base.x - (box.x + box.width / 2);
-    return { box, size, length, tip, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
+    const growth = sizing ? sizing.alone(box, pointer.points) : 0;
+    return { box, size, length, tip, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points), growth,
       cost: length + (side === callout.side ? 0 : OTHER_SIDE_COST) +
-        Math.abs(size.maxWidth - callout.type.wrapWidths[0]) * REWRAP_COST + Math.abs(offCentre) * OFF_CENTRE_COST };
+        Math.abs(size.maxWidth - callout.type.wrapWidths[0]) * REWRAP_COST + Math.abs(offCentre) * OFF_CENTRE_COST + growth };
   }
 
   /** The placement with a narrower pointer, at a price for narrowing it. */
@@ -621,7 +627,7 @@
     if (!record) {
       slot.records = slot.records || [];
       const { side, size } = chain.group;
-      record = { chain, order: slot.order, candidate: candidateAt(search.callout, search.target, side, size, box), pointers: [], crossed: null };
+      record = { chain, order: slot.order, candidate: candidateAt(search, side, size, box), pointers: [], crossed: null };
       slot.records.push(record);
     }
     return record;
@@ -857,13 +863,15 @@
    * A callout's search: a function from the callouts already placed to a
    * few clearly different placements. A placement whose pointer crosses
    * anything is used only when no clear one exists, nearby or further away.
+   * With `sizing` (see arrange), each placement's price includes what it
+   * alone costs the drawing's size.
    */
-  function calloutSearch(callout, target, geometry, reserved, others) {
+  function calloutSearch(callout, target, geometry, reserved, others, sizing) {
     // Labels always exclude pointers. A shape containing the target does not:
     // a pointer to a visibility marker must be able to reach inside its class.
     const obstacles = geometry.obstacles.filter(obstacle => !(target.element && obstacle.element === target.element) &&
       !(obstacle.kind === 'shape' && contains(obstacle.box, target)));
-    const search = { callout, target, blockers: geometry.blockers.concat(reserved, others), obstacles: obstacleGrid(obstacles) };
+    const search = { callout, target, sizing, blockers: geometry.blockers.concat(reserved, others), obstacles: obstacleGrid(obstacles) };
     // A round is searched only once a layout finds nothing clear in the one before.
     const rounds = [];
     return placed => {
@@ -897,31 +905,39 @@
   /**
    * Place callouts one after another in the given order, keeping the cheapest
    * few partial layouts, so an early callout can give way when its best spot
-   * would leave a later one nowhere clear to go.
+   * would leave a later one nowhere clear to go. With `sizing`, a partial
+   * layout is priced for what its callouts together cost the drawing's
+   * size, in place of the sum of what each would cost alone.
    */
-  function beamSearch(order, searches) {
-    let beam = [{ placed: [], cost: 0 }];
+  function beamSearch(order, searches, sizing) {
+    let beam = [{ placed: [], own: 0, cost: 0 }];
     for (const index of order) {
-      beam = beam.flatMap(state => searches[index](state.placed)
-        .map(option => ({ placed: state.placed.concat(option), cost: state.cost + option.cost })))
-        .sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
+      beam = beam.flatMap(state => searches[index](state.placed).map(option => {
+        const placed = state.placed.concat(option), own = state.own + option.cost - option.growth;
+        return { placed, own, cost: sizing ? own + sizing.together(placed) : own };
+      })).sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
     }
     const placements = [];
     order.forEach((index, position) => { placements[index] = beam[0].placed[position]; });
     return { placements, cost: beam[0].cost, forced: order.filter((index, position) => beam[0].placed[position].forced) };
   }
 
-  function arrange(callouts, targets, geometry) {
+  /**
+   * Places the callouts: for each, its box and pointer. `sizing`
+   * (optional) prices what placements cost the drawing's size, as
+   * `alone(box, pointer)` and `together(placements)`; the page pass has none.
+   */
+  function arrange(callouts, targets, geometry, sizing = null) {
     // No box may cover what another callout points at.
     const reserved = targets.map(target => padded(target, TIP_CLEARANCE));
     // Each search outlives one order of placement, so a retry reuses its work.
     const searches = callouts.map((callout, index) => calloutSearch(callout, targets[index], geometry, reserved,
-      neighbourKeepOut(targets[index], targets, geometry.obstacles)));
+      neighbourKeepOut(targets[index], targets, geometry.obstacles), sizing));
     let order = callouts.map((_, index) => index), best = null;
     // A callout left with nowhere clear may have been crowded out by earlier
     // ones; placing it first lets the others arrange around it instead.
     for (let attempt = 0; attempt < ORDER_ATTEMPTS; attempt++) {
-      const result = beamSearch(order, searches);
+      const result = beamSearch(order, searches, sizing);
       if (!best || result.cost < best.cost) best = result;
       if (!result.forced.length || result.forced.every((index, position) => order[position] === index)) break;
       order = result.forced.concat(order.filter(index => !result.forced.includes(index)));
@@ -1321,6 +1337,27 @@
     return { x: left, y: top, width: Math.ceil(right - left), height: Math.ceil(bottom - top) };
   }
 
+  // What it costs a compact drawing, in units of pointer length, to show its
+  // text smaller by a factor of e: 1 % smaller text is worth a pointer about
+  // 3 units longer. Higher weights draw callouts into gaps between boxes that
+  // the squeeze then has to keep open (state-016, class-030 of the layout
+  // benchmark got smaller at 1000).
+  const GROWTH_COST = 300;
+
+  /**
+   * The price of callout placements for how much smaller they make a
+   * drawing framed by `viewBox` in `pane` (arrange's `sizing`): the page
+   * scales the drawing to fit, so a box that widens a drawing whose width
+   * limits that scale shrinks every label, while one that grows the other
+   * way costs nothing until that side limits it too.
+   */
+  function frameSizing(viewBox, margin, pane) {
+    const scaleOf = frame => Math.min(pane.width / frame.width, pane.height / frame.height);
+    const bare = scaleOf(viewBox);
+    const together = placements => GROWTH_COST * Math.max(0, Math.log(bare / scaleOf(frameWith(viewBox, placements, margin))));
+    return { together, alone: (box, pointer) => together([{ box, pointer }]) };
+  }
+
   // The drawing with its model and callouts in the layers the page pass
   // builds, and its frame set to `frame`.
   function layeredMarkup(markup, parts, frame) {
@@ -1365,8 +1402,10 @@
    * @param {object|null} scene — its UMLLayoutQuality scene (origin = where
    *   the scene's 0,0 lies in the SVG), or null
    * @param {Array} callouts — from extract()
-   * @param {{fontSize:number, margin:number}} base — the diagram's base font
-   *   and the margin it keeps around what it draws
+   * @param {{fontSize:number, margin:number, pane?:{width:number, height:number}}} base —
+   *   the diagram's base font, the margin it keeps around what it draws, and
+   *   the pane it is shown in: with a pane, a callout prefers room that does
+   *   not make the drawing smaller there (frameSizing)
    * @returns {string} the drawing with its callouts
    */
   function drawCompact(svg, scene, callouts, base) {
@@ -1379,8 +1418,9 @@
       if (!target) throw new Error('Callout target not found at line ' + callout.line + ': ' + callout.target.value);
       return target;
     });
-    const placements = arrange(typed, targets, geometryOf(model.parts));
-    const frame = frameWith(viewBoxOf(model.root), placements, base.margin);
+    const viewBox = viewBoxOf(model.root);
+    const placements = arrange(typed, targets, geometryOf(model.parts), base.pane ? frameSizing(viewBox, base.margin, base.pane) : null);
+    const frame = frameWith(viewBox, placements, base.margin);
     if (scene) {
       const origin = scene.origin || { x: 0, y: 0 };
       placements.forEach(({ box }, index) => {
@@ -1402,8 +1442,9 @@
    * callouts, so a diagram without them pays nothing.
    *
    * @param {Array|undefined} callouts — from extract()
-   * @param {function(): {fontSize:number, margin:number}} baseOf — read at
-   *   each call: a renderer's compact metrics hold only during the search
+   * @param {function(): {fontSize:number, margin:number, pane:object}} baseOf —
+   *   read at each call: a renderer's compact metrics hold only during the
+   *   search (see drawCompact)
    * @returns {null|function({svg, scene}): {svg, scene}}
    */
   function compactAnnotator(callouts, baseOf) {
@@ -16414,7 +16455,7 @@
       // The teaching callouts at the compact base size (CFG holds the
       // compact metrics while the search runs).
       annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
-        return { fontSize: CFG.fontSize, margin: CFG.svgPad };
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
       })
     };
   }
@@ -21312,7 +21353,7 @@
       // The teaching callouts at the compact base size (CFG holds the
       // compact metrics while the search runs).
       annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
-        return { fontSize: CFG.fontSize, margin: CFG.svgPad };
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
       }),
 
       estimate: function(placement) {
@@ -27854,7 +27895,7 @@
       // The teaching callouts at the compact base size (CFG holds the
       // compact metrics while the search runs).
       annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
-        return { fontSize: CFG.fontSize, margin: CFG.svgPad };
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
       }),
 
       // Boxes only; edge labels outside the boxes are not counted.

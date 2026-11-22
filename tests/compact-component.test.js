@@ -337,16 +337,7 @@ for (const pane of [COLUMN, WIDE]) {
 
 // Requirements compact does not meet yet, by test name, with what was
 // measured and why. Each stays a todo until the cause is fixed.
-const CALLOUT_SIDE = 'the compact callout placer (UMLCallouts.drawCompact) puts a callout beside the drawing where the page pass finds room below its target';
 const KNOWN_GAPS = {
-  'components only (SEBook/uml_component_diagram.md) in a 600×700 pane: compact text is smaller on screen than without a layout line':
-    `measured 14.95 px against 15.27 px: ${CALLOUT_SIDE}`,
-  'components only (SEBook/uml_component_diagram.md) in a 1200×675 pane: compact text is smaller on screen than without a layout line':
-    `measured 29.89 px against 30.55 px: ${CALLOUT_SIDE}`,
-  'threat profile (_data/narration_visuals/huggingface2026.json) in a 600×700 pane: compact text is smaller on screen than without a layout line':
-    `measured 8.17 px against 8.84 px: ${CALLOUT_SIDE}`,
-  'threat profile (_data/narration_visuals/huggingface2026.json) in a 1200×675 pane: compact text is smaller on screen than without a layout line':
-    `measured 16.34 px against 17.68 px: ${CALLOUT_SIDE}; the wraps that fit better have 3 and 4 bends against 2`,
   'notes on a full diagram (_data/narration_visuals/uml_component_diagram.json) in a 600×700 pane: compact is flagged with layout issues':
     'the note "run by an SMS company" has no room between Registrar and TextGateway; the five routing passes go to the reference and four wraps (all invalid), none to its repair or to the copy whose notes may move farther',
 };
