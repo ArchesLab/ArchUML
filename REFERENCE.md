@@ -97,7 +97,7 @@ This applies to class, state, sequence, and component diagrams so far. Other dia
 
 In a sequence diagram, a fragment's guard stays at the head of the operand it guards: beside the operator tab when it fits there inside the frame and clear of every lifeline, otherwise on its own line under the tab. An `else` guard starts the line under its divider. A guard widens its frame only when it is wider than the frame its messages need. As in any layout, a guard that crosses lifelines or activation bars covers them with an opaque backdrop.
 
-In class and component diagrams, packages are part of the compact drawing: their names keep clear of other text, an element inside a package it does not belong to counts as an overlap, and the squeeze keeps room for the frames between elements of different packages. Lines still cross package outlines and pass under their names. Where the automatic layout would put an element inside a package it is not in, or two packages on each other, compact layout places the same diagram package by package instead: each package's members, and its inner packages, are laid out together as one block. Such a drawing can have more bends than the default drawing, whose packages overlap. In a component diagram whose default drawing only puts frames on each other, or a frame over a component just outside it, compact also tries that drawing with the frames moved apart: it keeps the default arrangement, and with it the straight lines, where moving apart can end every overlap without changing the order of the components. In state diagrams, transitions into a junction or a join, and out of a junction or a fork, may share their stretch at the pseudostate.
+In class and component diagrams, packages are part of the compact drawing: their names keep clear of other text, an element inside a package it does not belong to counts as an overlap, and the squeeze keeps room for the frames between elements of different packages. In a component diagram, lines still cross package outlines and pass under their names; in a class diagram, compact or not, a relationship goes around the packages that hold neither of its ends and around package names. Where the automatic layout would put an element inside a package it is not in, or two packages on each other, compact layout places the same diagram package by package instead: each package's members, and its inner packages, are laid out together as one block. Such a drawing can have more bends than the placement it replaces, whose packages overlap. A class diagram is placed package by package without `layout compact` as well. In a component diagram whose default drawing only puts frames on each other, or a frame over a component just outside it, compact also tries that drawing with the frames moved apart: it keeps the default arrangement, and with it the straight lines, where moving apart can end every overlap without changing the order of the components. In state diagrams, transitions into a junction or a join, and out of a junction or a fork, may share their stretch at the pseudostate.
 
 In a component diagram, compact may turn and wrap the chain of components to suit the pane: into rows, read row by row and left to right within a row, or top to bottom, one component per row. The author's arrangement and the one the layout would take for a container of the pane's shape are candidates too, and are kept when they read best. To do this, `layout compact` overrides `left to right direction` and `top to bottom direction`, the direction letter of hidden constraints such as `a -[hidden]r- b`, and `skinparam ranksep` / `nodesep` (which ArchUML ignores anyway). It keeps their order: read row by row, the components come in the order the hidden constraints and the authored direction give them. `layout compact` keeps this meaning when a direction line follows it. A port stays on the side of its component that its connectors arrive from, port names are set at the connector-label size, and each connector label sits by its own connector.
 
@@ -624,7 +624,7 @@ class Singleton <<singleton>> {
 
 ### Packages
 
-A package groups the classes declared inside its braces, drawn as in component diagrams (UML 2.5.1, 12.2.4): a rectangle with the name in a tab on the left of its top edge, any stereotype above the name, a solid outline, and no fill. Packages sit behind the classes, relationships cross them, they nest, and they enclose their classes at `@pos` positions. A name may be qualified with `::` and shows as written.
+A package groups the classes declared inside its braces, drawn as in component diagrams (UML 2.5.1, 12.2.4): a rectangle with the name in a tab on the left of its top edge, any stereotype above the name, a solid outline, and no fill. Packages sit behind the classes, they nest to any depth, and they enclose their classes at `@pos` positions. A relationship crosses the outline of a package that holds one of its ends and goes around the others. A name may be qualified with `::` and shows as written.
 
 ```
 package opc::partners { ... }
@@ -667,6 +667,72 @@ package opc::partners {
 }
 SupplierProvider --|> Provider
 ShuttleProvider --|> Provider
+@enduml
+</code></pre>
+
+---
+
+### Package Diagrams
+
+A `package` line without braces draws a package that does not show its members (UML 2.5.1, 12.2.4): a large rectangle that holds the name, any stereotype above it, and a small empty tab on the left of its top edge. Such a package is a node, like a class: it takes `@pos`, a `#color`, notes, and relationships, and a relationship ends on its outline. Use dependencies between packages for a package diagram, such as the imports between modules.
+
+```
+package infra::http                                 ← a package node; the name shows as written
+package "Message broker" as broker <<framework>>    ← display name, identifier, and stereotype
+loyalty ..> broker                                  ← dependency between packages
+loyalty ..> broker : «use»                          ← with its kind
+services ..> infra                                  ← from one package frame to another
+```
+
+Packages nest to any depth. A package with braces is a frame around what it declares, and its members may be classes, package nodes, or further frames, so one diagram can show some packages opened and others closed:
+
+```
+package infra { package broker; package http }      ← a frame around two package nodes
+```
+
+A dependency may also start or end at a package that shows its members: name the package, and the line stops at its frame. Such a line runs straight where the two ends face each other and otherwise takes one corner. A dependency between a package and something that lies inside it or across its outline is not drawn.
+
+The automatic layout keeps packages apart. Where its placement would put an element inside a package it is not in, or two packages on each other, the diagram is placed package by package instead: the members of a package, its inner packages included, are laid out together, and the package takes its place among its siblings as one block, at any depth of nesting. Relationships go around the packages that hold neither of their ends and around every package's name.
+
+**Example — modules and the packages that hold them:**
+
+```
+@startuml
+package services {
+  package website {
+    package checkout
+    package clients
+  }
+  package loyalty
+}
+package infra {
+  package broker
+  package http
+}
+checkout ..> clients
+clients ..> http
+loyalty ..> broker
+broker ..> http
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+package services {
+  package website {
+    package checkout
+    package clients
+  }
+  package loyalty
+}
+package infra {
+  package broker
+  package http
+}
+checkout ..> clients
+clients ..> http
+loyalty ..> broker
+broker ..> http
 @enduml
 </code></pre>
 
@@ -3256,7 +3322,7 @@ Output JSON format:
 
 ### Stereotypes and Packages (Class, Component)
 
-`component Name <<Kind>>` · `component Name <<A, B>>` · `A -- B : <<kind>> {property = "value"}` · `package Name { … }` · `package "Display Name" as Id <<Kind>> { … }`
+`component Name <<Kind>>` · `component Name <<A, B>>` · `A -- B : <<kind>> {property = "value"}` · `package Name { … }` · `package "Display Name" as Id <<Kind>> { … }` · `package Name` *(class diagrams: a package node)*
 
 ### Layout Hints
 

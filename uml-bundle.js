@@ -4809,8 +4809,9 @@
    * @returns {number} new lineIdx (advanced past multi-line block), or -1 if not a note
    */
   function parseNoteLine(line, allLines, lineIdx, notesArray) {
-    // Single-line: note left of Foo: text here
-    var single = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?(\S+)\s*:\s*(.+)$/i);
+    // Single-line: note left of Foo: text here. The target may be a
+    // qualified name (`infra::http`): only a single colon starts the text.
+    var single = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?((?:[^\s:]|::)+)\s*:(?!:)\s*(.+)$/i);
     if (single) {
       notesArray.push({
         id: 'note:' + lineIdx,
@@ -11240,7 +11241,8 @@
   /**
    * Parse a class declaration line.
    * Supports: class Name, abstract class Name, interface Name,
-   *           class Name <<stereotype>>
+   *           class Name <<stereotype>>, and package Name (a package
+   *           drawn without its members, as a node like a class)
    */
   function parseClassDecl(line) {
     // Remove trailing { if present
@@ -11258,7 +11260,7 @@
     var highlight = null;
     var texture = null;
     var hl = UMLShared.parseHighlightColor(cleanLine);
-    if (/^(?:abstract\s+class|class|interface|enum)\s+\S/i.test(hl.stripped)) {
+    if (/^(?:abstract\s+class|class|interface|enum|package)\s+\S/i.test(hl.stripped)) {
       cleanLine = hl.stripped;
       highlight = hl.highlight;
       texture = hl.texture;
@@ -11274,7 +11276,7 @@
     // `#color` may also appear before the stereotype (`class Foo #red <<s>>`).
     if (!highlight && !texture) {
       var hl2 = UMLShared.parseHighlightColor(cleanLine);
-      if (/^(?:abstract\s+class|class|interface|enum)\s+\S/i.test(hl2.stripped)) {
+      if (/^(?:abstract\s+class|class|interface|enum|package)\s+\S/i.test(hl2.stripped)) {
         cleanLine = hl2.stripped;
         highlight = hl2.highlight;
         texture = hl2.texture;
@@ -11293,6 +11295,11 @@
     } else if (/^class\s+/.test(cleanLine)) {
       classType = 'class';
       name = cleanLine.replace(/^class\s+/, '').trim();
+    } else if (/^package\s+/.test(cleanLine)) {
+      // A package line without braces (parse() reads `package Name {` as
+      // the frame around its members) is a package drawn without members.
+      classType = 'package';
+      name = cleanLine.replace(/^package\s+/, '').trim();
     } else {
       return null;
     }
@@ -11522,11 +11529,119 @@
 
   // ─── Layout ───────────────────────────────────────────────────────
 
+  // A package drawn without its members (UML 2.5.1, 12.2.4): the name, with
+  // any stereotype above it, stands in the large rectangle, and the small
+  // tab on the left of the top edge stays empty. The node's box covers both
+  // parts; tabW and tabH give the tab in the box's top left corner.
+  var PACKAGE_NODE = { tabH: 12, tabMinW: 30, tabMaxW: 54, padY: 10, minWidth: 120 };
+
+  function measurePackageNode(cls) {
+    var stereotypeText = cls.stereotype ? '\u00AB' + cls.stereotype + '\u00BB' : '';
+    var stereotypeH = stereotypeText ? CFG.lineHeight : 0;
+    var nameW = UMLShared.textWidth(cls.label || cls.name, true, CFG.fontSizeBold);
+    if (stereotypeText) {
+      nameW = Math.max(nameW, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype));
+    }
+    var width = Math.ceil(Math.max(PACKAGE_NODE.minWidth, nameW + CFG.padX * 2) / 2) * 2;
+    var height = PACKAGE_NODE.tabH + PACKAGE_NODE.padY * 2 + CFG.lineHeight + stereotypeH;
+    return {
+      width: width,
+      height: height,
+      nameH: height,
+      stereotypeH: stereotypeH,
+      propertyH: 0,
+      attrH: 0,
+      methH: 0,
+      stereotypeText: stereotypeText,
+      propertyText: '',
+      tabW: Math.max(PACKAGE_NODE.tabMinW, Math.min(PACKAGE_NODE.tabMaxW, Math.round(width * 0.3))),
+      tabH: PACKAGE_NODE.tabH,
+    };
+  }
+
+  // The outline of a package node differs from its box right of the tab,
+  // where the top edge lies one tab height lower. Move a route end that the
+  // router put on the box onto the outline. Returns new points.
+  function snapRouteEndsToPackageOutline(points, fromEntry, toEntry) {
+    if (!points || points.length < 2) return points;
+    var snapped = points.map(function(point) { return { x: point.x, y: point.y }; });
+    function snap(endIndex, neighborIndex, entry) {
+      if (!entry || !entry.cls || entry.cls.type !== 'package') return;
+      var end = snapped[endIndex], neighbor = snapped[neighborIndex];
+      var bodyTop = entry.y + entry.box.tabH;
+      var vertical = Math.abs(neighbor.x - end.x) < 0.75, horizontal = Math.abs(neighbor.y - end.y) < 0.75;
+      // From above, right of the tab: the line runs on to the large rectangle.
+      if (vertical && neighbor.y < end.y && Math.abs(end.y - entry.y) < 0.75 &&
+          end.x > entry.x + entry.box.tabW + 0.5) {
+        end.y = bodyTop;
+        return;
+      }
+      // At the right edge beside the tab there is no outline: lower the last
+      // lane onto the large rectangle. The lane before it only changes length.
+      if (horizontal && snapped.length > 2 && Math.abs(end.x - (entry.x + entry.box.width)) < 0.75 &&
+          end.y < bodyTop + 0.5) {
+        var laneY = bodyTop + Math.min(8, (entry.box.height - entry.box.tabH) / 2);
+        end.y = laneY;
+        neighbor.y = laneY;
+      }
+    }
+    snap(0, 1, fromEntry);
+    snap(snapped.length - 1, snapped.length - 2, toEntry);
+    return snapped;
+  }
+
+  // The shortest orthogonal line between two rectangles that do not
+  // overlap: straight where they face each other over a stretch that keeps
+  // `margin` from their corners, otherwise with one corner. Rectangles that
+  // face each other over less than that count as apart on that axis too, in
+  // the order of their centres. A line with one corner leaves and arrives
+  // over a stretch of `margin` or more, so it runs through neither
+  // rectangle (rectangles too small for that keep both lines).
+  // `blocked(points)` tells whether a candidate crosses something in its
+  // way; of the two one-corner candidates, the first clear one is used.
+  // Returns null for rectangles that overlap.
+  function routeBetweenOutlines(a, b, blocked) {
+    var margin = 12;
+    var aAbove = a.y + a.height <= b.y, aBelow = a.y >= b.y + b.height;
+    var aLeft = a.x + a.width <= b.x, aRight = a.x >= b.x + b.width;
+    if (!(aAbove || aBelow || aLeft || aRight)) return null;
+    // The stretch the two share on the axis they are not apart on.
+    var x1 = Math.max(a.x, b.x), x2 = Math.min(a.x + a.width, b.x + b.width);
+    var y1 = Math.max(a.y, b.y), y2 = Math.min(a.y + a.height, b.y + b.height);
+    if ((aAbove || aBelow) && x2 - x1 >= margin * 2) {
+      var x = Math.round((x1 + x2) / 2);
+      return [{ x: x, y: aAbove ? a.y + a.height : a.y }, { x: x, y: aAbove ? b.y : b.y + b.height }];
+    }
+    if ((aLeft || aRight) && y2 - y1 >= margin * 2) {
+      var y = Math.round((y1 + y2) / 2);
+      return [{ x: aLeft ? a.x + a.width : a.x, y: y }, { x: aLeft ? b.x : b.x + b.width, y: y }];
+    }
+
+    var ax = Math.round(a.x + a.width / 2), ay = Math.round(a.y + a.height / 2);
+    var bx = Math.round(b.x + b.width / 2), by = Math.round(b.y + b.height / 2);
+    var above = aAbove || (!aBelow && ay < by), left = aLeft || (!aRight && ax < bx);
+    var verticalFirst = [{ x: ax, y: above ? a.y + a.height : a.y }, { x: ax, y: by }, { x: left ? b.x : b.x + b.width, y: by }];
+    var horizontalFirst = [{ x: left ? a.x + a.width : a.x, y: ay }, { x: bx, y: ay }, { x: bx, y: above ? b.y : b.y + b.height }];
+    // Each stretch runs away from its own rectangle, toward the other one.
+    function reaches(points) {
+      var down = above ? 1 : -1, right = left ? 1 : -1;
+      return [[points[0], points[1]], [points[1], points[2]]].every(function(stretch) {
+        return (stretch[1].x - stretch[0].x) * right + (stretch[1].y - stretch[0].y) * down >= margin;
+      });
+    }
+    var candidates = [verticalFirst, horizontalFirst];
+    var reaching = candidates.filter(reaches);
+    if (!reaching.length) reaching = candidates;
+    var clear = reaching.filter(function(points) { return !blocked(points); });
+    return clear.length ? clear[0] : reaching[0];
+  }
+
   /**
    * Measure a class box.
    * Returns { width, height, nameH, stereotypeH, propertyH, attrH, methH }
    */
   function measureBox(cls) {
+    if (cls.type === 'package') return measurePackageNode(cls);
     var hasStereotype = cls.type === 'interface' || cls.type === 'enum' || cls.stereotype;
     var stereotypeText = '';
     if (cls.stereotype) stereotypeText = '\u00AB' + cls.stereotype + '\u00BB';
@@ -11772,6 +11887,9 @@
       methH: box.methH,
       stereotypeText: box.stereotypeText,
       propertyText: box.propertyText,
+      // A package node keeps its tab (measurePackageNode).
+      tabW: box.tabW,
+      tabH: box.tabH,
     };
   }
 
@@ -12577,6 +12695,38 @@
     }
   }
 
+  // A package node: the tab, the large rectangle, and the name inside it.
+  // The unpainted rectangle marks the node's box for layout tools, as the
+  // border of a class does.
+  function drawPackageNode(svg, id, entry, fill, textureUrl, colors) {
+    var box = entry.box, x = entry.x, y = entry.y;
+    var bodyY = y + box.tabH, bodyH = box.height - box.tabH;
+    var outline = '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>';
+    svg.push('<g class="uml-package-node" data-uml-package-node="' + UMLShared.escapeXml(id) + '" filter="url(#uml-node-shadow)">');
+    svg.push('<rect data-package-node-part="tab" x="' + x + '" y="' + y + '" width="' + box.tabW + '" height="' + box.tabH +
+      '" fill="' + fill + outline);
+    svg.push('<rect data-package-node-part="body" x="' + x + '" y="' + bodyY + '" width="' + box.width + '" height="' + bodyH +
+      '" fill="' + fill + outline);
+    if (textureUrl) {
+      svg.push('<rect x="' + x + '" y="' + bodyY + '" width="' + box.width + '" height="' + bodyH +
+        '" fill="' + textureUrl + '" stroke="none"/>');
+    }
+    svg.push('</g>');
+    svg.push('<rect data-layout-bounds-id="' + UMLShared.escapeXml(id) + '" x="' + x + '" y="' + y + '" width="' + box.width +
+      '" height="' + box.height + '" fill="none" stroke="none"/>');
+
+    var textCx = x + box.width / 2;
+    var textTop = bodyY + (bodyH - box.stereotypeH - CFG.lineHeight) / 2;
+    if (box.stereotypeText) {
+      svg.push('<text x="' + textCx + '" y="' + (textTop + CFG.lineHeight * 0.75) + '" text-anchor="middle" ' +
+        'font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '">' +
+        UMLShared.escapeXml(box.stereotypeText) + '</text>');
+    }
+    svg.push('<text x="' + textCx + '" y="' + (textTop + box.stereotypeH + CFG.lineHeight * 0.75) + '" text-anchor="middle" ' +
+      'font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+      UMLShared.escapeXml(entry.cls.label || entry.cls.name) + '</text>');
+  }
+
   /**
    * Generate full SVG string from layout and relationships.
    */
@@ -12626,6 +12776,33 @@
     packageFrames.forEach(function(frame) {
       placedLabels.push({ left: frame.tab.x, right: frame.tab.x + frame.tab.width, top: frame.tab.y, bottom: frame.tab.y + frame.tab.height });
     });
+
+    // A line through a package reads as if it belonged there. A relationship
+    // may cross the outline of a package that holds one of its ends; it keeps
+    // out of every other package and off every package's name tab.
+    var packageParent = {};
+    (parsed.packages || []).forEach(function(pkg) { packageParent[pkg.id] = pkg.parent || null; });
+    function packagesHolding(name) {
+      var holding = {};
+      var id = entries[name] && entries[name].cls ? entries[name].cls.package : null;
+      while (id && !holding[id]) {
+        holding[id] = true;
+        id = packageParent[id];
+      }
+      return holding;
+    }
+    function packageRouteObstacles(fromName, toName) {
+      var fromPackages = packagesHolding(fromName), toPackages = packagesHolding(toName);
+      var obstacles = [];
+      packageFrames.forEach(function(frame) {
+        var tab = frame.tab, body = frame.body;
+        obstacles.push({ x1: tab.x, y1: tab.y, x2: tab.x + tab.width, y2: tab.y + tab.height });
+        if (!fromPackages[frame.id] && !toPackages[frame.id]) {
+          obstacles.push({ x1: body.x, y1: body.y, x2: body.x + body.width, y2: body.y + body.height });
+        }
+      });
+      return obstacles;
+    }
 
     function classNotePressureBaseName(targetName) {
       if (!targetName) return '';
@@ -14222,7 +14399,7 @@
       // the filled and hollow diamonds that distinguish their semantics.
       var markerRouteObstacles = noteMarkerObstacles.map(function(marker) {
         return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
-      });
+      }).concat(packageRouteObstacles(orel.from, orel.to));
       var markerIsClear = function(points) { return wholePartMarkerIsClear(points, orel, fromE); };
 
       var isSelfRelation = orel.from === orel.to;
@@ -14329,6 +14506,7 @@
       }
 
       }
+      pathPoints = snapRouteEndsToPackageOutline(pathPoints, fromE, toE);
       var markerPathPoints = pathPoints;
       recordRoute(classRelationRouteId(orel, oi), pathPoints, orel.from, orel.to, null);
       var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
@@ -14530,6 +14708,69 @@
     var packageShapes = [];
     UMLShared.drawPackageFrames(packageShapes, packageFrames, colors);
     svg[packageShapesSlot] = packageShapes.join('');
+
+    // ── Dependencies that start or end at a package frame (UML 2.5.1,
+    // 7.7.4). The frames are final only now, so these are routed last,
+    // from outline to outline ──
+    var frameById = {};
+    packageFrames.forEach(function(frame) { frameById[frame.id] = frame; });
+    function dependencyEnd(name) {
+      var entry = entries[name];
+      if (entry) return { rect: { x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height }, entry: entry };
+      var frame = frameById[name];
+      return frame ? { rect: frame.body, frame: frame } : null;
+    }
+    function rectHolds(outer, inner) {
+      return inner.x >= outer.x && inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
+    }
+    // Over its name tab, a frame's outline is the tab's top edge, for a
+    // line that comes from above the tab.
+    function snapToFrameTab(end, neighbor, frame) {
+      if (!frame) return;
+      var fromAbove = Math.abs(neighbor.x - end.x) < 0.75 && neighbor.y < frame.tab.y;
+      if (fromAbove && Math.abs(end.y - frame.body.y) < 0.75 && end.x <= frame.tab.x + frame.tab.width) end.y = frame.tab.y;
+    }
+    relationships.forEach(function(rel, relIndex) {
+      if (rel.type !== 'dependency' || rel.from === rel.to) return;
+      var from = dependencyEnd(rel.from), to = dependencyEnd(rel.to);
+      if (!from || !to || (!from.frame && !to.frame)) return;
+      // A package and something inside it have no line between them.
+      if (rectHolds(from.rect, to.rect) || rectHolds(to.rect, from.rect)) return;
+      var skipNames = {};
+      skipNames[rel.from] = true;
+      skipNames[rel.to] = true;
+      // The name tabs of the two ends are in the way like any class.
+      var endTabs = [from.frame, to.frame].filter(Boolean).map(function(frame) {
+        return { x1: frame.tab.x, y1: frame.tab.y, x2: frame.tab.x + frame.tab.width, y2: frame.tab.y + frame.tab.height };
+      });
+      var points = routeBetweenOutlines(from.rect, to.rect, function(candidate) {
+        return UMLShared.routeHitsObstacle(candidate, classObstacles, skipNames, null) ||
+          UMLShared.routeHitsObstacle(candidate, endTabs, null, null);
+      });
+      if (!points) return;
+      points = snapRouteEndsToPackageOutline(points, from.entry, to.entry);
+      snapToFrameTab(points[0], points[1], from.frame);
+      snapToFrameTab(points[points.length - 1], points[points.length - 2], to.frame);
+
+      svg.push('<polyline points="' + points.map(function(point) { return point.x + ',' + point.y; }).join(' ') +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' +
+        classRelationRouteAttrs(rel, relIndex) + ' stroke-dasharray="8,4"/>');
+      var last = points[points.length - 1], previous = points[points.length - 2];
+      var intoRouteX = previous.x === last.x ? 0 : (previous.x > last.x ? 1 : -1);
+      var intoRouteY = previous.y === last.y ? 0 : (previous.y > last.y ? 1 : -1);
+      var arrow = offsetClassMarkerPoint(last.x, last.y, intoRouteX, intoRouteY, 'open-arrow');
+      UMLShared.drawOpenArrow(decorSvg, arrow.x, arrow.y, intoRouteX, intoRouteY, colors.line);
+      noteMarkerObstacles.push(pointObstacleRect(arrow.x, arrow.y, CFG.arrowSize + 6));
+
+      var segments = UMLShared.buildOrthogonalSegments(points);
+      noteRouteSegments = noteRouteSegments.concat(segments);
+      var placement = placeClassRelationLabel({ rel: rel, points: points, routeIndex: -1 });
+      if (placement) {
+        if (rel.label) pushClassTextSvg(labelSvg, rel.label, placement, CFG.fontSizeStereotype, 'italic');
+        placedLabels.push(placement.rect);
+      }
+    });
     UMLShared.drawPackageNames(svg, packageFrames, colors);
     if (scene) UMLShared.recordPackageFrames(scene, packageFrames);
 
@@ -14547,6 +14788,11 @@
       // so skip the darker shade — the user's color should show verbatim.
       var hasBody = box.attrH > 0 || box.methH > 0;
       var headerFill = (cls.highlight && !hasBody) ? fills.fill : fills.headerFill;
+
+      if (cls.type === 'package') {
+        drawPackageNode(svg, en, e, headerFill, fills.textureUrl, colors);
+        continue;
+      }
 
       svg.push('<g filter="url(#uml-node-shadow)">');
 
@@ -16237,6 +16483,20 @@
     return kept.length ? kept : placements;
   }
 
+  // The default layout keeps packages together as well. When the engine's
+  // placement would draw a package over a class it does not hold, or over
+  // another package, the diagram takes the first placement laid out package
+  // by package that draws every package around its own contents only.
+  // Nesting needs no special case, at any depth: a package inside a package
+  // is one block of its level.
+  function computeClassLayout(parsed) {
+    var layout = computeLayout(parsed);
+    var kept = packagedPlacements(layout, parsed).filter(function(placement) {
+      return !placementCollides(placement, layout.entries, parsed);
+    });
+    return kept.length ? layoutAt(layout, kept[0]) : layout;
+  }
+
   // Equal up to a translation of the whole drawing.
   function samePlacement(a, b) {
     var names = Object.keys(a.positions);
@@ -16649,7 +16909,7 @@
     var rendered = optimizedCompact
       ? renderOptimizedCompact(parsed, colors, window.UMLLayoutCore.resolvePane(container, parsed.pane))
       : withAdaptiveClassTypography(parsed, function() {
-        var layout = computeLayout(parsed);
+        var layout = computeClassLayout(parsed);
         UMLShared.applyLayoutPositions(layout, parsed.layout);
         refreshMemberNoteTargets(layout.entries);
         return generateSVG(layout, parsed, colors);
