@@ -93,6 +93,29 @@ test('a container holding its child is valid', () => {
   assert.deepEqual(violationsOf(scene({ nodes })), []);
 });
 
+// A note across a package's outline reads as half in and half out of it.
+// It belongs wholly inside a frame or wholly outside, whatever it is
+// attached to (design spec 6.4, "package frames enclose exactly their
+// members").
+[
+  ['inside the frame of its target', 60, 120, []],
+  ['outside the frame of its target', 320, 120, []],
+  ['across the frame of its target', 250, 120, [{ kind: 'note-frame', a: 'n', b: 'P' }]],
+].forEach(([where, x, y, expected]) => {
+  test(`a note ${where} is ${expected.length ? 'a violation' : 'valid'}`, () => {
+    const nodes = [box('P', 0, 0, 300, 200, { container: true }), box('C', 50, 20, 100, 50, { parent: 'P' })];
+    const labels = [{ id: 'n', owner: 'C', kind: 'note', x, y, width: 80, height: 40 }];
+    assert.deepEqual(violationsOf(scene({ nodes, labels, size: [500, 300] })), expected);
+  });
+});
+
+test('an edge label across the frame its edge leaves is valid', () => {
+  const nodes = [box('P', 0, 0, 300, 200, { container: true }), box('C', 50, 20, 100, 50, { parent: 'P' }), box('D', 400, 20)];
+  const routes = [{ id: 'r', points: pts([150, 45], [400, 45]), source: 'C', target: 'D' }];
+  const labels = [{ id: 'l', owner: 'r', kind: 'edge', x: 270, y: 25, width: 60, height: 16 }];
+  assert.deepEqual(violationsOf(scene({ nodes, routes, labels, size: [500, 300] })), []);
+});
+
 // ── label overlap ─────────────────────────────────────────────────────
 
 const twoBoxesAndRoute = {

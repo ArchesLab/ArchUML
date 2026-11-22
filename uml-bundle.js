@@ -9771,6 +9771,12 @@
     labels.forEach(function (label) {
       var exempt = labelExemptNodes(label, nodesById, routesById);
       nodes.forEach(function (node) {
+        // A note lies wholly inside a frame or wholly outside it, even the
+        // frame its target lies in.
+        if (label.kind === 'note' && node.container && rectsOverlap(label, node, tol) && !rectContains(node, label, tol)) {
+          found.push(violation('note-frame', label.id, node.id));
+          return;
+        }
         if (exempt[node.id]) return;
         if (node.container && rectContains(node, label, tol)) return;
         if (rectsOverlap(label, node, tol)) found.push(violation('label-node', label.id, node.id));
@@ -10898,9 +10904,23 @@
    * @param {{width:number, height:number}} pane
    * @returns {{svg, scene, metrics, passes:number, issues:number}}
    */
+  // The placements without repeats: a placement equal to an earlier one
+  // would spend a routing pass on the same drawing.
+  function distinctPlacements(placements) {
+    var seen = {};
+    return placements.filter(function (placement) {
+      var key;
+      try { key = JSON.stringify(placement); } catch (e) { return true; }
+      if (key === undefined) return true;
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+
   function optimize(adapter, pane) {
     var run = createRun(adapter, pane);
-    var candidates = adapter.candidates() || [];
+    var candidates = distinctPlacements(adapter.candidates() || []);
     if (!candidates.length) return { svg: '', scene: null, metrics: null, passes: 0, issues: 0 };
 
     var drawn = realizeAttempt(run, candidates[0]);
@@ -22599,6 +22619,7 @@
       markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
       edgeSizes: compEdgeSizes
     };
+    if (options && options.directionLocked) layoutOptions.directionLocked = true;
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, layoutOptions);
 
     // Reserve parallel label lanes against the actual neighbor positions:
@@ -27556,6 +27577,18 @@
     // refits them to the joined interfaces drawn at members. ──
     // A compact drawing is final as generated; the page refits the others
     // to what the browser draws (refitComponentPackageFrames).
+    // Compact places the notes here, clear of the connectors and labels
+    // already drawn, and draws a package around the notes of its members
+    // too: a note beside a member lies inside that member's package, never
+    // across its outline.
+    if (recorder) {
+      notePositions = placeCompactNotes(parsed, entries, recorder.drawnObstacles(), layout.noteReach === 'far');
+      notePositions.forEach(function(placed) {
+        var target = String(placed.note.target || '').split('.')[0];
+        if (!entries[target]) return;
+        (joinedInterfaceRects[target] = joinedInterfaceRects[target] || []).push({ x: placed.x, y: placed.y, width: placed.w, height: placed.h });
+      });
+    }
     var finalPackageFrames = layoutComponentPackages(parsed, entries, joinedPorts, recorder ? joinedInterfaceRects : null);
     if (finalPackageFrames.length) {
       var packageShapes = [];
@@ -27818,10 +27851,6 @@
         }
       }
     }
-
-    // Compact frames the drawing around what it drew, so a note can be
-    // placed last, clear of the connectors and labels already drawn.
-    if (recorder) notePositions = placeCompactNotes(parsed, entries, recorder.drawnObstacles(), layout.noteReach === 'far');
 
     // ── Draw notes (using pre-computed positions) ──
     for (var ni = 0; ni < notePositions.length; ni++) {
@@ -28147,6 +28176,83 @@
   }
 
   /**
+   * The spec with its connectors pointing the way a reader follows them,
+   * for placing the components (the drawing keeps the connectors as
+   * written). A ball-and-socket assembly runs from the component that
+   * requires the interface to the one that provides it, whichever end it is
+   * written from; a plain link, which has no direction, leaves the end with
+   * more connectors, so a fan-out is placed from its hub outwards. Arrows
+   * the author drew (dependencies, assemblies between bare components)
+   * keep their direction. The same spec when nothing turns.
+   */
+  function flowOrientedSpec(parsed) {
+    var kinds = {}, degree = {};
+    parsed.components.forEach(function(comp) {
+      comp.ports.forEach(function(port) { kinds[comp.name + '.' + port.alias] = port.kind || null; });
+    });
+    parsed.connectors.forEach(function(c) {
+      if (c.from === c.to) return;
+      degree[c.from] = (degree[c.from] || 0) + 1;
+      degree[c.to] = (degree[c.to] || 0) + 1;
+    });
+    var turned = false;
+    var connectors = parsed.connectors.map(function(c) {
+      var fromKind = c.fromPort ? kinds[c.from + '.' + c.fromPort] : null;
+      var toKind = c.toPort ? kinds[c.to + '.' + c.toPort] : null;
+      var turn = c.type === 'assembly'
+        ? fromKind === 'provide' && toKind === 'require'
+        : c.type === 'link' && (degree[c.to] || 0) > (degree[c.from] || 0);
+      if (!turn) return c;
+      turned = true;
+      return Object.assign({}, c, { from: c.to, fromPort: c.toPort, to: c.from, toPort: c.fromPort });
+    });
+    return turned ? Object.assign({}, parsed, { connectors: connectors }) : parsed;
+  }
+
+  /**
+   * Positions that line each rank of a layered placement up on one edge
+   * across the flow (`axis` is the flow axis, 'x' when ranks run left to
+   * right): the edge facing the earlier ranks where its members'
+   * connectors mostly come from there (a fan-out reaches an aligned
+   * column), else the edge facing the later ones. Members keep their
+   * places along the rank.
+   */
+  function alignedRankPositions(parsed, entries, axis) {
+    var size = axis === 'x' ? 'width' : 'height';
+    var ranks = componentRanks(entries, axis);
+    var rankOf = {};
+    ranks.forEach(function(rank, i) { rank.names.forEach(function(name) { rankOf[name] = i; }); });
+    var positions = positionsOf(entries);
+    ranks.forEach(function(rank, i) {
+      var before = 0, after = 0;
+      parsed.connectors.forEach(function(c) {
+        [[c.from, c.to], [c.to, c.from]].forEach(function(ends) {
+          if (rankOf[ends[0]] !== i || rankOf[ends[1]] === undefined) return;
+          if (rankOf[ends[1]] < i) before++;
+          else if (rankOf[ends[1]] > i) after++;
+        });
+      });
+      var aligned = {};
+      rank.names.forEach(function(name) {
+        aligned[name] = before >= after ? rank.start : rank.end - entries[name].box[size];
+      });
+      // A rank whose members would come to lie on each other keeps its places.
+      var cross = axis === 'x' ? 'y' : 'x', crossSize = axis === 'x' ? 'height' : 'width';
+      var clashes = rank.names.some(function(a, ai) {
+        return rank.names.some(function(b, bi) {
+          if (bi <= ai) return false;
+          var acrossA = [entries[a][cross], entries[a][cross] + entries[a].box[crossSize]];
+          var acrossB = [entries[b][cross], entries[b][cross] + entries[b].box[crossSize]];
+          return acrossA[0] < acrossB[1] && acrossB[0] < acrossA[1];
+        });
+      });
+      if (clashes) return;
+      rank.names.forEach(function(name) { positions[name][axis] = aligned[name]; });
+    });
+    return positions;
+  }
+
+  /**
    * The component renderer as UMLCompactLayout sees it. A placement is
    * `{positions, noteReach}`: positions null for the renderer's own
    * placement in the authored direction, else each component's top-left
@@ -28281,6 +28387,40 @@
       }).slice(1));
     }
 
+    /**
+     * The spec placed with its connectors the way a reader follows them
+     * (flowOrientedSpec), in the authored direction, each rank aligned
+     * (alignedRankPositions); placed package by package where that would
+     * draw a package over what it does not hold. None when no connector
+     * turns.
+     */
+    function flowPlacements() {
+      var flowSpec = flowOrientedSpec(parsed);
+      if (flowSpec === parsed) return [];
+      // In the authored direction: ports sit on the left and right sides,
+      // so a fan-out across the flow would turn every connector.
+      var flowLayout = computeLayout(flowSpec, { containerAspect: null, directionLocked: true });
+      var direction = (flowLayout.layoutResult && flowLayout.layoutResult.direction) || 'LR';
+      var axis = direction === 'TB' || direction === 'BT' ? 'y' : 'x';
+      var entries = flowLayout.entries;
+      if (!collides(entries)) {
+        var aligned = alignedRankPositions(flowSpec, entries, axis);
+        return [{ positions: collides(movedEntries(entries, aligned)) ? positionsOf(entries) : aligned, noteReach: 'far', columns: axis }];
+      }
+      return packagedPositions(flowLayout).map(function(positions) {
+        return { positions: positions, noteReach: 'far' };
+      });
+    }
+
+    function movedEntries(entries, positions) {
+      var moved = {};
+      Object.keys(entries).forEach(function(name) {
+        var p = positions[name] || entries[name];
+        moved[name] = { x: p.x, y: p.y, box: entries[name].box };
+      });
+      return moved;
+    }
+
     function placementsFor(normal) {
       var entries = normal.entries;
       // The direction the layered placement took, which may differ from
@@ -28300,6 +28440,7 @@
       var shapedLayout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
       var shaped = positionsOf(shapedLayout.entries);
       if (!sameSize(positionedBounds(entries, shaped), normalBounds)) placements.push({ positions: shaped, noteReach: 'far' });
+      flowPlacements().forEach(function(placement) { placements.push(placement); });
       var normalScale = paneScale(normalBounds, pane);
       for (var bands = 2; bands <= Math.min(ranks.length, COMPACT_COMPONENT_MAX_BANDS); bands++) {
         // Equal ranks per band give equal wraps: skip repeats.
@@ -28324,12 +28465,23 @@
 
       candidates: placementsToTry,
 
+      // A placement in aligned columns keeps each column aligned: its
+      // members keep their offsets across the flow.
       bodies: function(placement) {
         var entries = layoutFor(placement).entries;
+        var column = {};
+        if (placement.columns) {
+          componentRanks(entries, placement.columns).forEach(function(rank, i) {
+            rank.names.forEach(function(name) { column[name] = 'column:' + i; });
+          });
+        }
         return Object.keys(entries).map(function(name) {
           var e = entries[name];
-          return { id: name, x: e.x, y: e.y, width: e.box.width, height: e.box.height,
+          var body = { id: name, x: e.x, y: e.y, width: e.box.width, height: e.box.height,
             pinned: false, alignTop: 'top:' + Math.round(e.y) };
+          if (column[name] && placement.columns === 'x') body.alignLeft = column[name];
+          if (column[name] && placement.columns === 'y') body.alignTop = column[name];
+          return body;
         });
       },
 
@@ -28340,7 +28492,9 @@
           var p = positions[name] || entries[name];
           next[name] = { x: p.x, y: p.y };
         });
-        return { positions: next, noteReach: placement.noteReach };
+        var moved = { positions: next, noteReach: placement.noteReach };
+        if (placement.columns) moved.columns = placement.columns;
+        return moved;
       },
 
       // One routing pass, without the teaching callouts (annotate adds

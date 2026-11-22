@@ -112,6 +112,26 @@ test('passes count every call to realize and never exceed the budget', () => {
   });
 });
 
+// A renderer may propose the same placement twice (two of its placement
+// rules agree). Drawing it again spends a pass on a drawing already made.
+test('a candidate equal to an earlier one is drawn once', () => {
+  const column = candidate('column', { A: { x: 0, y: 0 }, B: { x: 0, y: 300 } });
+  const { adapter, log } = fakeAdapter({
+    candidates: [candidate('ref', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } }), column, plain(column), plain(column)]
+  });
+  UMLCompactLayout.optimize(adapter, PANE);
+  assert.equal(log.filter((p) => JSON.stringify(p) === JSON.stringify(column)).length, 1);
+});
+
+// Repeats leave the passes they would have taken to repairing the reference.
+test('an overlapping reference gets the widenings its distinct candidates leave', () => {
+  const overlapping = candidate('ref', { A: { x: 0, y: 0 }, B: { x: 50, y: 0 } });
+  const other = candidate('c', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } });
+  const { adapter, log } = fakeAdapter({ candidates: [overlapping, other, plain(other), plain(other), plain(other)] });
+  UMLCompactLayout.optimize(adapter, PANE);
+  assert.equal(log[1].tag, 'ref', `second pass drew ${log[1].tag}`);
+});
+
 // ── squeeze, verify, select ───────────────────────────────────────────
 
 test('the squeezed drawing is chosen when it is valid', () => {

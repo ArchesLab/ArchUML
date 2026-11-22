@@ -106,8 +106,10 @@ async function measure(source, pane) {
         ...box(el),
       };
     });
+    const notes = [...svg.querySelectorAll('.uml-note-box')].map(box);
+    const frames = [...svg.querySelectorAll('[data-package-part="body"]')].map(el => ({ id: el.closest('[data-uml-package]').getAttribute('data-uml-package'), ...box(el) }));
     return {
-      width: vb.width, height: vb.height, boxes, ports, routes: [...routes.values()], texts,
+      width: vb.width, height: vb.height, boxes, ports, routes: [...routes.values()], texts, notes, frames,
       issues: svg.getAttribute('data-uml-layout-issues'),
     };
   }, source));
@@ -330,6 +332,167 @@ for (const pane of [COLUMN, WIDE]) {
 
   test(`${name}: compact is flagged with layout issues`, async () => {
     assert.equal((await backEdges(pane)).issues, null);
+  });
+}
+
+// ───── A hub fanning out to labelled consumers through ports ────────
+// One exchange delivers to five consumers, each through a port and a
+// connector with a long property label; a publisher calls the exchange
+// and two consumers call outside systems, ball and socket. Every
+// connector is written from the end a reader meets last (consumer to hub,
+// provider to caller), as authors often write them. A package holds all
+// but the outside systems; a long note sits on the hub and a key note on
+// the publisher. `FANOUT_AUTHORED` is the same diagram arranged by hand
+// the way such diagrams are drawn: publisher, hub, the consumers in one
+// column, the outside systems beside the consumers that call them.
+
+const FANOUT = `@startuml
+package Shop {
+  component Checkout <<Service>> {
+    require "Emit" as checkout_emit
+  }
+  component orders <<Exchange>> {
+    provide "Emit" as orders_emit
+  }
+  component Mailer <<Service>> {
+    portin "mailer.orders" as mailer_q
+    require "SMTP" as mailer_smtp
+  }
+  component Points <<Service>> {
+    portin "points.orders" as points_q
+  }
+  component Ledger <<Service>> {
+    portin "ledger.all" as ledger_q
+  }
+  component Partners <<Service>> {
+    portin "partners.orders" as partners_q
+    require "Hook" as partners_hook
+  }
+  component Desk <<WebApp>> {
+    portin "desk.refunds" as desk_q
+  }
+}
+component SmtpHost <<External>> {
+  provide "SMTP" as host_smtp
+}
+component PartnerApi <<External>> {
+  provide "Hook" as api_hook
+}
+orders_emit --> checkout_emit
+mailer_q -- orders : <<subscribe>> {binding = "order.paid, order.refunded, order.failed"}
+points_q -- orders : <<subscribe>> {binding = "order.paid"}
+ledger_q -- orders : <<subscribe>> {binding = "#"}
+partners_q -- orders : <<subscribe>> {binding = "order.*"}
+desk_q -- orders : <<subscribe>> {binding = "order.refunded"}
+host_smtp --> mailer_smtp
+api_hook --> partners_hook
+note top of orders
+orders is a topic exchange in the
+message broker (deploy/broker.toml:4),
+which services reach over AMQP.
+Checkout publishes order.<status>
+events to it (shop/checkout.py:12).
+In a binding, * matches exactly one
+word and # matches zero or more words.
+Bindings:
+deploy/broker.toml:16 points.orders
+deploy/broker.toml:21 ledger.all
+deploy/broker.toml:26 partners.orders
+deploy/broker.toml:31 desk.refunds
+shop/mailer/consumers.py:25 mailer.orders
+end note
+note bottom of Checkout
+Key: component diagram.
+Ball and socket: a synchronous call.
+«subscribe» {binding}: the exchange
+copies each matching event into the
+consumer's queue, named on its port.
+end note
+@enduml`;
+const FANOUT_CONSUMERS = ['Mailer', 'Points', 'Ledger', 'Partners', 'Desk'];
+const FANOUT_AUTHORED = FANOUT.replace('@enduml', `@layout
+Checkout @pos(0, 400)
+orders @pos(330, 400)
+Mailer @pos(1000, 0)
+Points @pos(1000, 185)
+Ledger @pos(1000, 370)
+Partners @pos(1000, 555)
+Desk @pos(1000, 740)
+SmtpHost @pos(1430, 0)
+PartnerApi @pos(1430, 555)
+@endlayout
+@enduml`);
+const FANOUT_PANE = { width: 1100, height: 800 };
+const fanout = () => measured(compactFor(FANOUT, FANOUT_PANE), FANOUT_PANE);
+const boxOf = (m, id) => m.boxes.find(b => b.id === id);
+
+test('a hub fanning out to labelled consumers: compact draws nothing overlapping and is not flagged', async () => {
+  const m = await fanout();
+  assert.deepEqual(overlapReport(m), []);
+  assert.equal(m.issues, null);
+});
+
+test('a hub fanning out to labelled consumers: compact sets every connector label by its own connector', async () => {
+  assert.deepEqual(detachedLabels(await fanout()), []);
+});
+
+test('a hub fanning out to labelled consumers: compact draws each note wholly inside or wholly outside the package', async () => {
+  const m = await fanout();
+  assert.equal(m.notes.length, 2);
+  const across = m.notes.flatMap((n, i) => m.frames.filter(f => overlaps(n, f) && !contains(f, n)).map(f => `note ${i} across ${f.id}`));
+  assert.deepEqual(across, []);
+});
+
+// A note wider than the package it is set in: drawn from its members
+// alone, the frame's outline would run through the note.
+const NOTE_BY_MEMBER = `@startuml
+package Shop {
+  component Checkout
+  component Orders
+}
+Checkout --> Orders : places
+note top of Orders
+Checkout takes the payment before it places the order,
+so an order that Orders receives is always paid for.
+end note
+@enduml`;
+
+test('a note beside a package member: compact draws it wholly inside or wholly outside the package', async () => {
+  const m = await measured(compactFor(NOTE_BY_MEMBER, COLUMN), COLUMN);
+  assert.equal(m.notes.length, 1);
+  const across = m.frames.filter(f => overlaps(m.notes[0], f) && !contains(f, m.notes[0])).map(f => f.id);
+  assert.deepEqual(across, []);
+  assert.equal(m.issues, null);
+});
+
+test('a hub fanning out to labelled consumers: compact draws the consumers as one column with aligned left edges', async () => {
+  const m = await fanout();
+  const consumers = FANOUT_CONSUMERS.map(id => boxOf(m, id));
+  const lefts = consumers.map(b => b.x);
+  assert.ok(Math.max(...lefts) - Math.min(...lefts) <= OVERLAP_TOLERANCE, `left edges ${lefts.map(x => x.toFixed(1)).join(', ')}`);
+  const tops = [...consumers].sort((a, b) => a.y - b.y);
+  tops.slice(1).forEach((b, i) => assert.ok(b.y >= tops[i].bottom, `${b.id} lies on ${tops[i].id}`));
+});
+
+test('a hub fanning out to labelled consumers: compact reads from publisher to hub to consumers to outside systems', async () => {
+  const m = await fanout();
+  const consumersLeft = Math.min(...FANOUT_CONSUMERS.map(id => boxOf(m, id).x));
+  assert.ok(boxOf(m, 'Checkout').right < boxOf(m, 'orders').x, 'Checkout publishes to orders from its left');
+  assert.ok(boxOf(m, 'orders').right < consumersLeft, 'orders delivers to the consumers on its right');
+  assert.ok(boxOf(m, 'Mailer').right < boxOf(m, 'SmtpHost').x, 'Mailer calls SmtpHost on its right');
+  assert.ok(boxOf(m, 'Partners').right < boxOf(m, 'PartnerApi').x, 'Partners calls PartnerApi on its right');
+});
+
+test('a hub fanning out to labelled consumers: compact has no crossing and no more bends than the hand-arranged drawing', async () => {
+  const [c, authored] = await Promise.all([fanout(), measured(FANOUT_AUTHORED, FANOUT_PANE)]);
+  assert.equal(crossings(c), 0);
+  assert.ok(bends(c) <= bends(authored), `compact ${bends(c)} bends, hand-arranged ${bends(authored)}`);
+});
+
+for (const pane of [FANOUT_PANE, { width: 700, height: 800 }]) {
+  test(`a hub fanning out to labelled consumers in a ${pane.width}×${pane.height} pane: compact text is at least as large on screen as in the hand-arranged drawing`, async () => {
+    const [c, authored] = await Promise.all([measured(compactFor(FANOUT, pane), pane), measured(FANOUT_AUTHORED, pane)]);
+    assert.ok(onScreen(c, pane) >= onScreen(authored, pane), `compact ${onScreen(c, pane).toFixed(2)} px, hand-arranged ${onScreen(authored, pane).toFixed(2)} px`);
   });
 }
 
