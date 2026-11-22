@@ -1,0 +1,68 @@
+schema: c4-design/1
+name: Campus Orders
+systems:
+  orders-system:
+    name: Campus Orders
+    description: Takes orders for course materials and ships them to students.
+    containers:
+      orders:
+        name: Order Service
+        technology: Java, Spring Boot
+        description: Takes orders and announces every placed order.
+        responsibilities:
+          - do: announce every placed order to the services that act on it
+            id: orders-announce
+        collaborators:
+          order-topic: {description: publishes placed orders to, technology: AMQP, connector: event, uses: order-events}
+          analytics: {description: delivers placed orders to, technology: HTTPS webhook, connector: event, uses: order-events.order-placed}
+        provides:
+          order-events:
+            name: Order events
+            description: Announces each order a student places.
+            style: event
+            technology: AMQP, JSON
+            version: 1
+            operations:
+              order-placed:
+                syntax: OrderPlaced on the topic orders.placed
+                output: OrderPlaced
+                purpose: When a student places an order, the Order Service announces it once the order is stored.
+                side_effects:
+                  - None for the publisher; each subscriber decides what to do.
+                examples:
+                  - output: {order_id: o-1001, total: 2599, placed_at: "2027-01-05T10:00:00Z"}
+                realizes: [orders-announce]
+            types:
+              OrderPlaced:
+                description: One placed order.
+                fields:
+                  order_id:
+                    type: string
+                    meaning: identifies the order in every later event about it
+                  total:
+                    type: integer
+                    meaning: amount the student pays, including sales tax
+                    unit: US cents
+                  placed_at:
+                    type: datetime
+                    meaning: the moment the order was stored
+                    format: ISO 8601 in UTC
+      order-topic:
+        name: Order Topic
+        kind: topic
+        technology: RabbitMQ
+        description: Carries placed-order events to every subscriber.
+        responsibilities:
+          - do: deliver every placed-order event to each subscriber
+      shipping:
+        name: Shipping Service
+        technology: Python
+        description: Packs and ships the materials of every placed order.
+        responsibilities:
+          - do: ship the materials of every placed order
+        collaborators:
+          order-topic: {description: subscribes to placed orders from, technology: AMQP, connector: event, uses: order-events.order-placed}
+  analytics:
+    name: Analytics Platform
+    external: true
+    description: Reports sales figures to the bookstore's managers.
