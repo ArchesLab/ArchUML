@@ -58,6 +58,25 @@
   const OFF_CENTRE_COST = 0.05;
   const pending = new WeakMap();
 
+  /**
+   * The text metrics of a callout set at `fontSize`: the sizes above, which
+   * are stated for 14 px, scaled so the box keeps its proportions and wraps
+   * after the same number of characters.
+   */
+  function typeFor(fontSize) {
+    const scale = fontSize / FONT_SIZE;
+    const at = value => Math.round(value * scale);
+    return { fontSize, lineHeight: at(LINE_HEIGHT), baseline: at(BASELINE), padX: at(PADDING_X), padY: at(PADDING_Y),
+      wrapWidths: WRAP_WIDTHS.map(at), shortTextWrapWidth: at(SHORT_TEXT_WRAP_WIDTH) };
+  }
+  const USUAL_TYPE = typeFor(FONT_SIZE);
+
+  // Compact drawings set callouts at the diagram's base size, but never
+  // smaller than a callout outside compact mode.
+  function compactType(baseFontSize) {
+    return typeFor(Math.max(FONT_SIZE, Number(baseFontSize) || FONT_SIZE));
+  }
+
   function parseTarget(source) {
     let match = source.match(/^text\s+("(?:[^"\\]|\\.)+")(?:\s+occurrence\s+([1-9]\d*))?$/);
     if (match) return { kind: 'text', value: JSON.parse(match[1]), occurrence: Number(match[2] || 1) };
@@ -133,10 +152,13 @@
     const routes = UMLShared.collectEditableRoutes(svg).filter(route =>
       route.element.hasAttribute('data-layout-route-id') && route.element.tagName.toLowerCase() !== 'rect');
     const route = routes[target.value - 1];
-    if (!route) return null;
-    const points = route.points;
-    let point = target.anchor === 'start' ? points[0] : points[points.length - 1];
-    if (target.anchor === 'middle') {
+    return route ? edgeAnchor(route.points, target.anchor, route.element) : null;
+  }
+
+  /** The target box at one end, or along the middle, of a route's points. */
+  function edgeAnchor(points, anchor, element) {
+    let point = anchor === 'start' ? points[0] : points[points.length - 1];
+    if (anchor === 'middle') {
       // The middle stretch of the host segment, so the tip can slide off a
       // label on the relationship name without jumping to an endpoint.
       const segments = points.slice(1).map((end, index) => ({ start: points[index], end,
@@ -152,9 +174,9 @@
       const a = host ? at(t0) : point, b = host ? at(t0 + (host.length ? span / host.length : 0)) : point;
       return { x: Math.min(a.x, b.x) - 3, y: Math.min(a.y, b.y) - 3,
         width: Math.max(6, Math.abs(a.x - b.x) + 6), height: Math.max(6, Math.abs(a.y - b.y) + 6),
-        element: route.element };
+        element };
     }
-    return { x: point.x - 3, y: point.y - 3, width: 6, height: 6, element: route.element };
+    return { x: point.x - 3, y: point.y - 3, width: 6, height: 6, element };
   }
 
   function resolveTarget(svg, target) {
@@ -170,25 +192,25 @@
       textTarget(svg, { value: target.value, occurrence: 1 });
   }
 
-  function measure(text, maxWidth) {
+  function measure(text, maxWidth, type) {
     const lines = [];
     let line = '';
     for (const word of text.split(/\s+/)) {
       const next = line ? line + ' ' + word : word;
-      if (line && UMLShared.textWidth(next, false, FONT_SIZE) > maxWidth) { lines.push(line); line = word; }
+      if (line && UMLShared.textWidth(next, false, type.fontSize) > maxWidth) { lines.push(line); line = word; }
       else line = next;
     }
     if (line) lines.push(line);
-    return { lines, maxWidth, width: Math.max(...lines.map(value => UMLShared.textWidth(value, false, FONT_SIZE))) + PADDING_X * 2,
-      height: lines.length * LINE_HEIGHT + PADDING_Y * 2 };
+    return { lines, maxWidth, width: Math.max(...lines.map(value => UMLShared.textWidth(value, false, type.fontSize))) + type.padX * 2,
+      height: lines.length * type.lineHeight + type.padY * 2 };
   }
 
   /** One size per distinct line wrapping, the default wrapping first. */
-  function boxSizes(text) {
-    const widths = text.length < 40 ? WRAP_WIDTHS.concat(SHORT_TEXT_WRAP_WIDTH) : WRAP_WIDTHS;
+  function boxSizes(text, type) {
+    const widths = text.length < 40 ? type.wrapWidths.concat(type.shortTextWrapWidth) : type.wrapWidths;
     const sizes = new Map();
     for (const maxWidth of widths) {
-      const size = measure(text, maxWidth);
+      const size = measure(text, maxWidth, type);
       if (!sizes.has(size.lines.join('\n'))) sizes.set(size.lines.join('\n'), size);
     }
     return [...sizes.values()];
@@ -277,26 +299,28 @@
   // Separating-axis test: the whole triangular pointer must clear labels,
   // not just its centerline or bounding box.
   function polygonsOverlap(a, b) {
-    const separated = polygon => {
-      for (let index = 0; index < polygon.length; index++) {
-        const point = polygon[index], next = polygon[index + 1] || polygon[0];
-        const nx = next.y - point.y, ny = point.x - next.x;
-        let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
-        for (let i = 0; i < a.length; i++) {
-          const d = a[i].x * nx + a[i].y * ny;
-          if (d < minA) minA = d;
-          if (d > maxA) maxA = d;
-        }
-        for (let i = 0; i < b.length; i++) {
-          const d = b[i].x * nx + b[i].y * ny;
-          if (d < minB) minB = d;
-          if (d > maxB) maxB = d;
-        }
-        if (maxA <= minB || maxB <= minA) return true;
+    return !separatedAlongEdges(a, a, b) && !separatedAlongEdges(b, a, b);
+  }
+
+  // Whether a and b project apart onto the normal of some edge of `polygon`.
+  function separatedAlongEdges(polygon, a, b) {
+    for (let index = 0; index < polygon.length; index++) {
+      const point = polygon[index], next = polygon[index + 1] || polygon[0];
+      const nx = next.y - point.y, ny = point.x - next.x;
+      let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+      for (let i = 0; i < a.length; i++) {
+        const d = a[i].x * nx + a[i].y * ny;
+        if (d < minA) minA = d;
+        if (d > maxA) maxA = d;
       }
-      return false;
-    };
-    return !separated(a) && !separated(b);
+      for (let i = 0; i < b.length; i++) {
+        const d = b[i].x * nx + b[i].y * ny;
+        if (d < minB) minB = d;
+        if (d > maxB) maxB = d;
+      }
+      if (maxA <= minB || maxB <= minA) return true;
+    }
+    return false;
   }
 
   function contains(outer, inner) {
@@ -316,11 +340,15 @@
       const length = element.getTotalLength(), steps = Math.max(1, Math.ceil(length / 12));
       points = Array.from({ length: steps + 1 }, (_, index) => element.getPointAtLength(length * index / steps));
     }
+    return segmentsAlong(points.map(point => new DOMPoint(point.x, point.y).matrixTransform(transform)));
+  }
+
+  /** The straight runs through points in SVG coordinates. */
+  function segmentsAlong(points) {
     // Merge samples that continue straight on, so long routes stay cheap to
     // test. A stroke that doubles back keeps its turning point.
     const corners = [];
-    for (const point of points) {
-      const next = new DOMPoint(point.x, point.y).matrixTransform(transform);
+    for (const next of points) {
       while (corners.length > 1) {
         const a = corners[corners.length - 2], b = corners[corners.length - 1];
         if (Math.abs((b.x - a.x) * (next.y - b.y) - (b.y - a.y) * (next.x - b.x)) > 0.01 ||
@@ -341,9 +369,12 @@
   }
 
   function bounds(points) {
-    const xs = points.map(point => point.x), ys = points.map(point => point.y);
-    const x = Math.min(...xs), y = Math.min(...ys);
-    return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+    let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const point of points) {
+      x = Math.min(x, point.x); y = Math.min(y, point.y);
+      right = Math.max(right, point.x); bottom = Math.max(bottom, point.y);
+    }
+    return { x, y, width: right - x, height: bottom - y };
   }
 
   const padded = (box, pad) => ({ left: box.x - pad, top: box.y - pad,
@@ -376,19 +407,36 @@
    */
   function modelGeometry(svg) {
     const inverse = svg.getScreenCTM().inverse();
-    const blockers = [], obstacles = [];
-    for (const element of svg.querySelectorAll('text, rect, ellipse, circle, polygon, path, line, polyline')) {
+    const parts = [];
+    for (const element of svg.querySelectorAll(MODEL_TAGS)) {
       if (element.closest('defs')) continue;
       const tag = element.tagName.toLowerCase();
       // A line has zero geometric width or height, but its stroke still
       // needs space. The shared node-bounds helper intentionally omits it.
       const box = screenBox(element, inverse);
-      if (element.matches('rect[data-layout-fragment-id], [data-callout-frame]')) {
+      const frame = element.matches('rect[data-layout-fragment-id], [data-callout-frame]');
+      const stroke = !frame && (tag === 'line' || (element.matches('path, polyline') && getComputedStyle(element).fill === 'none'));
+      parts.push({ element, tag, box, frame, segments: stroke ? strokeSegments(element, inverse) : null });
+    }
+    return geometryOf(parts);
+  }
+
+  const MODEL_TAGS = 'text, rect, ellipse, circle, polygon, path, line, polyline';
+
+  /**
+   * What callouts must avoid in a drawing, from its parts in SVG
+   * coordinates: `{element, tag, box, frame, segments}`, where `segments`
+   * are the straight runs of a stroke and null for a filled shape or text.
+   */
+  function geometryOf(parts) {
+    const blockers = [], obstacles = [];
+    for (const { element, tag, box, frame, segments } of parts) {
+      if (frame) {
         // Reserve only a frame's outline, leaving its empty interior usable.
         for (const edge of [{ ...box, height: 0 }, { ...box, y: box.y + box.height, height: 0 },
           { ...box, width: 0 }, { ...box, x: box.x + box.width, width: 0 }]) blockers.push(padded(edge, MODEL_CLEARANCE + 1));
-      } else if (tag === 'line' || (element.matches('path, polyline') && getComputedStyle(element).fill === 'none')) {
-        for (const segment of strokeSegments(element, inverse)) {
+      } else if (segments) {
+        for (const segment of segments) {
           const polygon = segmentQuad(segment);
           blockers.push(...segmentBlockers(segment, MODEL_CLEARANCE + 1));
           obstacles.push({ element, kind: 'stroke', polygon, area: bounds(polygon) });
@@ -408,53 +456,35 @@
     top: (a, b) => b.bottom - a.bottom, bottom: (a, b) => a.top - b.top,
   };
 
-  /** Slide a box away from its target, on one side, until it clears every blocker. */
-  function slideClear(box, side, blockers) {
+  /**
+   * Slide a box away from its target, on one side, until it clears every
+   * blocker, meeting them from `blockers[start]` on. Returns the box and
+   * `stop`: the index of the blocker the box had already passed, where the
+   * slide ended (every later one is passed too), or the length of the list.
+   * `moves`, when given, gets each pushing blocker's index and the box's new
+   * position after it.
+   */
+  function slide(box, side, blockers, start = 0, moves = null) {
     let { x, y } = box;
     const { width, height } = box;
-    for (const b of blockers) {
+    let index = start;
+    for (; index < blockers.length; index++) {
+      const b = blockers[index];
       if (side === 'left') {
         if (b.right <= x) break;
-        if (b.left < x + width && b.top < y + height && b.bottom > y) x = b.left - width;
+        if (b.left < x + width && b.top < y + height && b.bottom > y) { x = b.left - width; if (moves) moves.push(index, x); }
       } else if (side === 'right') {
         if (b.left >= x + width) break;
-        if (b.right > x && b.top < y + height && b.bottom > y) x = b.right;
+        if (b.right > x && b.top < y + height && b.bottom > y) { x = b.right; if (moves) moves.push(index, x); }
       } else if (side === 'top') {
         if (b.bottom <= y) break;
-        if (b.top < y + height && b.left < x + width && b.right > x) y = b.top - height;
+        if (b.top < y + height && b.left < x + width && b.right > x) { y = b.top - height; if (moves) moves.push(index, y); }
       } else {
         if (b.top >= y + height) break;
-        if (b.bottom > y && b.left < x + width && b.right > x) y = b.bottom;
+        if (b.bottom > y && b.left < x + width && b.right > x) { y = b.bottom; if (moves) moves.push(index, y); }
       }
     }
-    return { x, y, width, height };
-  }
-
-  function pointerHits(pointer, area, obstacles, placed) {
-    for (let i = 0; i < obstacles.length; i++) {
-      const obstacle = obstacles[i];
-      if (boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon)) return true;
-    }
-    for (let i = 0; i < placed.length; i++) {
-      const item = placed[i];
-      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) return true;
-    }
-    return false;
-  }
-
-  function pointerCrossings(pointer, area, obstacles, placed) {
-    let soft = 0, hard = 0;
-    for (let i = 0; i < obstacles.length; i++) {
-      const obstacle = obstacles[i];
-      if (!(boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon))) continue;
-      if (obstacle.kind === 'text') hard++;
-      else soft++;
-    }
-    for (let i = 0; i < placed.length; i++) {
-      const item = placed[i];
-      if (polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer)) hard++;
-    }
-    return { soft, hard };
+    return { box: { x, y, width, height }, stop: index };
   }
 
   /** Blockers that a box sliding away from the target on this side could meet. */
@@ -469,42 +499,17 @@
   }
 
   /**
-   * Boxes all around the target, each as close as the blockers allow at the
-   * given extra distances, priced mostly by pointer length.
+   * Two lists sorted by `compare`, as one sorted list. On a tie the item of
+   * `first` comes first, as in a stable sort of first.concat(second).
    */
-  function candidates(callout, target, blockers, reach, depths) {
-    const gap = POINTER_LENGTH + TIP_CLEARANCE;
-    const result = [];
-    for (const size of boxSizes(callout.text)) {
-      for (const side of SIDES) {
-        const horizontal = side === 'left' || side === 'right';
-        const along = horizontal ? size.height : size.width;
-        const middle = horizontal ? target.y + target.height / 2 : target.x + target.width / 2;
-        const extent = (horizontal ? target.height : target.width) / 4 + reach;
-        const low = middle - extent - along, high = middle + extent;
-        const ordered = sideBlockers(blockers, side, target, gap, low, high + along);
-        for (let start = low; start <= high; start += POSITION_STEP) {
-          let previous = null;
-          for (const depth of depths) {
-            const distance = gap + depth;
-            const box = slideClear(horizontal
-              ? { x: side === 'left' ? target.x - distance - size.width : target.x + target.width + distance, y: start, width: size.width, height: size.height }
-              : { x: start, y: side === 'top' ? target.y - distance - size.height : target.y + target.height + distance, width: size.width, height: size.height },
-            side, ordered);
-            if (previous && previous.x === box.x && previous.y === box.y) continue;
-            previous = box;
-            const tip = tipFor(target, side, box);
-            const pointer = pointerShape(box, tip, POINTER_ASPECTS[0]);
-            const length = Math.hypot(tip.x - pointer.base.x, tip.y - pointer.base.y);
-            const offCentre = horizontal ? pointer.base.y - (box.y + box.height / 2) : pointer.base.x - (box.x + box.width / 2);
-            result.push({ box, size, length, tip, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
-              cost: length + (side === callout.side ? 0 : OTHER_SIDE_COST) +
-                Math.abs(size.maxWidth - WRAP_WIDTHS[0]) * REWRAP_COST + Math.abs(offCentre) * OFF_CENTRE_COST });
-          }
-        }
-      }
+  function mergeSorted(first, second, compare) {
+    const merged = [];
+    let i = 0, j = 0;
+    while (i < first.length || j < second.length) {
+      if (j < second.length && (i === first.length || compare(second[j], first[i]) < 0)) merged.push(second[j++]);
+      else merged.push(first[i++]);
     }
-    return result.sort((a, b) => a.cost - b.cost);
+    return merged;
   }
 
   function overlapArea(a, b) {
@@ -512,84 +517,427 @@
       Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
   }
 
+  // The obstacle grid's cells: at least this size, and at most about this many across a drawing.
+  const GRID_CELL = 32;
+  const GRID_CELLS_ACROSS = 64;
+
   /**
-   * A few clearly different placements for one callout, given the callouts
-   * already placed. A placement whose pointer crosses anything is used only
-   * when no clear one exists, nearby or further away.
+   * The obstacles a pointer crosses: those whose area overlaps the pointer's
+   * area and whose outline overlaps the pointer. `crosses` says whether there
+   * is any, `crossed` lists them. Obstacles are kept on a uniform grid by
+   * area, so a pointer is tested only against those in the cells it covers.
    */
-  function options(callout, target, geometry, reserved, others, placed) {
-    const blockers = geometry.blockers.concat(reserved, others,
-      placed.flatMap(item => [padded(item.box, CALLOUT_CLEARANCE), padded(bounds(item.pointer), 3)]));
+  function obstacleGrid(obstacles) {
+    if (!obstacles.length) return { crosses: () => false, crossed: () => [] };
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const { area } of obstacles) {
+      left = Math.min(left, area.x); top = Math.min(top, area.y);
+      right = Math.max(right, area.x + area.width); bottom = Math.max(bottom, area.y + area.height);
+    }
+    const cell = Math.max(GRID_CELL, (right - left) / GRID_CELLS_ACROSS, (bottom - top) / GRID_CELLS_ACROSS);
+    const columns = Math.floor((right - left) / cell) + 1, rows = Math.floor((bottom - top) / cell) + 1;
+    // Cell numbers grow with the coordinate, so two areas that overlap share
+    // a cell; clamping keeps an area that reaches off the grid on its edge.
+    const column = x => Math.min(columns - 1, Math.max(0, Math.floor((x - left) / cell)));
+    const row = y => Math.min(rows - 1, Math.max(0, Math.floor((y - top) / cell)));
+    const cells = Array.from({ length: columns * rows }, () => []);
+    obstacles.forEach(({ area }, index) => {
+      for (let r = row(area.y); r <= row(area.y + area.height); r++) {
+        for (let c = column(area.x); c <= column(area.x + area.width); c++) cells[r * columns + c].push(index);
+      }
+    });
+    // An obstacle spanning several cells is visited once per query.
+    const visitedIn = new Array(obstacles.length).fill(0);
+    let query = 0;
+    // Visits the obstacles in the cells the area covers until `visit` returns true.
+    function near(area, visit) {
+      query++;
+      for (let r = row(area.y); r <= row(area.y + area.height); r++) {
+        for (let c = column(area.x); c <= column(area.x + area.width); c++) {
+          for (const index of cells[r * columns + c]) {
+            if (visitedIn[index] === query) continue;
+            visitedIn[index] = query;
+            if (visit(obstacles[index])) return true;
+          }
+        }
+      }
+      return false;
+    }
+    const crossing = (pointer, area, obstacle) => boundsOverlap(area, obstacle.area) && polygonsOverlap(pointer, obstacle.polygon);
+    // Neighbouring placements mostly cross the same obstacle, so it is tried first.
+    let lastCrossed = null;
+    const remember = obstacle => { lastCrossed = obstacle; return true; };
+    return {
+      crosses: (pointer, area) => (lastCrossed !== null && crossing(pointer, area, lastCrossed)) ||
+        near(area, obstacle => crossing(pointer, area, obstacle) && remember(obstacle)),
+      crossed: (pointer, area) => {
+        const found = [];
+        near(area, obstacle => { if (crossing(pointer, area, obstacle)) found.push(obstacle); return false; });
+        return found;
+      },
+    };
+  }
+
+  // ───── Placement search ─────────────────────────────────────────────
+  //
+  // The beam search asks for a callout's options once for every partial
+  // layout, and those layouts differ only in the callouts already placed.
+  // So each callout's search keeps what does not depend on them: its
+  // candidate boxes slid against the drawing and the other targets, and
+  // which pointers cross the drawing. A layout moves on only the boxes its
+  // placed callouts are in the way of, giving the same boxes as sliding
+  // every box against all blockers, in the same order: by cost, and on a
+  // tie in the order the boxes were generated.
+
+  // The nearest a box comes to its target: the shortest pointer, and the tip's clearance.
+  const BOX_GAP = POINTER_LENGTH + TIP_CLEARANCE;
+
+  /**
+   * A box's placement on one side of the target, priced mostly by pointer
+   * length, plus what it alone costs the drawing's size (`growth`) when the
+   * search prices that (compact drawings).
+   */
+  function candidateAt(search, side, size, box) {
+    const { callout, target, sizing } = search;
+    const horizontal = side === 'left' || side === 'right';
+    const tip = tipFor(target, side, box);
+    const pointer = pointerShape(box, tip, POINTER_ASPECTS[0]);
+    const length = Math.hypot(tip.x - pointer.base.x, tip.y - pointer.base.y);
+    const offCentre = horizontal ? pointer.base.y - (box.y + box.height / 2) : pointer.base.x - (box.x + box.width / 2);
+    const growth = sizing ? sizing.alone(box, pointer.points) : 0;
+    return { box, size, length, tip, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points), growth,
+      cost: length + (side === callout.side ? 0 : OTHER_SIDE_COST) +
+        Math.abs(size.maxWidth - callout.type.wrapWidths[0]) * REWRAP_COST + Math.abs(offCentre) * OFF_CENTRE_COST + growth };
+  }
+
+  /** The placement with a narrower pointer, at a price for narrowing it. */
+  function narrowed(candidate, aspect) {
+    const pointer = pointerShape(candidate.box, candidate.tip, aspect);
+    return { ...candidate, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
+      cost: candidate.cost + (Math.max(POINTER_WIDTH, candidate.length / POINTER_ASPECTS[0]) - pointer.width) * NARROWING_COST };
+  }
+
+  /**
+   * The search record for a slot's box at `box`. A placement depends only on
+   * where its box ends up, so every spot a slot's box reaches is priced, and
+   * its pointers tested against the drawing, once.
+   */
+  function slotRecord(search, chain, slot, box) {
+    let record = slot.records && slot.records.find(known => known.candidate.box.x === box.x && known.candidate.box.y === box.y);
+    if (!record) {
+      slot.records = slot.records || [];
+      const { side, size } = chain.group;
+      record = { chain, order: slot.order, candidate: candidateAt(search, side, size, box), pointers: [], crossed: null };
+      slot.records.push(record);
+    }
+    return record;
+  }
+
+  /** A chain's records for its slots' `boxes`, skipping a deeper box that slid to the spot of the one before. */
+  function chainRecords(search, chain, boxes) {
+    const records = [];
+    let previous = null;
+    chain.slots.forEach((slot, index) => {
+      const box = boxes[index];
+      if (previous && previous.x === box.x && previous.y === box.y) return;
+      previous = box;
+      records.push(slotRecord(search, chain, slot, box));
+    });
+    return records;
+  }
+
+  const byCost = (a, b) => a.candidate.cost - b.candidate.cost;
+  const byCostThenOrder = (a, b) => byCost(a, b) || a.order - b.order;
+
+  /**
+   * One search round: boxes all around the target at the given reach and
+   * extra distances, each slid as close as the drawing and the other
+   * targets allow. Per box size and side, a group holds the blockers the
+   * slide meets, in order, and a chain of slots per position, one per
+   * depth. `records` are the placements, cheapest first.
+   */
+  function searchRound(search, reach, depths) {
+    const { callout, target } = search;
+    const groups = [], records = [];
+    let order = 0;
+    for (const size of boxSizes(callout.text, callout.type)) {
+      for (const side of SIDES) {
+        const horizontal = side === 'left' || side === 'right';
+        const along = horizontal ? size.height : size.width;
+        const middle = horizontal ? target.y + target.height / 2 : target.x + target.width / 2;
+        const extent = (horizontal ? target.height : target.width) / 4 + reach;
+        const low = middle - extent - along, high = middle + extent;
+        const group = { side, size, along, band: [low, high + along], chains: [],
+          ordered: sideBlockers(search.blockers, side, target, BOX_GAP, low, high + along) };
+        for (let start = low; start <= high; start += POSITION_STEP) {
+          const chain = { group, start, slots: depths.map(depth => {
+            const distance = BOX_GAP + depth;
+            const from = horizontal
+              ? { x: side === 'left' ? target.x - distance - size.width : target.x + target.width + distance, y: start, width: size.width, height: size.height }
+              : { x: start, y: side === 'top' ? target.y - distance - size.height : target.y + target.height + distance, width: size.width, height: size.height };
+            const moves = [], { box, stop } = slide(from, side, group.ordered, 0, moves);
+            // Most boxes never move, and most spots are never reached; their lists stay unmade.
+            return { order: order++, from, box, stop, moves: moves.length ? moves : null, records: null };
+          }) };
+          chain.records = chainRecords(search, chain, chain.slots.map(slot => slot.box));
+          records.push(...chain.records);
+          group.chains.push(chain);
+        }
+        groups.push(group);
+      }
+    }
+    // `clearable` grows as layouts read it: the records, in order, up to
+    // `evaluated`, that have a pointer clear of the drawing.
+    return { groups, records: records.sort(byCost), clearable: [], evaluated: 0 };
+  }
+
+  /**
+   * The group's chains whose boxes are level with blocker b: the only ones
+   * whose slide b can change, since a blocker never level with a box does
+   * not touch it, or ends the slide as the next blocker would. Chain starts
+   * grow, so they are one run, found by bisection.
+   */
+  function chainsLevelWith(group, b) {
+    const horizontal = group.side === 'left' || group.side === 'right';
+    const low = horizontal ? b.top : b.left, high = horizontal ? b.bottom : b.right;
+    const { chains, along } = group;
+    let first = 0, end = chains.length;
+    while (first < end) {
+      const middle = (first + end) >> 1;
+      if (chains[middle].start + along > low) end = middle;
+      else first = middle + 1;
+    }
+    const level = [];
+    for (let index = first; index < chains.length && chains[index].start < high; index++) level.push(chains[index]);
+    return level;
+  }
+
+  // The first index of the sorted `list` that `item` sorts before.
+  function insertionPoint(list, item, compare) {
+    let low = 0, high = list.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (compare(item, list[middle]) < 0) high = middle;
+      else low = middle + 1;
+    }
+    return low;
+  }
+
+  // The slot's box as the round's slide left it before meeting the round's blocker `index`.
+  function boxBefore(slot, side, index) {
+    let position = null;
+    for (let k = 0; slot.moves && k < slot.moves.length && slot.moves[k] < index; k += 2) position = slot.moves[k + 1];
+    if (position === null) return slot.from;
+    return side === 'left' || side === 'right' ? { ...slot.from, x: position } : { ...slot.from, y: position };
+  }
+
+  /**
+   * Where a slot's box ends when its slide also meets the placed callouts'
+   * blockers `level` (those level with it, in slide order), each at its
+   * `place` among the round's blockers. Until one of them moves the box,
+   * the slide is the round's, so it resumes over `merged()`, all blockers
+   * in slide order, from the first that does, at its `at` in that list.
+   * Returns the slot's own box when none does.
+   */
+  function slidUnder(slot, side, level, merged) {
+    for (const { alone, place, at } of level) {
+      // The round's slide ended, at a blocker the box had passed, before this one.
+      if (slot.stop < place) break;
+      const before = boxBefore(slot, side, place);
+      const met = slide(before, side, alone);
+      // The box has passed this blocker too, so the slide ends where the round's did.
+      if (met.stop === 0) break;
+      if (met.box.x !== before.x || met.box.y !== before.y) return slide(met.box, side, merged(), at + 1).box;
+    }
+    return slot.box;
+  }
+
+  /**
+   * A round under one layout of the callouts already placed
+   * (`placedBlockers`): the chains in which one of their boxes ends
+   * elsewhere, each with the records of its boxes there (`moved`), and all
+   * those records, cheapest first (`added`).
+   */
+  function layoutOf(search, round, placedBlockers) {
+    const moved = new Map();
+    for (const group of round.groups) {
+      const { side, ordered } = group;
+      const ahead = sideBlockers(placedBlockers, side, search.target, BOX_GAP, group.band[0], group.band[1]);
+      if (!ahead.length) continue;
+      let merged = null;
+      const mergedOnce = () => merged || (merged = mergeSorted(ordered, ahead, SLIDE_ORDER[side]));
+      // Per chain, the blockers level with it, in slide order.
+      const levels = new Map();
+      ahead.forEach((b, index) => {
+        const blocker = { alone: [b], place: insertionPoint(ordered, b, SLIDE_ORDER[side]), at: 0 };
+        blocker.at = blocker.place + index;
+        for (const chain of chainsLevelWith(group, b)) {
+          if (!levels.has(chain)) levels.set(chain, []);
+          levels.get(chain).push(blocker);
+        }
+      });
+      for (const [chain, level] of levels) {
+        let boxes = null;
+        chain.slots.forEach((slot, index) => {
+          const box = slidUnder(slot, side, level, mergedOnce);
+          if (!boxes && (box.x !== slot.box.x || box.y !== slot.box.y)) boxes = chain.slots.slice(0, index).map(earlier => earlier.box);
+          if (boxes) boxes.push(box);
+        });
+        if (boxes) moved.set(chain, chainRecords(search, chain, boxes));
+      }
+    }
+    return { round, moved, added: [].concat(...moved.values()).sort(byCostThenOrder) };
+  }
+
+  /** The record's placement with pointer `aspect` (an index into POINTER_ASPECTS), and whether it crosses the drawing. */
+  function pointerOf(search, record, aspect) {
+    if (!record.pointers[aspect]) {
+      const option = aspect ? narrowed(record.candidate, POINTER_ASPECTS[aspect]) : record.candidate;
+      record.pointers[aspect] = { option, crossesDrawing: search.obstacles.crosses(option.pointer, option.area) };
+    }
+    return record.pointers[aspect];
+  }
+
+  const blockedByDrawing = (search, record) => POINTER_ASPECTS.every((_, aspect) => pointerOf(search, record, aspect).crossesDrawing);
+
+  /** The round's `index`th record with a pointer clear of the drawing, or null. */
+  function clearableAt(search, round, index) {
+    while (round.clearable.length <= index && round.evaluated < round.records.length) {
+      const record = round.records[round.evaluated++];
+      if (!blockedByDrawing(search, record)) round.clearable.push(record);
+    }
+    return round.clearable[index] || null;
+  }
+
+  /**
+   * The round's records under a layout, cheapest first, as a function giving
+   * the next one or null: the records of the chains it moved take the place
+   * of theirs. `clearOnly` leaves out records whose every pointer crosses
+   * the drawing.
+   */
+  function layoutRecords(search, layout, clearOnly) {
+    const { round, moved, added } = layout;
+    const roundAt = index => (clearOnly ? clearableAt(search, round, index) : round.records[index] || null);
+    let i = 0, j = 0;
+    return () => {
+      let kept = roundAt(i);
+      while (kept && moved.has(kept.chain)) kept = roundAt(++i);
+      while (clearOnly && j < added.length && blockedByDrawing(search, added[j])) j++;
+      if (j < added.length && (!kept || byCostThenOrder(added[j], kept) < 0)) return added[j++];
+      if (kept) i++;
+      return kept;
+    };
+  }
+
+  const crossesCallout = (pointer, item) => polygonsOverlap(pointer, item.clearance) || polygonsOverlap(pointer, item.pointer);
+
+  /**
+   * The record's placement with the widest pointer that crosses nothing, or
+   * null. A pointer runs from its box to just outside the target, so it can
+   * only cross what lies near the round's boxes; every obstacle is tested.
+   */
+  function clearOption(search, record, placed) {
+    for (let aspect = 0; aspect < POINTER_ASPECTS.length; aspect++) {
+      const { option, crossesDrawing } = pointerOf(search, record, aspect);
+      if (!crossesDrawing && !placed.some(item => crossesCallout(option.pointer, item))) return option;
+    }
+    return null;
+  }
+
+  /** The cheapest of the first records `next` gives, once each obstacle and callout its pointer crosses is priced in. */
+  function forcedOption(search, next, placed) {
+    let fallback = null;
+    for (let count = 0, record = next(); record && count < FALLBACK_CANDIDATES; count++, record = next()) {
+      const candidate = record.candidate;
+      record.crossed = record.crossed || search.obstacles.crossed(candidate.pointer, candidate.area);
+      const labels = record.crossed.filter(obstacle => obstacle.kind === 'text').length;
+      const hard = labels + placed.filter(item => crossesCallout(candidate.pointer, item)).length;
+      const soft = record.crossed.length - labels;
+      const cost = candidate.cost + hard * TEXT_CROSSING_COST + soft * CROSSING_COST;
+      if (!fallback || cost < fallback.cost) fallback = { ...candidate, cost, forced: true, clearance: rectVertices(candidate.box, 3) };
+    }
+    return fallback;
+  }
+
+  /**
+   * A callout's search: a function from the callouts already placed to a
+   * few clearly different placements. A placement whose pointer crosses
+   * anything is used only when no clear one exists, nearby or further away.
+   * With `sizing` (see arrange), each placement's price includes what it
+   * alone costs the drawing's size.
+   */
+  function calloutSearch(callout, target, geometry, reserved, others, sizing) {
     // Labels always exclude pointers. A shape containing the target does not:
     // a pointer to a visibility marker must be able to reach inside its class.
     const obstacles = geometry.obstacles.filter(obstacle => !(target.element && obstacle.element === target.element) &&
       !(obstacle.kind === 'shape' && contains(obstacle.box, target)));
-    const narrow = (candidate, nearby) => {
-      for (let i = 1; i < POINTER_ASPECTS.length; i++) {
-        const pointer = pointerShape(candidate.box, candidate.tip, POINTER_ASPECTS[i]);
-        const next = { ...candidate, edge: pointer.edge, pointer: pointer.points, area: bounds(pointer.points),
-          cost: candidate.cost + (Math.max(POINTER_WIDTH, candidate.length / POINTER_ASPECTS[0]) - pointer.width) * NARROWING_COST };
-        if (!pointerHits(next.pointer, next.area, nearby, placed)) return next;
+    const search = { callout, target, sizing, blockers: geometry.blockers.concat(reserved, others), obstacles: obstacleGrid(obstacles) };
+    // A round is searched only once a layout finds nothing clear in the one before.
+    const rounds = [];
+    return placed => {
+      const placedBlockers = placed.flatMap(item => [padded(item.box, CALLOUT_CLEARANCE), padded(bounds(item.pointer), 3)]);
+      let layout;
+      for (let index = 0; index < SEARCHES.length; index++) {
+        rounds[index] = rounds[index] || searchRound(search, ...SEARCHES[index]);
+        layout = layoutOf(search, rounds[index], placedBlockers);
+        const next = layoutRecords(search, layout, true);
+        const chosen = [];
+        for (let record = next(); record && chosen.length < BRANCHES; record = next()) {
+          const box = record.candidate.box;
+          // Near-copies of a chosen placement would crowd the alternatives out.
+          if (chosen.some(other => overlapArea(other.box, box) > box.width * box.height / 2)) continue;
+          const clear = clearOption(search, record, placed);
+          if (clear) chosen.push(clear);
+        }
+        if (chosen.length) return chosen.map(item => ({ ...item, clearance: rectVertices(item.box, 3) }));
       }
-      return null;
+      return [forcedOption(search, layoutRecords(search, layout, false), placed)];
     };
-    let list;
-    for (const [reach, depths] of SEARCHES) {
-      list = candidates(callout, target, blockers, reach, depths);
-      const region = list.reduce((area, candidate) => union(area, candidate.box), target);
-      const nearby = obstacles.filter(obstacle => boundsOverlap(region, obstacle.area));
-      const chosen = [];
-      for (const candidate of list) {
-        // Near-copies of a chosen placement would crowd the alternatives out.
-        if (chosen.some(other => overlapArea(other.box, candidate.box) > candidate.box.width * candidate.box.height / 2)) continue;
-        const clear = pointerHits(candidate.pointer, candidate.area, nearby, placed) ? narrow(candidate, nearby) : candidate;
-        if (!clear) continue;
-        chosen.push(clear);
-        if (chosen.length === BRANCHES) break;
-      }
-      if (chosen.length) return chosen.map(item => ({ ...item, clearance: rectVertices(item.box, 3) }));
-    }
-    let fallback = null;
-    for (const candidate of list.slice(0, FALLBACK_CANDIDATES)) {
-      const crossings = pointerCrossings(candidate.pointer, candidate.area, obstacles, placed);
-      const cost = candidate.cost + crossings.hard * TEXT_CROSSING_COST + crossings.soft * CROSSING_COST;
-      if (!fallback || cost < fallback.cost) fallback = { ...candidate, cost, forced: true, clearance: rectVertices(candidate.box, 3) };
-    }
-    return [fallback];
   }
 
-  /**
-   * Place callouts one after another in the given order, keeping the cheapest
-   * few partial layouts, so an early callout can give way when its best spot
-   * would leave a later one nowhere clear to go.
-   */
+  /** Rings around the other targets, except those inside the same shape as this one. */
   function neighbourKeepOut(target, targets, obstacles) {
     return targets.filter(item => item !== target && !obstacles.some(obstacle =>
       obstacle.kind === 'shape' && obstacle.box && contains(obstacle.box, target) && contains(obstacle.box, item)))
       .map(item => padded(item, OTHER_TARGET_CLEARANCE));
   }
 
-  function beamSearch(order, callouts, targets, geometry, reserved) {
-    let beam = [{ placed: [], cost: 0 }];
+  /**
+   * Place callouts one after another in the given order, keeping the cheapest
+   * few partial layouts, so an early callout can give way when its best spot
+   * would leave a later one nowhere clear to go. With `sizing`, a partial
+   * layout is priced for what its callouts together cost the drawing's
+   * size, in place of the sum of what each would cost alone.
+   */
+  function beamSearch(order, searches, sizing) {
+    let beam = [{ placed: [], own: 0, cost: 0 }];
     for (const index of order) {
-      const keepOut = neighbourKeepOut(targets[index], targets, geometry.obstacles);
-      beam = beam.flatMap(state => options(callouts[index], targets[index], geometry, reserved, keepOut, state.placed)
-        .map(option => ({ placed: state.placed.concat(option), cost: state.cost + option.cost })))
-        .sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
+      beam = beam.flatMap(state => searches[index](state.placed).map(option => {
+        const placed = state.placed.concat(option), own = state.own + option.cost - option.growth;
+        return { placed, own, cost: sizing ? own + sizing.together(placed) : own };
+      })).sort((a, b) => a.cost - b.cost).slice(0, BEAM_WIDTH);
     }
     const placements = [];
     order.forEach((index, position) => { placements[index] = beam[0].placed[position]; });
     return { placements, cost: beam[0].cost, forced: order.filter((index, position) => beam[0].placed[position].forced) };
   }
 
-  function arrange(callouts, targets, geometry) {
+  /**
+   * Places the callouts: for each, its box and pointer. `sizing`
+   * (optional) prices what placements cost the drawing's size, as
+   * `alone(box, pointer)` and `together(placements)`; the page pass has none.
+   */
+  function arrange(callouts, targets, geometry, sizing = null) {
     // No box may cover what another callout points at.
     const reserved = targets.map(target => padded(target, TIP_CLEARANCE));
+    // Each search outlives one order of placement, so a retry reuses its work.
+    const searches = callouts.map((callout, index) => calloutSearch(callout, targets[index], geometry, reserved,
+      neighbourKeepOut(targets[index], targets, geometry.obstacles), sizing));
     let order = callouts.map((_, index) => index), best = null;
     // A callout left with nowhere clear may have been crowded out by earlier
     // ones; placing it first lets the others arrange around it instead.
     for (let attempt = 0; attempt < ORDER_ATTEMPTS; attempt++) {
-      const result = beamSearch(order, callouts, targets, geometry, reserved);
+      const result = beamSearch(order, searches, sizing);
       if (!best || result.cost < best.cost) best = result;
       if (!result.forced.length || result.forced.every((index, position) => order[position] === index)) break;
       order = result.forced.concat(order.filter(index => !result.forced.includes(index)));
@@ -597,41 +945,58 @@
     return best.placements;
   }
 
-  function draw(layer, callout, { box, size, pointer, edge }) {
-    const group = svgElement('g', { class: 'uml-callout', 'data-callout-target': callout.target.value || 'point' });
-    group.appendChild(svgElement('polygon', { class: 'uml-callout-pointer', points: pointer.map(p => `${p.x},${p.y}`).join(' ') }));
-    group.appendChild(svgElement('rect', { class: 'uml-callout-box', x: box.x, y: box.y, width: box.width, height: box.height, rx: CORNER_RADIUS }));
-    group.appendChild(svgElement('path', { class: 'uml-callout-bubble', d: bubblePath(box, pointer, edge) }));
-    const text = svgElement('text', { x: box.x + PADDING_X, y: box.y + PADDING_Y + BASELINE,
-      'font-size': FONT_SIZE, 'font-family': UMLShared.BASE_CFG.fontFamily });
-    size.lines.forEach((line, index) => text.appendChild(svgElement('tspan', {
-      x: box.x + PADDING_X, dy: index ? LINE_HEIGHT : 0
-    }, line + (index < size.lines.length - 1 ? " " : ""))));
-    group.appendChild(text);
-    layer.appendChild(group);
+  /** What one placed callout draws, as `{tag, attrs, text, children}`. */
+  function calloutParts(callout, { box, size, pointer, edge }) {
+    const type = callout.type;
+    return { tag: 'g', attrs: { class: 'uml-callout', 'data-callout-target': callout.target.value || 'point' }, children: [
+      { tag: 'polygon', attrs: { class: 'uml-callout-pointer', points: pointer.map(p => `${p.x},${p.y}`).join(' ') } },
+      { tag: 'rect', attrs: { class: 'uml-callout-box', x: box.x, y: box.y, width: box.width, height: box.height, rx: CORNER_RADIUS } },
+      { tag: 'path', attrs: { class: 'uml-callout-bubble', d: bubblePath(box, pointer, edge) } },
+      { tag: 'text', attrs: { x: box.x + type.padX, y: box.y + type.padY + type.baseline,
+        'font-size': type.fontSize, 'font-family': UMLShared.BASE_CFG.fontFamily },
+      children: size.lines.map((line, index) => ({ tag: 'tspan', attrs: { x: box.x + type.padX, dy: index ? type.lineHeight : 0 },
+        text: line + (index < size.lines.length - 1 ? " " : "") })) },
+    ] };
+  }
+
+  function buildElement({ tag, attrs, text, children }) {
+    const element = svgElement(tag, attrs, text);
+    (children || []).forEach(child => element.appendChild(buildElement(child)));
+    return element;
+  }
+
+  function markupOf({ tag, attrs, text, children }) {
+    const attributes = Object.entries(attrs).map(([name, value]) => ` ${name}="${UMLShared.escapeXml(String(value))}"`).join('');
+    const content = (text !== undefined ? UMLShared.escapeXml(text) : '') + (children || []).map(markupOf).join('');
+    return `<${tag}${attributes}>${content}</${tag}>`;
+  }
+
+  function draw(layer, callout, placement) {
+    layer.appendChild(buildElement(calloutParts(callout, placement)));
   }
 
   /** Apply overlays after model layout, preserving every model position. */
-  function render(container, callouts) {
-    if (!callouts || !callouts.length) return;
+  function render(container, annotations) {
+    if (!annotations || !annotations.length) return;
     const svg = container.querySelector('svg');
     if (!svg) {
       // DOM-free workers serialize the model first. Preserve annotations for
       // the ordinary auto-fit pass after the SVG reaches a real document.
       if (typeof container.innerHTML === 'string' && container.innerHTML.includes('<svg')) {
         container.innerHTML = container.innerHTML.replace('<svg', '<svg data-uml-callouts="' +
-          UMLShared.escapeXml(JSON.stringify(callouts)) + '"');
+          UMLShared.escapeXml(JSON.stringify(annotations)) + '"');
       }
       return;
     }
     // Character geometry is unavailable inside closed details/hidden tabs.
     // Reuse the shared visibility/refit scheduler instead of guessing bounds.
     if (!svg.getBoundingClientRect().width || !svg.getBoundingClientRect().height) {
-      pending.set(svg, callouts);
+      pending.set(svg, annotations);
       return;
     }
     pending.delete(svg);
     svg.removeAttribute('data-uml-callouts');
+    const callouts = annotations.map(callout => ({ ...callout, type: USUAL_TYPE }));
     const targets = callouts.map(callout => {
       const target = resolveTarget(svg, callout.target);
       if (!target) throw new Error('Callout target not found at line ' + callout.line + ': ' + callout.target.value);
@@ -659,7 +1024,438 @@
     if (annotations) render(container, annotations);
   }
 
-  window.UMLCallouts = { extract, render, flush };
+  // ───── Finished markup, read without a DOM ─────────────────────────
+  //
+  // A compact drawing places its callouts while the layout search runs,
+  // which may be in a worker with no layout engine. The search has the
+  // drawing's markup, so the parts a callout must avoid, and its targets,
+  // are read from that markup with the same rules the page pass applies
+  // to the live SVG. The renderers emit plain markup: double- or single-
+  // quoted attributes, `translate` as the only transform, text measured
+  // with UMLShared.textWidth.
+
+  const XML_ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+  // Glyph box of a text line around its baseline, in em (Chromium getBBox).
+  const TEXT_ASCENT = 0.96;
+  const TEXT_DESCENT = 0.24;
+
+  function decodeXml(text) {
+    return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, name) => {
+      if (name[0] !== '#') return XML_ENTITIES[name] !== undefined ? XML_ENTITIES[name] : whole;
+      return String.fromCodePoint(name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10));
+    });
+  }
+
+  function attributesOf(source) {
+    const attrs = {};
+    const pattern = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+    let match;
+    while ((match = pattern.exec(source))) attrs[match[1]] = decodeXml(match[2] !== undefined ? match[2] : match[3]);
+    return attrs;
+  }
+
+  function translationOf(transform) {
+    const match = /translate\(\s*([-+\d.eE]+)(?:[\s,]+([-+\d.eE]+))?\s*\)/.exec(transform || '');
+    return match ? { x: Number(match[1]), y: Number(match[2] || 0) } : { x: 0, y: 0 };
+  }
+
+  /**
+   * The elements of SVG markup in document order: `{tag, attrs, parent,
+   * offset, hidden, runs}`, where `offset` is the element's translation in
+   * root SVG units, `hidden` says it lies in <defs> or an existing callout
+   * layer, and `runs` are the text nodes of a <text> with their owners.
+   */
+  function readMarkup(markup) {
+    const elements = [], stack = [];
+    const token = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<\/([\w:-]+)\s*>|<([\w:-]+)((?:\s+[\w:.-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>|([^<]+)/g;
+    let match;
+    while ((match = token.exec(markup))) {
+      if (match[1]) {
+        const tag = match[1].toLowerCase();
+        while (stack.length && stack.pop().tag !== tag) { /* unclosed children close with their parent */ }
+      } else if (match[2]) {
+        const parent = stack[stack.length - 1] || null;
+        const attrs = attributesOf(match[3]);
+        const shift = translationOf(attrs.transform);
+        const tag = match[2].toLowerCase();
+        const element = { tag, attrs, parent, runs: [],
+          offset: { x: (parent ? parent.offset.x : 0) + shift.x, y: (parent ? parent.offset.y : 0) + shift.y },
+          hidden: !!parent && (parent.hidden || parent.tag === 'defs' || /(^|\s)uml-callouts(\s|$)/.test(parent.attrs.class || '')) };
+        elements.push(element);
+        if (!match[4]) stack.push(element);
+      } else if (match[5]) {
+        const owner = stack[stack.length - 1];
+        const text = owner && closest(owner, 'text');
+        if (text) text.runs.push({ owner, text: decodeXml(match[5]) });
+      }
+    }
+    return elements;
+  }
+
+  function closest(element, tag) {
+    for (let at = element; at; at = at.parent) if (at.tag === tag) return at;
+    return null;
+  }
+
+  // An attribute or `style` property, inherited from the nearest ancestor.
+  function inherited(element, name) {
+    const property = new RegExp('(?:^|;)\\s*' + name + '\\s*:\\s*([^;]+)');
+    for (let at = element; at; at = at.parent) {
+      if (at.attrs[name] !== undefined) return at.attrs[name];
+      const fromStyle = property.exec(at.attrs.style || '');
+      if (fromStyle) return fromStyle[1].trim();
+    }
+    return null;
+  }
+
+  const numberAttr = (element, name) => Number(element.attrs[name]) || 0;
+
+  function parsePoints(value) {
+    const numbers = String(value || '').match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g) || [];
+    const points = [];
+    for (let i = 0; i + 1 < numbers.length; i += 2) points.push({ x: Number(numbers[i]), y: Number(numbers[i + 1]) });
+    return points;
+  }
+
+  // The vertices of a path's absolute and relative M/L/H/V/Z commands;
+  // curves contribute their end points.
+  function pathPoints(d) {
+    const points = [];
+    let x = 0, y = 0, startX = 0, startY = 0;
+    const commands = String(d || '').match(/[a-zA-Z][^a-zA-Z]*/g) || [];
+    for (const command of commands) {
+      const letter = command[0], relative = letter === letter.toLowerCase();
+      const numbers = (command.slice(1).match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g) || []).map(Number);
+      const upper = letter.toUpperCase();
+      if (upper === 'Z') { x = startX; y = startY; points.push({ x, y }); continue; }
+      if (upper === 'H' || upper === 'V') {
+        numbers.forEach(n => { if (upper === 'H') x = relative ? x + n : n; else y = relative ? y + n : n; points.push({ x, y }); });
+        continue;
+      }
+      const step = { M: 2, L: 2, T: 2, Q: 4, S: 4, C: 6, A: 7 }[upper] || 2;
+      for (let i = 0; i + step <= numbers.length; i += step) {
+        const nx = numbers[i + step - 2], ny = numbers[i + step - 1];
+        x = relative ? x + nx : nx;
+        y = relative ? y + ny : ny;
+        if (upper === 'M' && i === 0) { startX = x; startY = y; }
+        points.push({ x, y });
+      }
+    }
+    return points;
+  }
+
+  function boxOfPoints(points) {
+    return points.length ? bounds(points) : null;
+  }
+
+  // The points an element is drawn through, in root SVG units.
+  function outlinePoints(element) {
+    const a = element.attrs, at = point => ({ x: point.x + element.offset.x, y: point.y + element.offset.y });
+    if (element.tag === 'line') return [{ x: numberAttr(element, 'x1'), y: numberAttr(element, 'y1') }, { x: numberAttr(element, 'x2'), y: numberAttr(element, 'y2') }].map(at);
+    if (element.tag === 'polyline' || element.tag === 'polygon') return parsePoints(a.points).map(at);
+    if (element.tag === 'path') return pathPoints(a.d).map(at);
+    return null;
+  }
+
+  function fontOf(element) {
+    const weight = String(inherited(element, 'font-weight') || '');
+    return {
+      size: Number.parseFloat(inherited(element, 'font-size')) || UMLShared.BASE_CFG.fontSize,
+      bold: weight === 'bold' || weight === 'bolder' || Number(weight) >= 600,
+      family: inherited(element, 'font-family') || undefined,
+    };
+  }
+
+  const widthIn = (text, font) => (text ? UMLShared.textWidth(text, font.bold, font.size, font.family) : 0);
+
+  /**
+   * A <text> element's lines as laid out: each run of text with its font,
+   * start and baseline in root units, and the element's visible text (white
+   * space collapsed, as the page reads it) with, for each visible
+   * character, its run and its offset in that run's text.
+   */
+  function layOutText(element) {
+    const runs = [];
+    let x = numberAttr(element, 'x'), y = numberAttr(element, 'y'), chunk = [];
+    const anchorOf = run => inherited(run.owner, 'text-anchor') || 'start';
+    const closeChunk = () => {
+      if (!chunk.length) return;
+      const width = chunk.reduce((sum, run) => sum + run.width, 0);
+      const anchor = anchorOf(chunk[0]);
+      let at = chunk[0].x - (anchor === 'middle' ? width / 2 : anchor === 'end' ? width : 0);
+      chunk.forEach(run => { run.x = at; at += run.width; });
+      chunk = [];
+    };
+    for (const run of element.runs) {
+      const owner = run.owner;
+      if (owner !== element && (owner.attrs.x !== undefined || owner.attrs.y !== undefined || owner.attrs.dy !== undefined)) {
+        closeChunk();
+        if (owner.attrs.x !== undefined) x = numberAttr(owner, 'x');
+        if (owner.attrs.y !== undefined) y = numberAttr(owner, 'y');
+        y += numberAttr(owner, 'dy');
+      }
+      const font = fontOf(owner);
+      const text = run.text.replace(/[\n\r\t]/g, '').replace(/ {2,}/g, ' ');
+      const placed = { owner, text, font, x, y, width: widthIn(text, font) };
+      runs.push(placed);
+      chunk.push(placed);
+      x += placed.width;
+    }
+    closeChunk();
+    let visible = '';
+    const characters = [];
+    runs.forEach(run => {
+      for (let offset = 0; offset < run.text.length; offset++) {
+        const space = /\s/.test(run.text[offset]);
+        if (space && (!visible || visible[visible.length - 1] === ' ')) continue;
+        visible += space ? ' ' : run.text[offset];
+        characters.push({ run, offset });
+      }
+    });
+    while (visible.endsWith(' ')) { visible = visible.slice(0, -1); characters.pop(); }
+    const dx = element.offset.x, dy = element.offset.y;
+    runs.forEach(run => { run.x += dx; run.y += dy; });
+    return { runs, visible, characters };
+  }
+
+  function runBox(run, from, to) {
+    const left = run.x + widthIn(run.text.slice(0, from), run.font);
+    const right = run.x + widthIn(run.text.slice(0, to), run.font);
+    return { x: left, y: run.y - TEXT_ASCENT * run.font.size, width: right - left, height: (TEXT_ASCENT + TEXT_DESCENT) * run.font.size };
+  }
+
+  // The box of visible characters [from, to) of laid-out text.
+  function textSpanBox(layout, from, to) {
+    let box = null;
+    for (let i = from; i < to; i++) {
+      const { run, offset } = layout.characters[i];
+      box = union(box, runBox(run, offset, offset + 1));
+    }
+    return box;
+  }
+
+  /**
+   * A drawing read from its markup: every element's geometry in root SVG
+   * units, in document order.
+   */
+  function markupModel(markup) {
+    const elements = readMarkup(markup);
+    const root = elements.find(element => element.tag === 'svg');
+    const parts = [];
+    elements.forEach(element => {
+      if (element.hidden || MODEL_TAGS.split(/,\s*/).indexOf(element.tag) < 0) return;
+      if (element.tag === 'text') {
+        element.layout = layOutText(element);
+        const runs = element.layout.runs.filter(run => run.text.trim());
+        element.box = runs.reduce((box, run) => union(box, runBox(run, 0, run.text.length)), null);
+      } else if (element.tag === 'rect') {
+        element.box = { x: numberAttr(element, 'x') + element.offset.x, y: numberAttr(element, 'y') + element.offset.y,
+          width: numberAttr(element, 'width'), height: numberAttr(element, 'height') };
+      } else if (element.tag === 'circle' || element.tag === 'ellipse') {
+        const rx = numberAttr(element, element.tag === 'circle' ? 'r' : 'rx'), ry = numberAttr(element, element.tag === 'circle' ? 'r' : 'ry');
+        element.box = { x: numberAttr(element, 'cx') - rx + element.offset.x, y: numberAttr(element, 'cy') - ry + element.offset.y, width: 2 * rx, height: 2 * ry };
+      } else {
+        element.points = outlinePoints(element);
+        element.box = boxOfPoints(element.points);
+      }
+      if (!element.box) return;
+      // As the page measures it: a line still takes one unit across.
+      element.box = { ...element.box, width: Math.max(1, element.box.width), height: Math.max(1, element.box.height) };
+      const frame = (element.tag === 'rect' && element.attrs['data-layout-fragment-id'] !== undefined) || element.attrs['data-callout-frame'] !== undefined;
+      const stroke = !frame && (element.tag === 'line' ||
+        ((element.tag === 'path' || element.tag === 'polyline') && inherited(element, 'fill') === 'none'));
+      parts.push({ element, tag: element.tag, box: element.box, frame, segments: stroke ? segmentsAlong(element.points) : null });
+    });
+    return { root, elements, parts };
+  }
+
+  function markupTextTarget(model, target) {
+    const labels = model.elements.filter(element => element.tag === 'text' && !element.hidden && element.layout);
+    const exact = labels.filter(label => label.layout.visible === target.value);
+    const matches = exact.length ? exact : labels.filter(label => label.layout.visible.includes(target.value));
+    const label = matches[target.occurrence - 1];
+    if (!label) return null;
+    if (exact.length) return label.box && { ...label.box };
+    const start = label.layout.visible.indexOf(target.value);
+    return textSpanBox(label.layout, start, start + target.value.length);
+  }
+
+  function markupEdgeTarget(model, target) {
+    const routes = model.elements.filter(element => !element.hidden && ['line', 'polyline', 'path'].includes(element.tag) &&
+      element.attrs['data-layout-route-id'] !== undefined && element.points && element.points.length >= 2 &&
+      routeAttributeOf(element, 'data-layout-route-decorative') !== 'true' &&
+      Math.max(element.box.width, element.box.height) >= 18);
+    const route = routes[target.value - 1];
+    return route ? edgeAnchor(route.points, target.anchor, route) : null;
+  }
+
+  // As the page reads a route attribute: the element's own, else its route group's.
+  function routeAttributeOf(element, name) {
+    if (element.attrs[name]) return element.attrs[name];
+    for (let at = element.parent; at; at = at.parent) {
+      const a = at.attrs;
+      if (a['data-layout-source'] !== undefined || a['data-layout-target'] !== undefined || a['data-route-style'] !== undefined) return a[name] || '';
+    }
+    return '';
+  }
+
+  function markupElementTarget(model, target) {
+    const byAttribute = name => model.elements.filter(element => !element.hidden && element.attrs[name] === String(target.value) && element.box);
+    const parts = byAttribute('data-layout-bounds-id').length ? byAttribute('data-layout-bounds-id') : byAttribute('data-layout-id');
+    if (parts.length) return parts.reduce((box, element) => union(box, element.box), null);
+    return markupTextTarget(model, { value: target.value, occurrence: 1 });
+  }
+
+  function resolveMarkupTarget(model, target) {
+    if (target.kind === 'text') return markupTextTarget(model, target);
+    if (target.kind === 'edge') return markupEdgeTarget(model, target);
+    if (target.kind === 'shape') {
+      const shape = model.elements.filter(element => element.tag === target.value && !element.hidden)[target.occurrence - 1];
+      return shape && shape.box ? { ...shape.box, element: shape } : null;
+    }
+    if (target.kind === 'point') return { x: target.x, y: target.y, width: 0, height: 0 };
+    return markupElementTarget(model, target);
+  }
+
+  function viewBoxOf(root) {
+    const numbers = String(root.attrs.viewBox || '').trim().split(/[\s,]+/).map(Number);
+    if (numbers.length === 4 && numbers.every(isFinite)) return { x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3] };
+    return { x: 0, y: 0, width: Number(root.attrs.width) || 0, height: Number(root.attrs.height) || 0 };
+  }
+
+  // The drawing's frame grown to hold the callouts with the drawing's margin.
+  function frameWith(viewBox, placements, margin) {
+    let left = viewBox.x, top = viewBox.y, right = viewBox.x + viewBox.width, bottom = viewBox.y + viewBox.height;
+    placements.forEach(({ box, pointer }) => {
+      const extent = union(bounds(pointer), box);
+      left = Math.min(left, extent.x - margin);
+      top = Math.min(top, extent.y - margin);
+      right = Math.max(right, extent.x + extent.width + margin);
+      bottom = Math.max(bottom, extent.y + extent.height + margin);
+    });
+    left = Math.floor(left); top = Math.floor(top);
+    return { x: left, y: top, width: Math.ceil(right - left), height: Math.ceil(bottom - top) };
+  }
+
+  // What it costs a compact drawing, in units of pointer length, to show its
+  // text smaller by a factor of e: 1 % smaller text is worth a pointer about
+  // 3 units longer. Higher weights draw callouts into gaps between boxes that
+  // the squeeze then has to keep open (state-016, class-030 of the layout
+  // benchmark got smaller at 1000).
+  const GROWTH_COST = 300;
+
+  /**
+   * The price of callout placements for how much smaller they make a
+   * drawing framed by `viewBox` in `pane` (arrange's `sizing`): the page
+   * scales the drawing to fit, so a box that widens a drawing whose width
+   * limits that scale shrinks every label, while one that grows the other
+   * way costs nothing until that side limits it too.
+   */
+  function frameSizing(viewBox, margin, pane) {
+    const scaleOf = frame => Math.min(pane.width / frame.width, pane.height / frame.height);
+    const bare = scaleOf(viewBox);
+    const together = placements => GROWTH_COST * Math.max(0, Math.log(bare / scaleOf(frameWith(viewBox, placements, margin))));
+    return { together, alone: (box, pointer) => together([{ box, pointer }]) };
+  }
+
+  // The drawing with its model and callouts in the layers the page pass
+  // builds, and its frame set to `frame`.
+  function layeredMarkup(markup, parts, frame) {
+    const open = /<svg\b[^>]*>/.exec(markup);
+    let head = open[0]
+      .replace(/\swidth="[^"]*"/, ` width="${frame.width}"`)
+      .replace(/\sheight="[^"]*"/, ` height="${frame.height}"`)
+      .replace(/\sviewBox="[^"]*"/, ` viewBox="${frame.x} ${frame.y} ${frame.width} ${frame.height}"`);
+    head = /\sclass="/.test(head) ? head.replace(/\sclass="/, ' class="uml-with-callouts ') : head.replace(/>$/, ' class="uml-with-callouts">');
+    let rest = markup.slice(open.index + open[0].length);
+    const defsEnd = rest.indexOf('</defs>');
+    const modelStart = defsEnd >= 0 ? defsEnd + '</defs>'.length : 0;
+    const close = rest.lastIndexOf('</svg>');
+    rest = rest.slice(0, modelStart) + '<g class="uml-diagram-layers"><g class="uml-model-layer">' +
+      rest.slice(modelStart, close) + '</g><g class="uml-callouts">' + parts.map(markupOf).join('') + '</g></g>' + rest.slice(close);
+    return markup.slice(0, open.index) + head + rest;
+  }
+
+  // The smallest scene node holding the point, or null.
+  function nodeAt(scene, point) {
+    let best = null;
+    (scene.nodes || []).forEach(node => {
+      const holds = point.x >= node.x && point.x <= node.x + node.width && point.y >= node.y && point.y <= node.y + node.height;
+      if (holds && (!best || node.width * node.height < best.width * best.height)) best = node;
+    });
+    return best;
+  }
+
+  /**
+   * Draws teaching callouts into a finished compact drawing, without a DOM,
+   * and records them in the drawing's scene so the compact search judges
+   * the picture the reader will see.
+   *
+   * Placement is the page pass's (`arrange`), against the drawing read from
+   * its markup; the text is set at the diagram's base size (never below the
+   * usual callout size). Each callout box enters the scene as a label of
+   * kind 'callout', owned by the node its target lies in, so the judge
+   * keeps it clear of nodes, labels and routes and the squeeze keeps the
+   * gap it sits in; the scene's size becomes the grown frame.
+   *
+   * @param {string} svg — the drawing's markup, as the renderer produced it
+   * @param {object|null} scene — its UMLLayoutQuality scene (origin = where
+   *   the scene's 0,0 lies in the SVG), or null
+   * @param {Array} callouts — from extract()
+   * @param {{fontSize:number, margin:number, pane?:{width:number, height:number}}} base —
+   *   the diagram's base font, the margin it keeps around what it draws, and
+   *   the pane it is shown in: with a pane, a callout prefers room that does
+   *   not make the drawing smaller there (frameSizing)
+   * @returns {string} the drawing with its callouts
+   */
+  function drawCompact(svg, scene, callouts, base) {
+    if (!callouts || !callouts.length) return svg;
+    const type = compactType(base.fontSize);
+    const typed = callouts.map(callout => ({ ...callout, type }));
+    const model = markupModel(svg);
+    const targets = typed.map(callout => {
+      const target = resolveMarkupTarget(model, callout.target);
+      if (!target) throw new Error('Callout target not found at line ' + callout.line + ': ' + callout.target.value);
+      return target;
+    });
+    const viewBox = viewBoxOf(model.root);
+    const placements = arrange(typed, targets, geometryOf(model.parts), base.pane ? frameSizing(viewBox, base.margin, base.pane) : null);
+    const frame = frameWith(viewBox, placements, base.margin);
+    if (scene) {
+      const origin = scene.origin || { x: 0, y: 0 };
+      placements.forEach(({ box }, index) => {
+        const target = targets[index];
+        const owner = nodeAt(scene, { x: target.x + target.width / 2 - origin.x, y: target.y + target.height / 2 - origin.y });
+        scene.addLabel({ id: 'callout:' + index, kind: 'callout', owner: owner ? owner.id : null,
+          x: box.x - origin.x, y: box.y - origin.y, width: box.width, height: box.height });
+      });
+      scene.noteFont(type.fontSize);
+      scene.setSize(frame.width, frame.height);
+    }
+    return layeredMarkup(svg, placements.map((placement, index) => calloutParts(typed[index], placement)), frame);
+  }
+
+  /**
+   * A compact adapter's `annotate` (UMLCompactLayout.optimize): draws the
+   * callouts into a finished drawing and into a copy of its scene, so the
+   * drawing as the search judged it stays as it was. Null when there are no
+   * callouts, so a diagram without them pays nothing.
+   *
+   * @param {Array|undefined} callouts — from extract()
+   * @param {function(): {fontSize:number, margin:number, pane:object}} baseOf —
+   *   read at each call: a renderer's compact metrics hold only during the
+   *   search (see drawCompact)
+   * @returns {null|function({svg, scene}): {svg, scene}}
+   */
+  function compactAnnotator(callouts, baseOf) {
+    if (!callouts || !callouts.length) return null;
+    return drawing => {
+      const scene = drawing.scene ? window.UMLLayoutQuality.copyScene(drawing.scene) : null;
+      return { svg: drawCompact(drawing.svg, scene, callouts, baseOf()), scene };
+    };
+  }
+
+  window.UMLCallouts = { extract, render, flush, drawCompact, compactAnnotator };
 })();
 
 /**
@@ -705,6 +1501,25 @@
 
   function textWidth(text, bold, fontSize, fontFamily) {
     return textMetrics(text, bold, fontSize, fontFamily).width;
+  }
+
+  // Wide and narrow glyphs, digits and brackets: fonts differ in their widths.
+  var MEASUREMENT_PROBE = 'Hamburgefonstiv WMil 0123456789 {}()<>';
+
+  /**
+   * The widths of a probe text in every font text is measured in (regular,
+   * bold, italic and code), so a result computed from text widths can tell
+   * whether measurement has changed since, e.g. a web font finished loading.
+   * Whoever replaces textWidth (the worker, with widths measured on the
+   * page) must replace this too.
+   */
+  function textMeasurementFingerprint() {
+    return [
+      textWidth(MEASUREMENT_PROBE, false),
+      textWidth(MEASUREMENT_PROBE, true),
+      textMetrics(MEASUREMENT_PROBE, false, null, null, true).width,
+      textWidth(MEASUREMENT_PROBE, false, null, NOTE_CFG.codeFont)
+    ].join(',');
   }
 
   // ─── XML Escaping ───────────────────────────────────────────────
@@ -901,6 +1716,17 @@
     return triangle.rect;
   }
 
+  // `600x700` → {width: 600, height: 700}; anything else (zero, missing or
+  // non-numeric side) → null, so the caller falls back to the container.
+  function parsePaneSize(token) {
+    var match = /^(\d+)x(\d+)$/.exec(token || '');
+    if (!match) return null;
+    var width = parseInt(match[1], 10);
+    var height = parseInt(match[2], 10);
+    if (!(width > 0) || !(height > 0)) return null;
+    return { width: width, height: height };
+  }
+
   function parseLayoutDirective(line) {
     var layoutMatch = line.match(/^layout\s+(.+)$/i);
     if (!layoutMatch) return null;
@@ -911,20 +1737,33 @@
       return {
         direction: null,
         layoutPreference: null,
-        shadowEnabled: shadowMatch[1] === 'on'
+        shadowEnabled: shadowMatch[1] === 'on',
+        pane: null
       };
     }
     if (value === 'horizontal' || value === 'left-to-right' || value === 'lr') {
-      return { direction: 'LR', layoutPreference: null, shadowEnabled: null };
+      return { direction: 'LR', layoutPreference: null, shadowEnabled: null, pane: null };
     }
     if (value === 'vertical' || value === 'top-to-bottom' || value === 'tb') {
-      return { direction: 'TB', layoutPreference: null, shadowEnabled: null };
+      return { direction: 'TB', layoutPreference: null, shadowEnabled: null, pane: null };
+    }
+    // `layout compact <size>`: the size names the pane the drawing is laid
+    // out for. An unusable size keeps compact and leaves the pane unset.
+    var compactSizeMatch = value.match(/^compact\s+(\S+)$/);
+    if (compactSizeMatch) {
+      return {
+        direction: null,
+        layoutPreference: 'compact',
+        shadowEnabled: null,
+        pane: parsePaneSize(compactSizeMatch[1])
+      };
     }
     if (value === 'square' || value === 'landscape' || value === 'portrait' || value === 'compact' || value === 'tight' || value === 'auto' || value === 'default' || value === 'none') {
       return {
         direction: null,
         layoutPreference: (value === 'default' || value === 'none') ? 'auto' : value,
-        shadowEnabled: null
+        shadowEnabled: null,
+        pane: null
       };
     }
     return null;
@@ -957,6 +1796,25 @@
     return String(id || '').trim().replace(/^"((?:[^"\\]|\\.)*)"$/, '$1').replace(/\\"/g, '"');
   }
 
+  // A declaration's identity without what may follow it: a `{…}` body and
+  // `<<stereotypes>>`.
+  function declarationHead(line) {
+    var quoted = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i);
+      if (ch === '"' && line.charAt(i - 1) !== '\\') quoted = !quoted;
+      else if (ch === '{' && !quoted) { line = line.slice(0, i); break; }
+    }
+    return extractStereotypes(line).stripped.trim();
+  }
+
+  // Style suffixes that may follow an alias: `#color`, a texture, `dashed`.
+  function isDeclarationStyleSuffix(text) {
+    return String(text || '').trim().split(/\s+/).every(function(token) {
+      return !token || /^(?:#[0-9A-Za-z]+|hatched|crosshatch|dotted|grid|striped|dashed)$/i.test(token);
+    });
+  }
+
   function inferLayoutTargetId(line) {
     var clean = String(line || '').trim();
     if (!clean) return null;
@@ -970,8 +1828,8 @@
       clean.match(/^actor\s+([^"\s:]+)\s*:/i);
     if (participantMatch) return unquoteLayoutId(participantMatch[1]);
 
-    var aliasMatch = clean.match(/\bas\s+([A-Za-z_][\w.:-]*)\s*(?:\{)?\s*$/i);
-    if (aliasMatch) return aliasMatch[1];
+    var aliasMatch = declarationHead(clean).match(/\bas\s+([A-Za-z_][\w.:-]*)((?:\s+\S+)*)\s*$/i);
+    if (aliasMatch && isDeclarationStyleSuffix(aliasMatch[2])) return aliasMatch[1];
 
     var boxAliasMatch = clean.match(/^box(?:\s+[a-z]+)?\s+"(?:[^"\\]|\\.)*"\s+as\s+(\S+)/i);
     if (boxAliasMatch) return boxAliasMatch[1];
@@ -979,7 +1837,7 @@
     var actorMatch = clean.match(/^actor\s+(\S+)/i);
     if (actorMatch) return unquoteLayoutId(actorMatch[1]);
 
-    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
+    var keywordMatch = clean.match(/^(?:abstract\s+class|class|interface|enum|state|component|node|artifact|database|usecase|entity|relationship|set|card|rectangle|package|namespace)\s+("(?:(?:[^"\\])|\\.)*"|\S+)/i);
     if (keywordMatch) return unquoteLayoutId(keywordMatch[1]);
 
     var bareMatch = clean.match(/^([A-Za-z0-9_.:-]+)(?:\s+merge\s+\S+|\s+"(?:[^"\\]|\\.)*"|\s*)$/);
@@ -2318,6 +3176,69 @@
     return { stripped: stripped.trim(), highlight: highlight, texture: texture };
   }
 
+  // ─── Stereotypes ──────────────────────────────────────────────
+  //
+  // A declaration may apply several stereotypes, as one list
+  // (`<<Service, External>>`) or as separate groups
+  // (`<<Service>> <<External>>`). UML 2.5.1 (12.3.4) shows them as one
+  // comma-separated list within a single pair of guillemets, spelled as the
+  // author wrote them. Names match case-insensitively, so a repeat is shown
+  // once.
+
+  function appendStereotypeNames(names, list) {
+    var parts = String(list || '').split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var name = parts[i].trim();
+      if (!name) continue;
+      var lower = name.toLowerCase();
+      var seen = false;
+      for (var j = 0; j < names.length; j++) {
+        if (names[j].toLowerCase() === lower) { seen = true; break; }
+      }
+      if (!seen) names.push(name);
+    }
+  }
+
+  // Remove every `<<…>>` group outside quoted text. Returns the remaining
+  // text, unchanged when it has no group, and the joined list (or null).
+  function extractStereotypes(text) {
+    var source = String(text || '');
+    if (source.indexOf('<<') === -1) return { stripped: source, stereotype: null };
+    var names = [];
+    var kept = '';
+    var quoted = false;
+    for (var i = 0; i < source.length; i++) {
+      var ch = source.charAt(i);
+      if (ch === '"' && source.charAt(i - 1) !== '\\') quoted = !quoted;
+      var close = !quoted && ch === '<' && source.charAt(i + 1) === '<' ? source.indexOf('>>', i + 2) : -1;
+      if (close === -1) {
+        kept += ch;
+        continue;
+      }
+      appendStereotypeNames(names, source.slice(i + 2, close));
+      // Close the gap the group leaves: `A <<s>> {` becomes `A {`.
+      kept = kept.replace(/\s+$/, '');
+      i = close + 1;
+      while (i + 1 < source.length && /\s/.test(source.charAt(i + 1))) i++;
+      if (kept && i + 1 < source.length && source.charAt(i + 1) !== '<') kept += ' ';
+    }
+    return { stripped: kept, stereotype: names.length ? names.join(', ') : null };
+  }
+
+  function stereotypeDisplayText(stereotype) {
+    return stereotype ? '«' + stereotype + '»' : '';
+  }
+
+  // Show `<<x>>` in free text, such as a connector label, the way a
+  // declaration shows it: adjacent groups merge into one «…» pair.
+  function formatStereotypeLabels(text) {
+    return String(text || '').replace(/<<[^<>]*>>(?:\s*<<[^<>]*>>)*/g, function(run) {
+      var names = [];
+      run.replace(/<<([^<>]*)>>/g, function(_, list) { appendStereotypeNames(names, list); return ''; });
+      return stereotypeDisplayText(names.join(', '));
+    });
+  }
+
   function _expandHex(h) {
     if (h.length === 3) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
     if (h.length === 4) return h[0] + h[0] + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
@@ -2420,6 +3341,598 @@
 
   function svgClose() {
     return '</g></svg>';
+  }
+
+  // ─── UML Packages ─────────────────────────────────────────────
+  //
+  // A package that shows its members inside is a large rectangle with a
+  // small tab on the left of its top edge; the tab holds the name, with an
+  // optional «stereotype» above it (UML 2.5.1, 12.2.4). Diagram parsers
+  // collect `package` blocks with createPackageScope; renderers draw them
+  // behind everything with layoutPackageFrames and drawPackageFrames after
+  // manual positions are applied, so a package follows its members' @pos.
+  // Packages are not routing obstacles: connectors cross their outlines.
+
+  // Split the text after a block's `{` at top-level `;`, stopping at the
+  // brace that closes the block. Quoted text and nested blocks stay whole.
+  function splitInlineBlockBody(text) {
+    var statements = [], start = 0, depth = 0, quoted = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (ch === '"' && text.charAt(i - 1) !== '\\') quoted = !quoted;
+      if (quoted) continue;
+      if (ch === '{') depth++;
+      else if (ch === '}' && depth > 0) depth--;
+      else if (ch === '}' || (ch === ';' && depth === 0)) {
+        statements.push(text.slice(start, i).trim());
+        if (ch === '}') {
+          return { statements: statements.filter(Boolean), closed: true, rest: text.slice(i + 1).trim() };
+        }
+        start = i + 1;
+      }
+    }
+    statements.push(text.slice(start).trim());
+    return { statements: statements.filter(Boolean), closed: false, rest: '' };
+  }
+
+  // `package Name {`, `package "Display Name" as Id {`, either followed by
+  // stereotypes, or a one-line block `package Name { … }`. A name may be
+  // qualified (`opc::partners`) and is shown as written. Returns null for
+  // any other line.
+  function parsePackageOpener(line) {
+    var m = String(line || '').match(/^package\s+(?:"((?:[^"\\]|\\.)*)"|([^\s{"]+))(?:\s+as\s+([^\s{"]+))?([^{]*)\{(.*)$/i);
+    if (!m) return null;
+    var label = m[1] !== undefined ? m[1].replace(/\\(["\\])/g, '$1') : m[2];
+    var body = splitInlineBlockBody(m[5]);
+    return {
+      id: m[3] || label,
+      label: label,
+      stereotype: extractStereotypes(m[4]).stereotype,
+      // Statements written on the opening line, to be read as the
+      // block's first lines; `closed` when that line also ends the block.
+      inlineLines: body.statements.concat(body.closed ? ['}'] : [], body.rest ? [body.rest] : [])
+    };
+  }
+
+  // The blocks open at a point in a source: packages, and other wrappers
+  // whose closing braces must not close a package. Each element is a member
+  // of the innermost package it is declared in; the first one wins.
+  function createPackageScope() {
+    var packages = [];
+    var byId = createStringMap();
+    var stack = [];
+    function current() {
+      for (var i = stack.length - 1; i >= 0; i--) if (stack[i]) return stack[i];
+      return null;
+    }
+    return {
+      packages: packages,
+      openPackage: function(opener) {
+        var pkg = byId[opener.id];
+        if (!pkg) {
+          var parent = current();
+          pkg = { id: opener.id, label: opener.label, stereotype: opener.stereotype, parent: parent ? parent.id : null, members: [] };
+          byId[opener.id] = pkg;
+          packages.push(pkg);
+        } else if (opener.stereotype && !pkg.stereotype) {
+          pkg.stereotype = opener.stereotype;
+        }
+        stack.push(pkg);
+      },
+      openWrapper: function() { stack.push(null); },
+      close: function() { stack.pop(); },
+      currentPackageId: function() {
+        var pkg = current();
+        return pkg ? pkg.id : null;
+      },
+      declare: function(element, id) {
+        var pkg = current();
+        if (!pkg || element.package) return;
+        element.package = pkg.id;
+        if (pkg.members.indexOf(id) === -1) pkg.members.push(id);
+      }
+    };
+  }
+
+  function unionExtent(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    var x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x: x, y: y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+  }
+
+  // The room a package frame takes around what it encloses: its body keeps
+  // `padX`/`padY` from its members; the name tab stands above the body.
+  var PACKAGE_FRAME = { padX: 18, padY: 18, tabPadX: 10, tabPadY: 3, tabMinW: 56, bodyBeyondTab: 24 };
+
+  // The height of a package's name tab: one line for the name, one more
+  // for a stereotype.
+  function packageTabHeight(pkg, style) {
+    return (pkg.stereotype ? 2 : 1) * style.lineHeight + PACKAGE_FRAME.tabPadY * 2;
+  }
+
+  // The lines in a package's tab: any stereotype, then the bold name.
+  function packageTabLines(pkg, style) {
+    var lines = [];
+    if (pkg.stereotype) lines.push({ text: stereotypeDisplayText(pkg.stereotype), bold: false, fontSize: style.fontSizeStereotype });
+    lines.push({ text: pkg.label, bold: true, fontSize: style.fontSizeBold });
+    return lines;
+  }
+
+  // The width of a tab holding `lines`.
+  function packageTabWidth(lines, style) {
+    var textW = 0;
+    lines.forEach(function(line) { textW = Math.max(textW, textWidth(line.text, line.bold, line.fontSize, style.fontFamily)); });
+    return Math.max(PACKAGE_FRAME.tabMinW, Math.ceil(textW + PACKAGE_FRAME.tabPadX * 2));
+  }
+
+  // Frames for the packages that have drawn members, outermost first.
+  // `elementExtent(id)` returns the area an element occupies, or null;
+  // `elementIds` lists every drawn element. The layout does not group a
+  // package's members, so it can place another element inside a package:
+  // each frame lists such elements in `overlaps` for authors to move with
+  // @pos. `style` carries the renderer's typography: fontFamily,
+  // fontSizeBold, fontSizeStereotype, and lineHeight.
+  function layoutPackageFrames(packages, elementExtent, elementIds, style) {
+    var padX = PACKAGE_FRAME.padX, padY = PACKAGE_FRAME.padY;
+    var tabPadY = PACKAGE_FRAME.tabPadY, bodyBeyondTab = PACKAGE_FRAME.bodyBeyondTab;
+    var children = createStringMap();
+    packages.forEach(function(pkg) {
+      if (pkg.parent) (children[pkg.parent] = children[pkg.parent] || []).push(pkg);
+    });
+    var frames = [];
+
+    function containedElements(pkg) {
+      var ids = pkg.members.slice();
+      (children[pkg.id] || []).forEach(function(child) { ids = ids.concat(containedElements(child)); });
+      return ids;
+    }
+
+    function overlappingNonMembers(pkg, outer) {
+      var contained = containedElements(pkg);
+      return elementIds.filter(function(id) {
+        if (contained.indexOf(id) !== -1) return false;
+        var extent = elementExtent(id);
+        return !!extent && extent.x < outer.x + outer.width && outer.x < extent.x + extent.width &&
+          extent.y < outer.y + outer.height && outer.y < extent.y + extent.height;
+      });
+    }
+
+    function layoutPackage(pkg, depth) {
+      var extent = null;
+      pkg.members.forEach(function(id) { extent = unionExtent(extent, elementExtent(id)); });
+      (children[pkg.id] || []).forEach(function(child) {
+        var childFrame = layoutPackage(child, depth + 1);
+        if (childFrame) extent = unionExtent(extent, childFrame.outer);
+      });
+      if (!extent) return null;
+
+      var lines = packageTabLines(pkg, style);
+      var tabW = packageTabWidth(lines, style);
+      var tabH = packageTabHeight(pkg, style);
+      var body = {
+        x: extent.x - padX,
+        y: extent.y - padY,
+        width: Math.max(extent.width + padX * 2, tabW + bodyBeyondTab),
+        height: extent.height + padY * 2
+      };
+      var tab = { x: body.x, y: body.y - tabH, width: tabW, height: tabH };
+      lines.forEach(function(line, i) {
+        line.x = tab.x + tabW / 2;
+        line.y = tab.y + tabPadY + (i + 0.5) * style.lineHeight + line.fontSize * 0.35;
+      });
+      var outer = unionExtent(body, tab);
+      var frame = {
+        id: pkg.id, label: pkg.label, stereotype: pkg.stereotype, parent: pkg.parent, depth: depth,
+        body: body, tab: tab, outer: outer, lines: lines,
+        overlaps: overlappingNonMembers(pkg, outer)
+      };
+      frames.push(frame);
+      return frame;
+    }
+
+    packages.forEach(function(pkg) { if (!pkg.parent) layoutPackage(pkg, 0); });
+    return frames.sort(function(a, b) { return a.depth - b.depth; });
+  }
+
+  // ─── Packages in compact drawings ───
+  //
+  // A compact drawing is judged from its UMLLayoutQuality scene, so its
+  // packages are recorded there: the body as a container of its members
+  // (an element inside a package it does not belong to overlaps it), the
+  // tab as part of the package, and the names in the tab as labels. Lines
+  // may cross all three (packages are not routing obstacles).
+
+  // The scene id of a package; members name it as their parent.
+  function packageSceneId(id) {
+    return id == null ? null : 'package:' + id;
+  }
+
+  function recordPackageFrames(scene, frames) {
+    frames.forEach(function(frame) {
+      var id = packageSceneId(frame.id), tabId = 'package-tab:' + frame.id;
+      scene.addNode({ id: id, kind: 'package', container: true, crossable: true, parent: packageSceneId(frame.parent),
+        x: frame.body.x, y: frame.body.y, width: frame.body.width, height: frame.body.height });
+      scene.addNode({ id: tabId, kind: 'package-tab', crossable: true, parent: id,
+        x: frame.tab.x, y: frame.tab.y, width: frame.tab.width, height: frame.tab.height });
+      // The inked band of each line: cap height above the baseline and
+      // descenders below it (the two lines of a tab sit a line apart). A
+      // line crossing the tab passes under the name's halo, as under a
+      // label on its own line (drawPackageNames), so it may cross the name.
+      frame.lines.forEach(function(line, i) {
+        var width = textWidth(line.text, line.bold, line.fontSize);
+        scene.addLabel({ id: 'package-name:' + frame.id + ':' + i, owner: tabId, kind: 'package-name', onRoute: true,
+          x: line.x - width / 2, y: line.y - line.fontSize * 0.8, width: width, height: line.fontSize * 1.05 });
+        scene.noteFont(line.fontSize);
+      });
+    });
+  }
+
+  // The innermost of `frames` whose body holds `rect` ({x, y, width,
+  // height}) and that `allowed(frameId)` accepts; null when none does.
+  function packageHolding(frames, rect, allowed) {
+    var found = null;
+    frames.forEach(function(frame) {
+      var b = frame.body;
+      if (!allowed(frame.id)) return;
+      if (rect.x < b.x || rect.y < b.y || rect.x + rect.width > b.x + b.width || rect.y + rect.height > b.y + b.height) return;
+      if (!found || frame.depth > found.depth) found = frame;
+    });
+    return found ? found.id : null;
+  }
+
+  // The packages an element is in, innermost first. `packageOf(id)` names
+  // the package an element is declared in, or null.
+  function packageChain(packages, packageOf, id) {
+    var byId = createStringMap();
+    packages.forEach(function(pkg) { byId[pkg.id] = pkg; });
+    var chain = [];
+    for (var pkg = byId[packageOf(id)]; pkg && chain.indexOf(pkg) === -1; pkg = byId[pkg.parent]) chain.push(pkg);
+    return chain;
+  }
+
+  // Whether package `outerId` is package `innerId` or encloses it.
+  function packageEncloses(packages, outerId, innerId) {
+    return packageChain(packages || [], function() { return innerId; }, null).some(function(pkg) { return pkg.id === outerId; });
+  }
+
+  // For the compact squeeze (UMLCompactLayout's `separation`): the extra gap
+  // two elements keep on an axis for the frames between them, `a` before
+  // `b` on it. Each package one of them is in and the other is not puts its
+  // padding on that element's side; on the vertical axis a package of the
+  // later element also puts its tab between them.
+  function packageSeparation(packages, packageOf, style) {
+    if (!packages || !packages.length) return null;
+    var chains = createStringMap();
+    function chainOf(id) {
+      if (!chains[id]) chains[id] = packageChain(packages, packageOf, id);
+      return chains[id];
+    }
+    return function(aId, bId, axisStart) {
+      var a = chainOf(aId), b = chainOf(bId);
+      var onlyA = a.filter(function(pkg) { return b.indexOf(pkg) === -1; });
+      var onlyB = b.filter(function(pkg) { return a.indexOf(pkg) === -1; });
+      if (axisStart === 'x') return (onlyA.length + onlyB.length) * PACKAGE_FRAME.padX;
+      return onlyA.length * PACKAGE_FRAME.padY + onlyB.reduce(function(sum, pkg) {
+        return sum + PACKAGE_FRAME.padY + packageTabHeight(pkg, style);
+      }, 0);
+    };
+  }
+
+  // ─── Placements that keep packages together (compact layout) ───
+  //
+  // The layered engine places elements without regard to packages, so it
+  // can put an element inside a package it is not in, or two packages on
+  // each other. No widening of the gaps undoes that, since widening keeps
+  // the order of the boxes. A compact search therefore recognizes such a
+  // placement from its boxes and lays the same engine input out again with
+  // every package as one block.
+
+  // Whether the frames drawn around `boxes` ({id: {x, y, width, height}})
+  // would hold an element that is not in them, or overlap without one
+  // enclosing the other. Frames only grow once lines and labels are drawn,
+  // so a placement this rejects cannot be drawn without that overlap.
+  function packagesCollide(packages, boxes, style) {
+    if (!packages || !packages.length) return false;
+    var frames = layoutPackageFrames(packages, function(id) { return boxes[id] || null; }, Object.keys(boxes), style);
+    if (frames.some(function(frame) { return frame.overlaps.length > 0; })) return true;
+    return frames.some(function(a, i) {
+      return frames.slice(i + 1).some(function(b) {
+        if (packageEncloses(packages, a.id, b.id) || packageEncloses(packages, b.id, a.id)) return false;
+        var p = a.outer, q = b.outer;
+        return p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height;
+      });
+    });
+  }
+
+  // The first thing the frames drawn around `boxes` clash with, as the two
+  // rectangles involved: a frame over an element it does not hold, or two
+  // frames on each other, neither enclosing the other. Null when none.
+  function firstPackageClash(packages, boxes, style) {
+    var ids = Object.keys(boxes);
+    var frames = layoutPackageFrames(packages, function(id) { return boxes[id] || null; }, ids, style);
+    for (var i = 0; i < frames.length; i++) {
+      if (frames[i].overlaps.length) return [frames[i].outer, boxes[frames[i].overlaps[0]]];
+    }
+    for (var a = 0; a < frames.length; a++) {
+      for (var b = a + 1; b < frames.length; b++) {
+        if (packageEncloses(packages, frames[a].id, frames[b].id) || packageEncloses(packages, frames[b].id, frames[a].id)) continue;
+        var p = frames[a].outer, q = frames[b].outer;
+        if (p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height) return [p, q];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The top-left positions of `boxes` ({id: {x, y, width, height}}) with
+   * their package frames moved off each other and off the elements they do
+   * not hold, `gap` apart; null when nothing clashes, or when moving apart
+   * cannot end the clashes. Each clash is undone on the axis where the two
+   * overlap least: every element from where the later of the two starts
+   * moves on by the overlap and `gap`. The elements keep their order on
+   * both axes, and elements on the same side of each cut keep their
+   * offsets, so straight edges stay straight. An element lying between a
+   * package's members on both axes is not moved out by this (that takes a
+   * new order), and the clashes then remain.
+   */
+  function separatedPackagePositions(packages, boxes, style, gap) {
+    if (!packages || !packages.length) return null;
+    var ids = Object.keys(boxes);
+    var placed = createStringMap();
+    ids.forEach(function(id) {
+      placed[id] = { x: boxes[id].x, y: boxes[id].y, width: boxes[id].width, height: boxes[id].height };
+    });
+    // Each cut moves at least one element on for good, so a placement that
+    // can be separated is within a few cuts per element.
+    var maxCuts = 2 * (ids.length + packages.length);
+    for (var cut = 0; cut <= maxCuts; cut++) {
+      var clash = firstPackageClash(packages, placed, style);
+      if (!clash) {
+        if (!cut) return null;
+        var positions = createStringMap();
+        ids.forEach(function(id) { positions[id] = { x: placed[id].x, y: placed[id].y }; });
+        return positions;
+      }
+      var p = clash[0], q = clash[1];
+      var overlapX = Math.min(p.x + p.width, q.x + q.width) - Math.max(p.x, q.x);
+      var overlapY = Math.min(p.y + p.height, q.y + q.height) - Math.max(p.y, q.y);
+      var axis = overlapX < overlapY ? 'x' : 'y', size = axis === 'x' ? 'width' : 'height';
+      var later = p[axis] + p[size] / 2 <= q[axis] + q[size] / 2 ? q : p;
+      var by = Math.min(overlapX, overlapY) + gap;
+      ids.forEach(function(id) {
+        if (placed[id][axis] >= later[axis] - 1e-9) placed[id][axis] += by;
+      });
+    }
+    return null;
+  }
+
+  /**
+   * Top-left positions of `nodes` ({id, width, height}) with every
+   * package's members kept together, or null when no package holds a node.
+   * Each package is laid out on its own, its direct members and inner
+   * packages as one level; padded and with its tab it becomes one node of
+   * the level around it. `layout(levelNodes, lift, depth)` is the
+   * renderer's call into the layered engine for the level `depth` packages
+   * deep (0 for the whole drawing) and returns {nodes: {id: {x, y}}}; `lift(records)`
+   * gives the records ({source, target, ...}, such as edges or edge sizes)
+   * that join two different nodes of that level, as copies naming those
+   * nodes (an end inside an inner package names the package's node).
+   * `packageOf(id)` names the package a node is declared in; `edges`
+   * ({source, target}) join the nodes; `style` is the renderer's
+   * typography, as for layoutPackageFrames. With `anchored`, each level
+   * inside a package also holds two anchor nodes, standing for the outside
+   * its edges come from and go to, which `lift` names as those ends.
+   */
+  var PACKAGE_ANCHORS = { source: '\u0000package-anchor:in', target: '\u0000package-anchor:out' };
+
+  function packageGroupedPositions(packages, packageOf, nodes, edges, layout, style, anchored) {
+    if (!packages || !packages.length) return null;
+    // Each node's packages, outermost first.
+    var chains = createStringMap();
+    var inPackage = false;
+    nodes.forEach(function(node) {
+      chains[node.id] = packageChain(packages, packageOf, node.id).reverse();
+      if (chains[node.id].length) inPackage = true;
+    });
+    if (!inPackage) return null;
+
+    // The node of level `depth` (below the package chain[depth - 1]) that
+    // holds `id`: an inner package's block, else the node itself.
+    function levelNode(id, depth) {
+      var chain = chains[id];
+      return depth < chain.length ? packageSceneId(chain[depth].id) : id;
+    }
+    function inLevel(id, levelId, depth) {
+      return !!chains[id] && (depth === 0 || (chains[id][depth - 1] && chains[id][depth - 1].id === levelId));
+    }
+
+    // Positions of the nodes at or below a level, relative to the level's
+    // top-left corner, and the level's size.
+    function placeLevel(levelId, depth) {
+      var items = [], blocks = createStringMap(), anchors = createStringMap();
+      nodes.forEach(function(node) {
+        if (!inLevel(node.id, levelId, depth)) return;
+        var id = levelNode(node.id, depth);
+        if (id === node.id) { items.push({ id: id, width: node.width, height: node.height, data: node.data }); return; }
+        if (blocks[id]) return;
+        blocks[id] = packageBlock(chains[node.id][depth], depth + 1);
+        items.push({ id: id, width: blocks[id].width, height: blocks[id].height });
+      });
+      // Inside a package, with `anchored`, what lies outside it is one
+      // node before the level (where edges come from) and one after it
+      // (where edges go), so members joined to the outside face that way.
+      function outside(id, end) {
+        return anchored && depth > 0 && chains[id] && !inLevel(id, levelId, depth) ? PACKAGE_ANCHORS[end] : null;
+      }
+      function levelEnd(id, end) {
+        if (inLevel(id, levelId, depth)) return levelNode(id, depth);
+        var anchor = outside(id, end);
+        return anchor && anchors[anchor] ? anchor : null;
+      }
+      (edges || []).forEach(function(edge) {
+        [['source', 'target'], ['target', 'source']].forEach(function(ends) {
+          var anchor = inLevel(edge[ends[1]], levelId, depth) ? outside(edge[ends[0]], ends[0]) : null;
+          if (anchor && !anchors[anchor]) {
+            anchors[anchor] = true;
+            items.push({ id: anchor, width: 1, height: 1, anchor: true });
+          }
+        });
+      });
+      function lift(records) {
+        return (records || []).reduce(function(lifted, record) {
+          var source = levelEnd(record.source, 'source'), target = levelEnd(record.target, 'target');
+          if (!source || !target || source === target || (anchors[source] && anchors[target])) return lifted;
+          // (both ends outside: that edge belongs to an outer level)
+          var copy = {};
+          for (var key in record) if (Object.prototype.hasOwnProperty.call(record, key)) copy[key] = record[key];
+          copy.source = source;
+          copy.target = target;
+          lifted.push(copy);
+          return lifted;
+        }, []);
+      }
+      var placed = items.length > 1 ? layout(items, lift, depth).nodes : createStringMap();
+      items = items.filter(function(item) { return !item.anchor; });
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      items.forEach(function(item) {
+        var at = placed[item.id] || { x: 0, y: 0 };
+        item.x = at.x; item.y = at.y;
+        minX = Math.min(minX, item.x); minY = Math.min(minY, item.y);
+        maxX = Math.max(maxX, item.x + item.width); maxY = Math.max(maxY, item.y + item.height);
+      });
+      var positions = createStringMap();
+      items.forEach(function(item) {
+        var x = item.x - minX, y = item.y - minY;
+        if (!blocks[item.id]) { positions[item.id] = { x: x, y: y }; return; }
+        var inner = blocks[item.id].positions;
+        Object.keys(inner).forEach(function(id) {
+          positions[id] = { x: x + inner[id].x, y: y + inner[id].y };
+        });
+      });
+      return { positions: positions, width: maxX - minX, height: maxY - minY };
+    }
+
+    // A package as one node: its contents inside the padding, below the tab,
+    // as layoutPackageFrames will frame them.
+    function packageBlock(pkg, depth) {
+      var content = placeLevel(pkg.id, depth);
+      var tabW = packageTabWidth(packageTabLines(pkg, style), style);
+      var tabH = packageTabHeight(pkg, style);
+      var positions = createStringMap();
+      Object.keys(content.positions).forEach(function(id) {
+        positions[id] = { x: content.positions[id].x + PACKAGE_FRAME.padX, y: content.positions[id].y + tabH + PACKAGE_FRAME.padY };
+      });
+      return {
+        positions: positions,
+        width: Math.max(content.width + PACKAGE_FRAME.padX * 2, tabW + PACKAGE_FRAME.bodyBeyondTab),
+        height: content.height + PACKAGE_FRAME.padY * 2 + tabH
+      };
+    }
+
+    return placeLevel(null, 0).positions;
+  }
+
+  function samePositionMaps(a, b) {
+    return Object.keys(a).every(function(id) { return b[id] && a[id].x === b[id].x && a[id].y === b[id].y; });
+  }
+
+  /**
+   * The layered engine's input `input` ({nodes, edges, options}, as a
+   * renderer gave it to UMLAdvancedLayout.compute) placed with each package
+   * as one block (packageGroupedPositions), every level in the direction
+   * `direction` the engine took for the whole drawing, once with anchors
+   * to the outside (so members face the edges that leave their package)
+   * and once without; unless the options lock the direction (an
+   * inheritance hierarchy reads top to bottom), also with the levels inside
+   * packages turned across it, alternating with depth, so a chain of
+   * packages can stack its members across the chain. Returns the distinct
+   * position maps (none when no package holds a node).
+   */
+  function packageBlockPlacements(input, direction, packages, packageOf, style) {
+    var along = direction || input.options.direction;
+    var across = along === 'LR' || along === 'RL' ? 'TB' : 'LR';
+    // Aligned levels with and without anchors to the outside; turned ones
+    // without (their flow runs across the outside's).
+    var variants = [{ turned: false, anchored: true }, { turned: false, anchored: false }];
+    if (!input.options.directionLocked) variants.push({ turned: true, anchored: false });
+    var placements = [];
+    variants.forEach(function(variant) {
+      var turned = variant.turned;
+      var positions = packageGroupedPositions(packages, packageOf, input.nodes, input.edges, function(nodes, lift, depth) {
+        var options = Object.assign({}, input.options, { edgeSizes: lift(input.options.edgeSizes) });
+        if (!input.options.directionLocked) {
+          options.direction = turned && depth % 2 === 1 ? across : along;
+          options.directionLocked = true;
+        }
+        return window.UMLAdvancedLayout.compute(nodes, lift(input.edges), options);
+      }, style, variant.anchored);
+      if (positions && !placements.some(function(other) { return samePositionMaps(other, positions); })) placements.push(positions);
+    });
+    return placements;
+  }
+
+  // The package shapes, to be drawn first so everything else paints over
+  // them.
+  function drawPackageFrames(svg, frames, colors) {
+    frames.forEach(function(frame) {
+      var outline = ' data-callout-frame="true" data-layout-route-decorative="true" stroke="' + colors.secondaryLine + '" stroke-width="1.2"';
+      var overlaps = frame.overlaps && frame.overlaps.length
+        ? ' data-package-overlaps="' + escapeXml(frame.overlaps.join(' ')) + '"' : '';
+      svg.push('<g class="uml-package" data-uml-package="' + escapeXml(frame.id) + '"' + overlaps + ' pointer-events="none">');
+      svg.push('<rect data-package-part="tab"' + outline + ' x="' + frame.tab.x + '" y="' + frame.tab.y +
+        '" width="' + frame.tab.width + '" height="' + frame.tab.height + '" fill="' + colors.fill + '"/>');
+      svg.push('<rect data-package-part="body"' + outline + ' x="' + frame.body.x + '" y="' + frame.body.y +
+        '" width="' + frame.body.width + '" height="' + frame.body.height + '" fill="none"/>');
+      svg.push('</g>');
+    });
+  }
+
+  // The names in the tabs, to be drawn after connectors: a line that
+  // crosses a tab passes under the name's halo, as under a connector label.
+  function drawPackageNames(svg, frames, colors) {
+    frames.forEach(function(frame) {
+      svg.push('<g class="uml-package-name" data-uml-package-name="' + escapeXml(frame.id) + '" pointer-events="none">');
+      frame.lines.forEach(function(line) {
+        svg.push('<text x="' + line.x + '" y="' + line.y + '" text-anchor="middle" font-size="' + line.fontSize + '"' +
+          (line.bold ? ' font-weight="bold"' : '') + ' fill="' + colors.text + '" stroke="' + colors.fill +
+          '" stroke-width="4" stroke-linejoin="round" paint-order="stroke">' + escapeXml(line.text) + '</text>');
+      });
+      svg.push('</g>');
+    });
+  }
+
+  // Give drawn packages new frames from layoutPackageFrames, in place: the
+  // tab and body, the names in the tab, and the non-members each overlaps.
+  function updatePackageFrames(svgEl, frames) {
+    function drawnPart(selector, attribute, id) {
+      var parts = svgEl.querySelectorAll(selector);
+      for (var i = 0; i < parts.length; i++) if (parts[i].getAttribute(attribute) === id) return parts[i];
+      return null;
+    }
+    function setRect(el, rect) {
+      if (!el) return;
+      el.setAttribute('x', rect.x);
+      el.setAttribute('y', rect.y);
+      el.setAttribute('width', rect.width);
+      el.setAttribute('height', rect.height);
+    }
+    frames.forEach(function(frame) {
+      var shape = drawnPart('g[data-uml-package]', 'data-uml-package', frame.id);
+      if (shape) {
+        setRect(shape.querySelector('[data-package-part="tab"]'), frame.tab);
+        setRect(shape.querySelector('[data-package-part="body"]'), frame.body);
+        if (frame.overlaps.length) shape.setAttribute('data-package-overlaps', frame.overlaps.join(' '));
+        else shape.removeAttribute('data-package-overlaps');
+      }
+      var name = drawnPart('g[data-uml-package-name]', 'data-uml-package-name', frame.id);
+      var texts = name ? name.querySelectorAll('text') : [];
+      frame.lines.forEach(function(line, i) {
+        if (!texts[i]) return;
+        texts[i].setAttribute('x', line.x);
+        texts[i].setAttribute('y', line.y);
+      });
+    });
   }
 
   function expandBounds(bounds, node, svg) {
@@ -2628,6 +4141,14 @@
     c4: 'uml-c4-diagram-container'
   };
 
+  // A drawing compact layout could not make overlap-free says so on its
+  // root: data-uml-layout-issues holds the count (none when 0).
+  function markLayoutIssues(container, issues) {
+    if (!(issues > 0)) return;
+    var svgEl = container.querySelector && container.querySelector('svg');
+    if (svgEl) svgEl.setAttribute('data-uml-layout-issues', String(issues));
+  }
+
   function prepareDiagramContainer(container, type) {
     if (!container) return '';
     var targetClass = DIAGRAM_CONTAINER_CLASSES[type] || DIAGRAM_CONTAINER_CLASSES.class;
@@ -2742,6 +4263,16 @@
     };
   }
 
+  // The diagram each figure container was drawn from. A page script that
+  // loads after a figure was drawn (a text-alternative describer, say) reads
+  // it through UMLShared.figureSource, because drawing replaces the source.
+  var figureSources = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+  function figureSource(container) {
+    var source = figureSources && container ? figureSources.get(container) : null;
+    return source ? { type: source.type, text: source.text } : null;
+  }
+
   function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
     const attributeCaption = (explicitCaption || '').trim();
@@ -2760,6 +4291,7 @@
     container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
+    if (figureSources) figureSources.set(container, { type: normalized, text: captionInfo.source });
     figure.appendChild(container);
 
     var figcaption = document.createElement('figcaption');
@@ -3356,8 +4888,9 @@
    * @returns {number} new lineIdx (advanced past multi-line block), or -1 if not a note
    */
   function parseNoteLine(line, allLines, lineIdx, notesArray) {
-    // Single-line: note left of Foo: text here
-    var single = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?(\S+)\s*:\s*(.+)$/i);
+    // Single-line: note left of Foo: text here. The target may be a
+    // qualified name (`infra::http`): only a single colon starts the text.
+    var single = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?((?:[^\s:]|::)+)\s*:(?!:)\s*(.+)$/i);
     if (single) {
       notesArray.push({
         id: 'note:' + lineIdx,
@@ -4790,8 +6323,22 @@
     return adjusted;
   }
 
+  // Ascending, as Array#sort with an (a - b) comparator orders them. A typed
+  // array sorts several times faster and in the same order, except for NaN,
+  // which the comparator leaves unordered, and -0, which it keeps in input
+  // order beside 0; values with either keep the comparator.
+  function sortedNumbers(values) {
+    for (var i = 0; i < values.length; i++) {
+      var value = values[i];
+      if (value !== value || (value === 0 && 1 / value < 0)) {
+        return values.slice().sort(function(a, b) { return a - b; });
+      }
+    }
+    return new Float64Array(values).sort();
+  }
+
   function uniqueSortedNumbers(values, requiredValues) {
-    var sorted = values.slice().sort(function(a, b) { return a - b; });
+    var sorted = sortedNumbers(values);
     var out = [];
     for (var i = 0; i < sorted.length; i++) {
       var value = sorted[i];
@@ -4803,7 +6350,7 @@
     for (const required of requiredValues) {
       if (out.indexOf(required) < 0) out.push(required);
     }
-    return out.sort(function(a, b) { return a - b; });
+    return Array.prototype.slice.call(sortedNumbers(out));
   }
 
   function findCoordinateIndex(coords, value) {
@@ -4821,61 +6368,83 @@
     return false;
   }
 
-  function createPriorityQueue() {
-    var heap = [];
+  /**
+   * A binary min-heap of grid search states (integers) by priority f, held in
+   * typed arrays so a search allocates nothing per state. Which of two
+   * equal-priority states pops first decides between equally short routes,
+   * so the sift rules are fixed: a parent stays above an equal child, and
+   * sifting down moves to the left child on a tie. Sifting carries the
+   * moving entry in a hole instead of swapping, which ends in the same
+   * arrangement with fewer writes.
+   */
+  function createStateQueue() {
+    var priority = new Float64Array(64);
+    var state = new Int32Array(64);
+    var size = 0;
 
-    function swap(i, j) {
-      var temp = heap[i];
-      heap[i] = heap[j];
-      heap[j] = temp;
+    function grow() {
+      var morePriority = new Float64Array(priority.length * 2);
+      var moreState = new Int32Array(state.length * 2);
+      morePriority.set(priority);
+      moreState.set(state);
+      priority = morePriority;
+      state = moreState;
     }
 
-    function bubbleUp(index) {
+    function moveTo(index, from) {
+      priority[index] = priority[from];
+      state[index] = state[from];
+    }
+
+    function bubbleUp(index, f, s) {
       while (index > 0) {
-        var parent = Math.floor((index - 1) / 2);
-        if (heap[parent].f <= heap[index].f) break;
-        swap(parent, index);
+        var parent = (index - 1) >> 1;
+        if (priority[parent] <= f) break;
+        moveTo(index, parent);
         index = parent;
       }
+      priority[index] = f;
+      state[index] = s;
     }
 
-    function bubbleDown(index) {
+    function bubbleDown(index, f, s) {
       while (true) {
         var left = index * 2 + 1;
         var right = left + 1;
-        var smallest = index;
-        if (left < heap.length && heap[left].f < heap[smallest].f) smallest = left;
-        if (right < heap.length && heap[right].f < heap[smallest].f) smallest = right;
+        var smallest = index, smallestF = f;
+        if (left < size && priority[left] < smallestF) { smallest = left; smallestF = priority[left]; }
+        if (right < size && priority[right] < smallestF) smallest = right;
         if (smallest === index) break;
-        swap(index, smallest);
+        moveTo(index, smallest);
         index = smallest;
       }
+      priority[index] = f;
+      state[index] = s;
     }
 
     return {
-      push: function(item) {
-        heap.push(item);
-        bubbleUp(heap.length - 1);
-      },
-      pop: function() {
-        if (!heap.length) return null;
-        var first = heap[0];
-        var last = heap.pop();
-        if (heap.length) {
-          heap[0] = last;
-          bubbleDown(0);
-        }
-        return first;
+      push: function(s, f) {
+        if (size === state.length) grow();
+        bubbleUp(size++, f, s);
       },
       isEmpty: function() {
-        return heap.length === 0;
+        return size === 0;
+      },
+      // The priority of the state pop() returns next.
+      peekPriority: function() {
+        return priority[0];
+      },
+      pop: function() {
+        var first = state[0];
+        size--;
+        if (size) bubbleDown(0, priority[size], state[size]);
+        return first;
       }
     };
   }
 
-  // The rectangles routing must avoid, resolved once. The grid search tests
-  // every grid point and edge against every obstacle, so resolving them per
-  // test would dominate a diagram's render time.
+  // The rectangles routing must avoid, resolved once per search: they place
+  // the grid lanes and index the grid's obstacle tests.
   function activeObstacleRects(obstacles, skipNames) {
     var rects = [];
     for (var i = 0; i < obstacles.length; i++) {
@@ -4887,118 +6456,227 @@
     return rects;
   }
 
-  // The rectangles that a vertical grid lane at `x` passes through (strictly
-  // between their left and right sides), one list per lane. A grid point or a
-  // vertical segment on that lane can only be inside or hit these.
-  function rectsAcrossVerticalLanes(xs, rects) {
-    return xs.map(function(x) {
-      return rects.filter(function(rect) { return x > rect.left && x < rect.right; });
-    });
-  }
-
-  // The same for horizontal lanes at each `y` (strictly between top and bottom).
-  function rectsAcrossHorizontalLanes(ys, rects) {
-    return ys.map(function(y) {
-      return rects.filter(function(rect) { return y > rect.top && y < rect.bottom; });
-    });
-  }
-
-  function pointInsideLaneRects(y, laneRects) {
-    for (var i = 0; i < laneRects.length; i++) {
-      if (y > laneRects[i].top && y < laneRects[i].bottom) return true;
+  function pointInsideRects(point, rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var rect = rects[i];
+      if (point.x > rect.left && point.x < rect.right && point.y > rect.top && point.y < rect.bottom) return true;
     }
     return false;
   }
 
-  // Same rules as routeHitsObstacle for a single segment.
-  function segmentHitsRects(p0, p1, rects, occupied) {
-    var i, rect;
-    if (Math.abs(p0.x - p1.x) < 1) {
-      var yMin = Math.min(p0.y, p1.y), yMax = Math.max(p0.y, p1.y);
-      for (i = 0; i < rects.length; i++) {
-        rect = rects[i];
-        if (p0.x > rect.left && p0.x < rect.right && yMax > rect.top && yMin < rect.bottom) return true;
-      }
-      return vSegHitsOccupied(p0.x, yMin, yMax, occupied) ||
-        vSegCrossesOccupiedH(p0.x, yMin, yMax, occupied);
+  // What can block points and links on one grid line: the rectangles the
+  // line passes through, the reserved segments running within the lane
+  // clearance alongside it, and the reserved segments it would cross.
+  // Each filter is the matching half of a routeHitsObstacle test, with the
+  // same arithmetic, so the remaining half decides exactly as the full scan.
+  function horizontalGridLine(y, rects, occupied) {
+    var line = { rects: [], alongside: [], across: [] };
+    var i, seg;
+    for (i = 0; i < rects.length; i++) {
+      if (y > rects[i].top && y < rects[i].bottom) line.rects.push(rects[i]);
     }
-    if (Math.abs(p0.y - p1.y) < 1) {
-      var xMin = Math.min(p0.x, p1.x), xMax = Math.max(p0.x, p1.x);
-      for (i = 0; i < rects.length; i++) {
-        rect = rects[i];
-        if (p0.y > rect.top && p0.y < rect.bottom && xMax > rect.left && xMin < rect.right) return true;
-      }
-      return hSegHitsOccupied(p0.y, xMin, xMax, occupied) ||
-        hSegCrossesOccupiedV(p0.y, xMin, xMax, occupied);
+    if (!occupied) return line;
+    for (i = 0; i < occupied.h.length; i++) {
+      seg = occupied.h[i];
+      if (Math.abs(seg.y - y) < ORTHO_ROUTE_LANE_CLEARANCE) line.alongside.push(seg);
     }
-    return true;
+    for (i = 0; i < occupied.v.length; i++) {
+      seg = occupied.v[i];
+      if (y > seg.y1 + 2 && y < seg.y2 - 2) line.across.push(seg);
+    }
+    return line;
   }
 
-  function buildOrthogonalGraph(xs, ys, obstacles, skipNames, occupied) {
-    var nodes = [];
-    // indexAt[xi * ys.length + yi]: the node at grid point (xi, yi), or -1
-    // when the point lies inside an obstacle.
-    var indexAt = new Int32Array(xs.length * ys.length).fill(-1);
-    var rows = [];
-    var cols = [];
-    var rects = activeObstacleRects(obstacles, skipNames);
-    // Testing each point and segment against the rectangles of its own lane
-    // only gives the same answers as testing it against all of them: a
-    // rectangle a lane does not pass through cannot contain a point of it or
-    // be hit by a segment along it (segmentHitsRects' strict comparisons).
-    var verticalLaneRects = rectsAcrossVerticalLanes(xs, rects);
-    var horizontalLaneRects = rectsAcrossHorizontalLanes(ys, rects);
+  function verticalGridLine(x, rects, occupied) {
+    var line = { rects: [], alongside: [], across: [] };
+    var i, seg;
+    for (i = 0; i < rects.length; i++) {
+      if (x > rects[i].left && x < rects[i].right) line.rects.push(rects[i]);
+    }
+    if (!occupied) return line;
+    for (i = 0; i < occupied.v.length; i++) {
+      seg = occupied.v[i];
+      if (Math.abs(seg.x - x) < ORTHO_ROUTE_LANE_CLEARANCE) line.alongside.push(seg);
+    }
+    for (i = 0; i < occupied.h.length; i++) {
+      seg = occupied.h[i];
+      if (x > seg.x1 + 2 && x < seg.x2 - 2) line.across.push(seg);
+    }
+    return line;
+  }
 
-    for (var xi = 0; xi < xs.length; xi++) {
-      for (var yi = 0; yi < ys.length; yi++) {
-        var x = xs[xi], y = ys[yi];
-        if (pointInsideLaneRects(y, verticalLaneRects[xi])) continue;
-        var nodeIndex = nodes.length;
-        nodes.push({ x: x, y: y, xi: xi, yi: yi });
-        indexAt[xi * ys.length + yi] = nodeIndex;
-        if (!rows[yi]) rows[yi] = [];
-        if (!cols[xi]) cols[xi] = [];
-        rows[yi].push(nodeIndex);
-        cols[xi].push(nodeIndex);
+  function horizontalSpanBlocked(line, xMin, xMax) {
+    var i, seg;
+    for (i = 0; i < line.rects.length; i++) {
+      if (xMax > line.rects[i].left && xMin < line.rects[i].right) return true;
+    }
+    for (i = 0; i < line.alongside.length; i++) {
+      seg = line.alongside[i];
+      if (rangesOverlap(xMin, xMax, seg.x1, seg.x2, 6)) return true;
+    }
+    for (i = 0; i < line.across.length; i++) {
+      seg = line.across[i];
+      if (seg.x > xMin + 2 && seg.x < xMax - 2) return true;
+    }
+    return false;
+  }
+
+  function verticalSpanBlocked(line, yMin, yMax) {
+    var i, seg;
+    for (i = 0; i < line.rects.length; i++) {
+      if (yMax > line.rects[i].top && yMin < line.rects[i].bottom) return true;
+    }
+    for (i = 0; i < line.alongside.length; i++) {
+      seg = line.alongside[i];
+      if (rangesOverlap(yMin, yMax, seg.y1, seg.y2, 6)) return true;
+    }
+    for (i = 0; i < line.across.length; i++) {
+      seg = line.across[i];
+      if (seg.y > yMin + 2 && seg.y < yMax - 2) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Obstacle tests for the points and links of a routing grid, answered as
+   * routeHitsObstacle answers them for the same point or segment. A grid
+   * search makes hundreds of these tests; scanning every rectangle and
+   * reserved segment for each dominated routing time, while only the few
+   * that touch the test's grid line can matter. Lines are indexed on first
+   * use. A link runs from grid index `from` to `to` on row `yi` or column
+   * `xi`.
+   */
+  function createOrthogonalGridLineIndex(xs, ys, rects, occupied) {
+    var rows = new Array(ys.length);
+    var columns = new Array(xs.length);
+
+    function row(yi) {
+      return rows[yi] || (rows[yi] = horizontalGridLine(ys[yi], rects, occupied));
+    }
+
+    function column(xi) {
+      return columns[xi] || (columns[xi] = verticalGridLine(xs[xi], rects, occupied));
+    }
+
+    function pointInside(xi, yi) {
+      var y = ys[yi], inColumn = column(xi).rects;
+      for (var i = 0; i < inColumn.length; i++) {
+        if (y > inColumn[i].top && y < inColumn[i].bottom) return true;
       }
+      return false;
     }
 
-    var adjacency = [];
-    for (var ni = 0; ni < nodes.length; ni++) adjacency.push([]);
-
-    function connect(aIdx, bIdx, dir) {
-      var a = nodes[aIdx], b = nodes[bIdx];
-      var laneRects = dir === 'H' ? horizontalLaneRects[a.yi] : verticalLaneRects[a.xi];
-      if (segmentHitsRects(a, b, laneRects, occupied)) return;
-      var cost = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-      adjacency[aIdx].push({ to: bIdx, dir: dir, cost: cost });
-      adjacency[bIdx].push({ to: aIdx, dir: dir, cost: cost });
+    function horizontalLinkBlocked(yi, from, to) {
+      // routeHitsObstacle tests a segment under a pixel wide as vertical.
+      // Spanning no height, it can neither run along nor cross a reserved
+      // segment, so only a rectangle around its start blocks it.
+      if (Math.abs(xs[from] - xs[to]) < 1) return pointInside(from, yi);
+      return horizontalSpanBlocked(row(yi), Math.min(xs[from], xs[to]), Math.max(xs[from], xs[to]));
     }
 
-    // Rows first, then columns, each in ascending lane order: the order of
-    // every adjacency list decides which of two equally short paths wins.
-    for (var rowKey = 0; rowKey < rows.length; rowKey++) {
-      var row = rows[rowKey];
-      if (!row) continue;
-      row.sort(function(a, b) { return nodes[a].x - nodes[b].x; });
-      for (var ri = 0; ri < row.length - 1; ri++) connect(row[ri], row[ri + 1], 'H');
-    }
-    for (var colKey = 0; colKey < cols.length; colKey++) {
-      var col = cols[colKey];
-      if (!col) continue;
-      col.sort(function(a, b) { return nodes[a].y - nodes[b].y; });
-      for (var ci = 0; ci < col.length - 1; ci++) connect(col[ci], col[ci + 1], 'V');
+    function verticalLinkBlocked(xi, from, to) {
+      return verticalSpanBlocked(column(xi), Math.min(ys[from], ys[to]), Math.max(ys[from], ys[to]));
     }
 
     return {
-      nodes: nodes,
-      adjacency: adjacency,
-      // The node at grid point (xi, yi), or undefined when there is none.
-      nodeIndexAt: function(xi, yi) {
-        if (xi < 0 || yi < 0 || xi >= xs.length || yi >= ys.length) return undefined;
-        var index = indexAt[xi * ys.length + yi];
-        return index < 0 ? undefined : index;
-      }
+      pointInside: pointInside,
+      horizontalLinkBlocked: horizontalLinkBlocked,
+      verticalLinkBlocked: verticalLinkBlocked
+    };
+  }
+
+  /**
+   * The routing grid: a node at every crossing of `xs` and `ys` outside the
+   * obstacles, joined to the nearest node left, right, above and below
+   * when the segment between them is clear. Built on demand: a search
+   * usually visits a small part of the grid, and testing every grid edge
+   * against every obstacle up front dominated a diagram's render time.
+   * Node `xi * ys.length + yi` is the crossing of xs[xi] and ys[yi];
+   * `neighbors(n)` lists left, right, above, below, in that order, each as
+   * { to, dir, cost } with dir GRID_ACROSS or GRID_DOWN.
+   */
+  var GRID_ACROSS = 1;
+  var GRID_DOWN = 2;
+
+  function createOrthogonalGrid(xs, ys, rects, occupied) {
+    var lines = createOrthogonalGridLineIndex(xs, ys, rects, occupied);
+    var rowCount = ys.length;
+    var openAt = new Int8Array(xs.length * rowCount);   // 0 unknown, 1 open, 2 inside
+    var adjacency = new Array(xs.length * rowCount);
+
+    function isOpen(xi, yi) {
+      var n = xi * rowCount + yi;
+      if (!openAt[n]) openAt[n] = lines.pointInside(xi, yi) ? 2 : 1;
+      return openAt[n] === 1;
+    }
+
+    function x(n) {
+      return xs[Math.floor(n / rowCount)];
+    }
+
+    function y(n) {
+      return ys[n % rowCount];
+    }
+
+    function point(n) {
+      return { x: x(n), y: y(n) };
+    }
+
+    function linkAcross(list, xi, yi, toXi) {
+      if (lines.horizontalLinkBlocked(yi, xi, toXi)) return;
+      list.push({ to: toXi * rowCount + yi, dir: GRID_ACROSS, cost: Math.abs(xs[xi] - xs[toXi]) });
+    }
+
+    function linkDown(list, xi, yi, toYi) {
+      if (lines.verticalLinkBlocked(xi, yi, toYi)) return;
+      list.push({ to: xi * rowCount + toYi, dir: GRID_DOWN, cost: Math.abs(ys[yi] - ys[toYi]) });
+    }
+
+    function neighbors(n) {
+      if (adjacency[n]) return adjacency[n];
+      var xi = Math.floor(n / rowCount), yi = n % rowCount, list = [], k;
+      for (k = xi - 1; k >= 0 && !isOpen(k, yi); k--) {}
+      if (k >= 0) linkAcross(list, xi, yi, k);
+      for (k = xi + 1; k < xs.length && !isOpen(k, yi); k++) {}
+      if (k < xs.length) linkAcross(list, xi, yi, k);
+      for (k = yi - 1; k >= 0 && !isOpen(xi, k); k--) {}
+      if (k >= 0) linkDown(list, xi, yi, k);
+      for (k = yi + 1; k < rowCount && !isOpen(xi, k); k++) {}
+      if (k < rowCount) linkDown(list, xi, yi, k);
+      adjacency[n] = list;
+      return list;
+    }
+
+    // The node at grid indices (xi, yi), or undefined inside an obstacle.
+    function nodeAt(xi, yi) {
+      if (xi < 0 || yi < 0 || !isOpen(xi, yi)) return undefined;
+      return xi * rowCount + yi;
+    }
+
+    return { x: x, y: y, point: point, neighbors: neighbors, nodeAt: nodeAt };
+  }
+
+  // Per-state records of one grid search, reused from search to search:
+  // a state counts as reached only when stamped in the current search, so
+  // nothing needs clearing.
+  var gridSearchState = { size: 0, stamp: null, dist: null, prev: null, current: 0 };
+
+  function startGridSearch(stateCount) {
+    var state = gridSearchState;
+    if (state.size < stateCount || state.current >= 0x7fffffff) {
+      state.size = Math.max(stateCount, state.size * 2);
+      state.stamp = new Int32Array(state.size);
+      state.dist = new Float64Array(state.size);
+      state.prev = new Int32Array(state.size);
+      state.current = 0;
+    }
+    var mark = ++state.current;
+    var stamp = state.stamp;
+    return {
+      dist: state.dist,
+      prev: state.prev,
+      reached: function(s) { return stamp[s] === mark; },
+      reach: function(s) { stamp[s] = mark; }
     };
   }
 
@@ -5014,13 +6692,13 @@
     for (var exi = 0; exi < extraXs.length; exi++) xs.push(extraXs[exi]);
     for (var eyi = 0; eyi < extraYs.length; eyi++) ys.push(extraYs[eyi]);
 
-    for (var oi = 0; oi < obstacles.length; oi++) {
-      var obstacle = obstacles[oi];
-      if (skipNames && obstacle.name && skipNames[obstacle.name]) continue;
-      var rect = obstacleToRect(obstacle);
-      if (!rect) continue;
-      xs.push(rect.left - clearance, rect.right + clearance);
-      ys.push(rect.top - clearance, rect.bottom + clearance);
+    var rects = activeObstacleRects(obstacles, skipNames);
+    // An endpoint inside a rectangle is no grid node, so no path exists;
+    // knowing it before the grid is built saves building it.
+    if (pointInsideRects(start, rects) || pointInsideRects(end, rects)) return null;
+    for (var ri = 0; ri < rects.length; ri++) {
+      xs.push(rects[ri].left - clearance, rects[ri].right + clearance);
+      ys.push(rects[ri].top - clearance, rects[ri].bottom + clearance);
     }
 
     if (occupied) {
@@ -5040,66 +6718,56 @@
     xs = uniqueSortedNumbers(xs, [start.x, end.x]);
     ys = uniqueSortedNumbers(ys, [start.y, end.y]);
 
-    var graph = buildOrthogonalGraph(xs, ys, obstacles, skipNames, occupied);
-    var startXi = findCoordinateIndex(xs, start.x);
-    var startYi = findCoordinateIndex(ys, start.y);
-    var endXi = findCoordinateIndex(xs, end.x);
-    var endYi = findCoordinateIndex(ys, end.y);
-    var startIndex = graph.nodeIndexAt(startXi, startYi);
-    var endIndex = graph.nodeIndexAt(endXi, endYi);
+    var graph = createOrthogonalGrid(xs, ys, rects, occupied);
+    var startIndex = graph.nodeAt(findCoordinateIndex(xs, start.x), findCoordinateIndex(ys, start.y));
+    var endIndex = graph.nodeAt(findCoordinateIndex(xs, end.x), findCoordinateIndex(ys, end.y));
     if (startIndex === undefined || endIndex === undefined) return null;
 
-    // A search state is a node and the direction it was entered in (N: the
-    // start, H, V), numbered nodeIndex * 3 + direction. dist is meaningful
-    // only for a reached state; prev holds -1 for the start.
-    var DIRECTION_NUMBER = { N: 0, H: 1, V: 2 };
-    var stateCount = graph.nodes.length * 3;
-    var reached = new Uint8Array(stateCount);
-    var dist = new Float64Array(stateCount);
-    var prev = new Int32Array(stateCount).fill(-1);
-    var queue = createPriorityQueue();
-    var startState = startIndex * 3 + DIRECTION_NUMBER.N;
+    // A search state is a node and the direction it was entered in
+    // (0 at the start, else GRID_ACROSS or GRID_DOWN), as node * 3 + direction.
+    var queue = createStateQueue();
+    var startState = startIndex * 3;
+    var search = startGridSearch(xs.length * ys.length * 3);
+    var dist = search.dist, prev = search.prev;
+    search.reach(startState);
     dist[startState] = 0;
-    reached[startState] = 1;
-    queue.push({ state: startState, nodeIndex: startIndex, dir: 'N', f: Math.abs(start.x - end.x) + Math.abs(start.y - end.y) });
+    prev[startState] = -1;
+    queue.push(startState, Math.abs(start.x - end.x) + Math.abs(start.y - end.y));
 
     while (!queue.isEmpty()) {
-      var current = queue.pop();
-      if (!current) break;
-      if (current.nodeIndex === endIndex) {
+      var currentF = queue.peekPriority();
+      var currentState = queue.pop();
+      var currentNode = Math.floor(currentState / 3);
+      var currentDir = currentState % 3;
+      if (currentNode === endIndex) {
         var path = [];
-        for (var stateCursor = current.state; stateCursor >= 0; stateCursor = prev[stateCursor]) {
-          var nodeIdx = Math.floor(stateCursor / 3);
-          path.push({ x: graph.nodes[nodeIdx].x, y: graph.nodes[nodeIdx].y });
+        for (var stateCursor = currentState; stateCursor >= 0; stateCursor = prev[stateCursor]) {
+          path.push(graph.point(Math.floor(stateCursor / 3)));
         }
         path.reverse();
         return simplifyOrthogonalPath(path);
       }
 
-      if (current.f - (Math.abs(graph.nodes[current.nodeIndex].x - end.x) + Math.abs(graph.nodes[current.nodeIndex].y - end.y)) > (dist[current.state] || 0) + 0.001) {
+      var atX = graph.x(currentNode), atY = graph.y(currentNode);
+      if (currentF - (Math.abs(atX - end.x) + Math.abs(atY - end.y)) > (dist[currentState] || 0) + 0.001) {
         continue;
       }
 
-      var neighbors = graph.adjacency[current.nodeIndex];
+      var neighbors = graph.neighbors(currentNode);
       for (var ni = 0; ni < neighbors.length; ni++) {
         var edge = neighbors[ni];
-        var nextState = edge.to * 3 + DIRECTION_NUMBER[edge.dir];
-        var bendCost = current.dir !== 'N' && current.dir !== edge.dir ? bendPenalty : 0;
-        var corridorPenalty = edge.dir === 'H'
-          ? Math.abs(graph.nodes[current.nodeIndex].y - end.y) * 0.05
-          : Math.abs(graph.nodes[current.nodeIndex].x - end.x) * 0.05;
-        var candidateDist = dist[current.state] + edge.cost + bendCost + corridorPenalty;
-        if (!reached[nextState] || candidateDist + 0.01 < dist[nextState]) {
-          reached[nextState] = 1;
+        var nextState = edge.to * 3 + edge.dir;
+        var bendCost = currentDir !== 0 && currentDir !== edge.dir ? bendPenalty : 0;
+        var corridorPenalty = edge.dir === GRID_ACROSS
+          ? Math.abs(atY - end.y) * 0.05
+          : Math.abs(atX - end.x) * 0.05;
+        var candidateDist = dist[currentState] + edge.cost + bendCost + corridorPenalty;
+        if (!search.reached(nextState) || candidateDist + 0.01 < dist[nextState]) {
+          search.reach(nextState);
           dist[nextState] = candidateDist;
-          prev[nextState] = current.state;
-          var heuristic = Math.abs(graph.nodes[edge.to].x - end.x) + Math.abs(graph.nodes[edge.to].y - end.y);
-          queue.push({
-            state: nextState,
-            nodeIndex: edge.to,
-            dir: edge.dir,
-            f: candidateDist + heuristic
-          });
+          prev[nextState] = currentState;
+          var heuristic = Math.abs(graph.x(edge.to) - end.x) + Math.abs(graph.y(edge.to) - end.y);
+          queue.push(nextState, candidateDist + heuristic);
         }
       }
     }
@@ -5331,6 +6999,26 @@
     };
   }
 
+  // ─── Nudge passes ───────────────────────────────────────────
+
+  /**
+   * The shifts a nudge pass tries for one box: each candidate clamped to
+   * [-maxShift, maxShift] and then to [lower, upper], without non-finite or
+   * sub-pixel shifts, each distinct shift once, in candidate order. Clamping
+   * makes candidates coincide; a repeated shift would be routed and scored
+   * again only to tie with itself, which never replaces the best shift.
+   */
+  function distinctNudgeDeltas(candidates, maxShift, lower, upper) {
+    var deltas = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var delta = Math.max(-maxShift, Math.min(maxShift, candidates[i]));
+      delta = Math.max(lower, Math.min(upper, delta));
+      if (!isFinite(delta) || Math.abs(delta) < 1) continue;
+      if (deltas.indexOf(delta) < 0) deltas.push(delta);
+    }
+    return deltas;
+  }
+
   // ─── Actor Stick Figure ──────────────────────────────────────
 
   /**
@@ -5352,17 +7040,15 @@
     var bodyBot = bodyTop + bodyLen;
     var armBaseY = bodyTop + armY;
 
+    // The limbs are artwork: editors must not offer them as relation routes.
+    var limb = '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '" data-layout-route-decorative="true"/>';
     svg.push('<g filter="url(#uml-node-shadow)">');
     svg.push('<circle cx="' + cx + '" cy="' + headCy + '" r="' + headR +
       '" fill="' + headFill + '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + (cx - armSpan) + '" y1="' + armBaseY + '" x2="' + (cx + armSpan) + '" y2="' + armBaseY +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx - legSpan) + '" y2="' + (bodyBot + legLen) +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
-    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx + legSpan) + '" y2="' + (bodyBot + legLen) +
-      '" stroke="' + colors.stroke + '" stroke-width="' + strokeW + '"/>');
+    svg.push('<line x1="' + cx + '" y1="' + bodyTop + '" x2="' + cx + '" y2="' + bodyBot + limb);
+    svg.push('<line x1="' + (cx - armSpan) + '" y1="' + armBaseY + '" x2="' + (cx + armSpan) + '" y2="' + armBaseY + limb);
+    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx - legSpan) + '" y2="' + (bodyBot + legLen) + limb);
+    svg.push('<line x1="' + cx + '" y1="' + bodyBot + '" x2="' + (cx + legSpan) + '" y2="' + (bodyBot + legLen) + limb);
     svg.push('</g>');
     return bodyBot + legLen - topY; // total height
   }
@@ -5376,6 +7062,8 @@
     NOTE_CFG: NOTE_CFG,
     textWidth: textWidth,
     textMetrics: textMetrics,
+    textMeasurementFingerprint: textMeasurementFingerprint,
+    markLayoutIssues: markLayoutIssues,
     escapeXml: escapeXml,
     parseLabelDirectionCue: parseLabelDirectionCue,
     labelDirectionPlacementText: labelDirectionPlacementText,
@@ -5405,13 +7093,32 @@
     renderedLayoutBox: renderedLayoutBox,
     renderedSvgBox: renderedBox,
     parseHighlightColor: parseHighlightColor,
+    extractStereotypes: extractStereotypes,
+    stereotypeDisplayText: stereotypeDisplayText,
+    formatStereotypeLabels: formatStereotypeLabels,
     highlightFills: highlightFills,
     darkenHexColor: darkenHexColor,
     getThemeColors: getThemeColors,
     prepareDiagramContainer: prepareDiagramContainer,
     applySvgAccessibility: applySvgAccessibility,
+    figureSource: figureSource,
     svgOpen: svgOpen,
     svgClose: svgClose,
+    parsePackageOpener: parsePackageOpener,
+    createPackageScope: createPackageScope,
+    layoutPackageFrames: layoutPackageFrames,
+    packageSceneId: packageSceneId,
+    recordPackageFrames: recordPackageFrames,
+    packageHolding: packageHolding,
+    packageEncloses: packageEncloses,
+    packageSeparation: packageSeparation,
+    packagesCollide: packagesCollide,
+    separatedPackagePositions: separatedPackagePositions,
+    packageGroupedPositions: packageGroupedPositions,
+    packageBlockPlacements: packageBlockPlacements,
+    drawPackageFrames: drawPackageFrames,
+    drawPackageNames: drawPackageNames,
+    updatePackageFrames: updatePackageFrames,
     createAutoInit: createAutoInit,
     drawNote: drawNote,
     measureNote: measureNote,
@@ -5437,6 +7144,8 @@
     reserveOrthogonalRoute: reserveOrthogonalRoute,
     spreadRouteToFreeLanes: spreadRouteToFreeLanes,
     routeOrthogonalConnector: routeOrthogonalConnector,
+    distinctNudgeDeltas: distinctNudgeDeltas,
+    createOrthogonalGridLineIndex: createOrthogonalGridLineIndex,
     optimizeEndpointSlides: optimizeEndpointSlides,
 
     // ─── Drawing Utilities ───────────────────────────────────────
@@ -5812,6 +7521,62 @@
     } catch (e) {
       return null;
     }
+  }
+
+  // ───── Pane (the box a compact drawing is laid out for) ───────────
+
+  var DEFAULT_PANE = { width: 900, height: 600 };
+  var MIN_MEASURABLE_SIDE = 40;
+  // Room the fit view leaves around a diagram when it fills the window.
+  var WINDOW_HEIGHT_ALLOWANCE = 24;
+
+  function isUsablePane(pane) {
+    return !!pane && finiteOr(pane.width, 0) > 0 && finiteOr(pane.height, 0) > 0;
+  }
+
+  function measureContainerWidth(container) {
+    if (typeof container.clientWidth === 'number' && container.clientWidth > 0) {
+      return container.clientWidth;
+    }
+    if (typeof container.getBoundingClientRect !== 'function') return 0;
+    var rect = container.getBoundingClientRect();
+    return rect ? finiteOr(rect.width, 0) : 0;
+  }
+
+  function measureContainerHeight(container) {
+    if (typeof container.getBoundingClientRect === 'function') {
+      var rect = container.getBoundingClientRect();
+      var own = rect ? finiteOr(rect.height, 0) : 0;
+      if (own >= MIN_MEASURABLE_SIDE) return own;
+    }
+    var windowHeight = typeof window !== 'undefined' ? finiteOr(window.innerHeight, 0) : 0;
+    if (windowHeight - WINDOW_HEIGHT_ALLOWANCE >= MIN_MEASURABLE_SIDE) {
+      return windowHeight - WINDOW_HEIGHT_ALLOWANCE;
+    }
+    return DEFAULT_PANE.height;
+  }
+
+  /**
+   * Decide the pane a compact drawing is laid out for: the size written in
+   * the spec, else the live container, else 900×600. Never throws.
+   *
+   * @param {HTMLElement|object|null} container
+   * @param {{width:number,height:number}|null} directivePane — from `layout compact WxH`
+   * @returns {{width:number, height:number, source:'spec'|'container'|'default'}}
+   */
+  function resolvePane(container, directivePane) {
+    if (isUsablePane(directivePane)) {
+      return { width: Number(directivePane.width), height: Number(directivePane.height), source: 'spec' };
+    }
+    if (container && typeof container === 'object') {
+      try {
+        var width = measureContainerWidth(container);
+        if (width >= MIN_MEASURABLE_SIDE) {
+          return { width: width, height: measureContainerHeight(container), source: 'container' };
+        }
+      } catch (e) { /* unmeasurable container: use the default */ }
+    }
+    return { width: DEFAULT_PANE.width, height: DEFAULT_PANE.height, source: 'default' };
   }
 
   // ───── Orientation picker ─────────────────────────────────────────
@@ -6399,6 +8164,7 @@
     computeMinGaps: computeMinGaps,
     // orientation
     containerAspect: containerAspect,
+    resolvePane: resolvePane,
     resolveTargetAspect: resolveTargetAspect,
     pickOrientation: pickOrientation,
     analyzeHierarchy: analyzeHierarchy,
@@ -7764,6 +9530,1593 @@
   window.UMLAdvancedLayout = LayoutEngine;
 })();
 /**
+ * UMLLayoutQuality — the judge of a finished drawing.
+ *
+ * A renderer records what it drew in a scene (boxes, routes, labels, the
+ * final size and the smallest font). `evaluate(scene, pane)` says whether the
+ * drawing is valid (nothing overlaps, every edge label stays with its edge)
+ * and how good it is: the predicted on-screen size of the smallest label in
+ * the pane, less weighted crossings, bends and detours.
+ *
+ * Pure: no DOM, no renderer state, inputs are never mutated.
+ */
+(function () {
+  'use strict';
+
+  var WEIGHTS = Object.freeze({ crossing: 0.05, bend: 0.015, detour: 0.03 });
+
+  var TOLERANCES = Object.freeze({
+    overlap: 0.5,          // shapes may touch or overlap by this much
+    merge: 6,              // routes may share this much length
+    detourAllowance: 1.5,  // route length ÷ direct distance that costs nothing
+    labelLineGap: 6        // line height = smallest font + this
+  });
+
+  // With no text recorded, fit is the pure scale factor.
+  var FONT_WHEN_NONE_NOTED = 1;
+  var GEOMETRY_EPSILON = 1e-9;
+
+  // ───── Scene ──────────────────────────────────────────────────────
+
+  function rectRecord(r) {
+    return { x: Number(r.x) || 0, y: Number(r.y) || 0, width: Number(r.width) || 0, height: Number(r.height) || 0 };
+  }
+
+  function createScene() {
+    var scene = {
+      width: 0,
+      height: 0,
+      smallestFont: Infinity,
+      // Where the scene's 0,0 lies in the SVG's root units (the renderer's
+      // content translation), so overlays drawn in SVG units can be recorded.
+      origin: { x: 0, y: 0 },
+      nodes: [],
+      routes: [],
+      labels: []
+    };
+    scene.addNode = function (n) {
+      var node = rectRecord(n);
+      node.id = n.id;
+      node.kind = n.kind || null;
+      node.container = !!n.container;
+      // Lines may cross it, as they cross a UML package's outline.
+      node.crossable = !!n.crossable;
+      node.parent = n.parent != null ? n.parent : null;
+      scene.nodes.push(node);
+      return node;
+    };
+    scene.addRoute = function (r) {
+      var route = {
+        id: r.id,
+        points: (r.points || []).map(function (p) { return { x: Number(p.x) || 0, y: Number(p.y) || 0 }; }),
+        source: r.source != null ? r.source : null,
+        target: r.target != null ? r.target : null,
+        bundle: r.bundle != null ? r.bundle : null
+      };
+      scene.routes.push(route);
+      return route;
+    };
+    scene.addLabel = function (l) {
+      var label = rectRecord(l);
+      label.id = l.id;
+      label.owner = l.owner != null ? l.owner : null;
+      label.kind = l.kind || null;
+      label.onRoute = !!l.onRoute;
+      // Sits by one end of its owner's line (a multiplicity, a role name).
+      label.atEnd = !!l.atEnd;
+      scene.labels.push(label);
+      return label;
+    };
+    scene.noteFont = function (size) {
+      var n = Number(size);
+      if (isFinite(n) && n > 0 && n < scene.smallestFont) scene.smallestFont = n;
+    };
+    scene.setSize = function (width, height) {
+      scene.width = Number(width) || 0;
+      scene.height = Number(height) || 0;
+    };
+    scene.setOrigin = function (x, y) {
+      scene.origin = { x: Number(x) || 0, y: Number(y) || 0 };
+    };
+    return scene;
+  }
+
+  // A scene with the same records, none shared, so adding to it (callouts
+  // drawn into a finished drawing) leaves the original as it was judged.
+  function copyScene(source) {
+    var scene = createScene();
+    source.nodes.forEach(scene.addNode);
+    source.routes.forEach(scene.addRoute);
+    source.labels.forEach(scene.addLabel);
+    scene.setSize(source.width, source.height);
+    scene.setOrigin(source.origin.x, source.origin.y);
+    scene.noteFont(source.smallestFont);
+    return scene;
+  }
+
+  // ───── Geometry ───────────────────────────────────────────────────
+
+  function overlapLength(a0, a1, b0, b1) {
+    return Math.min(a1, b1) - Math.max(a0, b0);
+  }
+
+  function rectsOverlap(a, b, tol) {
+    return overlapLength(a.x, a.x + a.width, b.x, b.x + b.width) > tol &&
+      overlapLength(a.y, a.y + a.height, b.y, b.y + b.height) > tol;
+  }
+
+  function rectContains(outer, inner, tol) {
+    return inner.x >= outer.x - tol && inner.y >= outer.y - tol &&
+      inner.x + inner.width <= outer.x + outer.width + tol &&
+      inner.y + inner.height <= outer.y + outer.height + tol;
+  }
+
+  function insetRect(r, by) {
+    return { x: r.x + by, y: r.y + by, width: r.width - 2 * by, height: r.height - 2 * by };
+  }
+
+  function segmentsOf(route) {
+    var segments = [];
+    var pts = route.points || [];
+    for (var i = 1; i < pts.length; i++) {
+      var a = pts[i - 1], b = pts[i];
+      if (Math.abs(a.x - b.x) > GEOMETRY_EPSILON || Math.abs(a.y - b.y) > GEOMETRY_EPSILON) {
+        segments.push({ a: a, b: b });
+      }
+    }
+    return segments;
+  }
+
+  function segmentLength(s) {
+    return Math.sqrt((s.b.x - s.a.x) * (s.b.x - s.a.x) + (s.b.y - s.a.y) * (s.b.y - s.a.y));
+  }
+
+  // True when a positive length of the segment lies strictly inside the
+  // rectangle (Liang–Barsky clipping).
+  function segmentEntersRect(s, rect) {
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    var dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+    var t0 = 0, t1 = 1;
+    var edges = [
+      [-dx, s.a.x - rect.x],
+      [dx, rect.x + rect.width - s.a.x],
+      [-dy, s.a.y - rect.y],
+      [dy, rect.y + rect.height - s.a.y]
+    ];
+    for (var i = 0; i < edges.length; i++) {
+      var p = edges[i][0], q = edges[i][1];
+      if (Math.abs(p) < GEOMETRY_EPSILON) {
+        if (q <= 0) return false;
+        continue;
+      }
+      var t = q / p;
+      if (p < 0) { if (t > t0) t0 = t; } else if (t < t1) { t1 = t; }
+      if (t0 >= t1) return false;
+    }
+    return (t1 - t0) * segmentLength(s) > GEOMETRY_EPSILON;
+  }
+
+  function routeEntersRect(route, rect) {
+    var segments = segmentsOf(route);
+    for (var i = 0; i < segments.length; i++) {
+      if (segmentEntersRect(segments[i], rect)) return true;
+    }
+    return false;
+  }
+
+  // Signed distance of p from the line through s, positive on the left.
+  function sideOf(s, p) {
+    var len = segmentLength(s);
+    return ((s.b.x - s.a.x) * (p.y - s.a.y) - (s.b.y - s.a.y) * (p.x - s.a.x)) / len;
+  }
+
+  // A proper crossing: each segment strictly separates the other's ends.
+  // Touching within the tolerance (a T-junction, a shared end) is not one.
+  function segmentsCross(s1, s2, tol) {
+    var d1 = sideOf(s1, s2.a), d2 = sideOf(s1, s2.b);
+    var d3 = sideOf(s2, s1.a), d4 = sideOf(s2, s1.b);
+    return ((d1 > tol && d2 < -tol) || (d1 < -tol && d2 > tol)) &&
+      ((d3 > tol && d4 < -tol) || (d3 < -tol && d4 > tol));
+  }
+
+  // Length over which two segments lie on top of each other (0 if they don't).
+  function sharedLength(s1, s2, tol) {
+    if (Math.abs(sideOf(s1, s2.a)) > tol || Math.abs(sideOf(s1, s2.b)) > tol) return 0;
+    var len = segmentLength(s1);
+    var ux = (s1.b.x - s1.a.x) / len, uy = (s1.b.y - s1.a.y) / len;
+    var ta = (s2.a.x - s1.a.x) * ux + (s2.a.y - s1.a.y) * uy;
+    var tb = (s2.b.x - s1.a.x) * ux + (s2.b.y - s1.a.y) * uy;
+    return Math.max(0, overlapLength(0, len, Math.min(ta, tb), Math.max(ta, tb)));
+  }
+
+  function pointToRectDistance(p, rect) {
+    var dx = Math.max(rect.x - p.x, 0, p.x - (rect.x + rect.width));
+    var dy = Math.max(rect.y - p.y, 0, p.y - (rect.y + rect.height));
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function pointToSegmentDistance(p, s) {
+    var dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+    var t = ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / (dx * dx + dy * dy);
+    t = Math.max(0, Math.min(1, t));
+    var cx = s.a.x + t * dx - p.x, cy = s.a.y + t * dy - p.y;
+    return Math.sqrt(cx * cx + cy * cy);
+  }
+
+  function rectToSegmentDistance(rect, s) {
+    if (segmentEntersRect(s, rect)) return 0;
+    var corners = [
+      { x: rect.x, y: rect.y }, { x: rect.x + rect.width, y: rect.y },
+      { x: rect.x, y: rect.y + rect.height }, { x: rect.x + rect.width, y: rect.y + rect.height }
+    ];
+    var best = Math.min(pointToRectDistance(s.a, rect), pointToRectDistance(s.b, rect));
+    for (var i = 0; i < corners.length; i++) {
+      best = Math.min(best, pointToSegmentDistance(corners[i], s));
+    }
+    return best;
+  }
+
+  function rectToRouteDistance(rect, route) {
+    var segments = segmentsOf(route);
+    var best = Infinity;
+    for (var i = 0; i < segments.length; i++) {
+      best = Math.min(best, rectToSegmentDistance(rect, segments[i]));
+    }
+    return best;
+  }
+
+  // ───── Scene relations ────────────────────────────────────────────
+
+  function indexById(items) {
+    var byId = {};
+    for (var i = 0; i < items.length; i++) byId[items[i].id] = items[i];
+    return byId;
+  }
+
+  // The chain of enclosing containers of a node (cycle-safe).
+  function ancestorsOf(id, nodesById) {
+    var ancestors = {};
+    var current = nodesById[id];
+    while (current && current.parent != null && !ancestors[current.parent]) {
+      ancestors[current.parent] = true;
+      current = nodesById[current.parent];
+    }
+    return ancestors;
+  }
+
+  function isAncestor(maybeAncestorId, id, nodesById) {
+    return !!ancestorsOf(id, nodesById)[maybeAncestorId];
+  }
+
+  // Nodes a route may pass through: its ends and their containers.
+  function routeExemptNodes(route, nodesById) {
+    var exempt = {};
+    [route.source, route.target].forEach(function (end) {
+      if (end == null) return;
+      exempt[end] = true;
+      var ancestors = ancestorsOf(end, nodesById);
+      for (var id in ancestors) exempt[id] = true;
+    });
+    return exempt;
+  }
+
+  // Nodes a label may lie on: a node that owns it and the containers of its
+  // owner (or of its owner route's ends).
+  function labelExemptNodes(label, nodesById, routesById) {
+    var exempt = {};
+    var ownerRoute = routesById[label.owner];
+    var anchors = ownerRoute ? [ownerRoute.source, ownerRoute.target] : [label.owner];
+    if (!ownerRoute && label.owner != null) exempt[label.owner] = true;
+    anchors.forEach(function (anchor) {
+      if (anchor == null) return;
+      var ancestors = ancestorsOf(anchor, nodesById);
+      for (var id in ancestors) exempt[id] = true;
+    });
+    return exempt;
+  }
+
+  function bundleOf(route) {
+    return route.bundle != null ? 'bundle:' + route.bundle : 'route:' + route.id;
+  }
+
+  // ───── Violations ─────────────────────────────────────────────────
+
+  function violation(kind, a, b) {
+    return { kind: kind, a: a, b: b };
+  }
+
+  function nodeNodeViolations(nodes, nodesById, tol) {
+    var found = [];
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        var a = nodes[i], b = nodes[j];
+        if (isAncestor(a.id, b.id, nodesById) || isAncestor(b.id, a.id, nodesById)) continue;
+        if (rectsOverlap(a, b, tol)) found.push(violation('node-node', a.id, b.id));
+      }
+    }
+    return found;
+  }
+
+  function labelNodeViolations(labels, nodes, nodesById, routesById, tol) {
+    var found = [];
+    labels.forEach(function (label) {
+      var exempt = labelExemptNodes(label, nodesById, routesById);
+      nodes.forEach(function (node) {
+        // A note lies wholly inside a frame or wholly outside it, even the
+        // frame its target lies in.
+        if (label.kind === 'note' && node.container && rectsOverlap(label, node, tol) && !rectContains(node, label, tol)) {
+          found.push(violation('note-frame', label.id, node.id));
+          return;
+        }
+        if (exempt[node.id]) return;
+        if (node.container && rectContains(node, label, tol)) return;
+        if (rectsOverlap(label, node, tol)) found.push(violation('label-node', label.id, node.id));
+      });
+    });
+    return found;
+  }
+
+  function labelLabelViolations(labels, tol) {
+    var found = [];
+    for (var i = 0; i < labels.length; i++) {
+      for (var j = i + 1; j < labels.length; j++) {
+        if (rectsOverlap(labels[i], labels[j], tol)) {
+          found.push(violation('label-label', labels[i].id, labels[j].id));
+        }
+      }
+    }
+    return found;
+  }
+
+  function routeNodeViolations(routes, nodes, nodesById, tol) {
+    var found = [];
+    routes.forEach(function (route) {
+      var exempt = routeExemptNodes(route, nodesById);
+      nodes.forEach(function (node) {
+        if (exempt[node.id] || node.crossable) return;
+        if (routeEntersRect(route, insetRect(node, tol))) found.push(violation('route-node', route.id, node.id));
+      });
+    });
+    return found;
+  }
+
+  function routeLabelViolations(routes, labels, tol) {
+    var found = [];
+    routes.forEach(function (route) {
+      labels.forEach(function (label) {
+        if (label.onRoute) return;
+        if (routeEntersRect(route, insetRect(label, tol))) found.push(violation('route-label', route.id, label.id));
+      });
+    });
+    return found;
+  }
+
+  function longestSharedRun(r1, r2, tol) {
+    var longest = 0;
+    var s1 = segmentsOf(r1), s2 = segmentsOf(r2);
+    for (var i = 0; i < s1.length; i++) {
+      for (var j = 0; j < s2.length; j++) {
+        longest = Math.max(longest, sharedLength(s1[i], s2[j], tol));
+      }
+    }
+    return longest;
+  }
+
+  function routeMergeViolations(routes, tol, mergeThreshold) {
+    var found = [];
+    for (var i = 0; i < routes.length; i++) {
+      for (var j = i + 1; j < routes.length; j++) {
+        if (bundleOf(routes[i]) === bundleOf(routes[j])) continue;
+        if (longestSharedRun(routes[i], routes[j], tol) > mergeThreshold) {
+          found.push(violation('route-merge', routes[i].id, routes[j].id));
+        }
+      }
+    }
+    return found;
+  }
+
+  // An edge label must lie within one line height of its own route and no
+  // nearer to any other route.
+  function detachedLabelViolations(labels, routes, routesById, lineHeight) {
+    var found = [];
+    labels.forEach(function (label) {
+      var own = routesById[label.owner];
+      if (!own) return;
+      var ownDistance = rectToRouteDistance(label, own);
+      if (ownDistance > lineHeight) {
+        found.push(violation('label-detached', label.id, own.id));
+        return;
+      }
+      var nearestOther = null, nearestDistance = ownDistance;
+      routes.forEach(function (route) {
+        if (route === own) return;
+        var d = rectToRouteDistance(label, route);
+        if (d < nearestDistance) { nearestDistance = d; nearestOther = route; }
+      });
+      if (nearestOther) found.push(violation('label-detached', label.id, nearestOther.id));
+    });
+    return found;
+  }
+
+  function findViolations(scene, fontSize) {
+    var tol = TOLERANCES.overlap;
+    var nodes = scene.nodes || [], routes = scene.routes || [], labels = scene.labels || [];
+    var nodesById = indexById(nodes), routesById = indexById(routes);
+    return [].concat(
+      nodeNodeViolations(nodes, nodesById, tol),
+      labelNodeViolations(labels, nodes, nodesById, routesById, tol),
+      labelLabelViolations(labels, tol),
+      routeNodeViolations(routes, nodes, nodesById, tol),
+      routeLabelViolations(routes, labels, tol),
+      routeMergeViolations(routes, tol, TOLERANCES.merge),
+      detachedLabelViolations(labels, routes, routesById, fontSize + TOLERANCES.labelLineGap)
+    );
+  }
+
+  // ───── Measures ───────────────────────────────────────────────────
+
+  function countCrossings(routes, tol) {
+    var count = 0;
+    for (var i = 0; i < routes.length; i++) {
+      var s1 = segmentsOf(routes[i]);
+      for (var j = i + 1; j < routes.length; j++) {
+        var s2 = segmentsOf(routes[j]);
+        for (var a = 0; a < s1.length; a++) {
+          for (var b = 0; b < s2.length; b++) {
+            if (segmentsCross(s1[a], s2[b], tol)) count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  function bendsOf(route) {
+    var segments = segmentsOf(route);
+    var bends = 0;
+    for (var i = 1; i < segments.length; i++) {
+      var u = segments[i - 1], v = segments[i];
+      var ux = u.b.x - u.a.x, uy = u.b.y - u.a.y, vx = v.b.x - v.a.x, vy = v.b.y - v.a.y;
+      var sine = (ux * vy - uy * vx) / (segmentLength(u) * segmentLength(v));
+      var turnsBack = ux * vx + uy * vy < 0;
+      if (Math.abs(sine) > GEOMETRY_EPSILON || turnsBack) bends++;
+    }
+    return bends;
+  }
+
+  function excessDetourOf(route) {
+    var pts = route.points || [];
+    if (pts.length < 2) return 0;
+    var first = pts[0], last = pts[pts.length - 1];
+    var direct = Math.sqrt((last.x - first.x) * (last.x - first.x) + (last.y - first.y) * (last.y - first.y));
+    if (direct < GEOMETRY_EPSILON) return 0;
+    var length = segmentsOf(route).reduce(function (sum, s) { return sum + segmentLength(s); }, 0);
+    return Math.max(0, length / direct - TOLERANCES.detourAllowance);
+  }
+
+  function sumOver(routes, measure) {
+    return routes.reduce(function (sum, route) { return sum + measure(route); }, 0);
+  }
+
+  // How much the drawing is scaled to fit the pane (1 when unknowable).
+  function paneScale(scene, pane) {
+    var scales = [];
+    if (pane && scene.width > 0 && pane.width > 0) scales.push(pane.width / scene.width);
+    if (pane && scene.height > 0 && pane.height > 0) scales.push(pane.height / scene.height);
+    return scales.length ? Math.min.apply(Math, scales) : 1;
+  }
+
+  function effectiveFont(scene) {
+    return isFinite(scene.smallestFont) ? scene.smallestFont : FONT_WHEN_NONE_NOTED;
+  }
+
+  function scoreOf(fit, crossings, bends, excessDetour) {
+    return Math.log(fit) - WEIGHTS.crossing * crossings - WEIGHTS.bend * bends - WEIGHTS.detour * excessDetour;
+  }
+
+  /**
+   * Judge a finished drawing for a pane.
+   *
+   * @param {object} scene — from createScene(), or a plain record of the same shape
+   * @param {{width:number,height:number}} pane
+   * @returns {{fit:number, emArea:number, crossings:number, bends:number,
+   *            excessDetour:number, violations:Array<{kind:string,a:*,b:*}>,
+   *            valid:boolean, score:number}}
+   */
+  function evaluate(scene, pane) {
+    var routes = scene.routes || [];
+    var font = effectiveFont(scene);
+    var fit = font * paneScale(scene, pane);
+    var crossings = countCrossings(routes, TOLERANCES.overlap);
+    var bends = sumOver(routes, bendsOf);
+    var excessDetour = sumOver(routes, excessDetourOf);
+    var violations = findViolations(scene, font);
+    return {
+      fit: fit,
+      emArea: (scene.width * scene.height) / (font * font),
+      crossings: crossings,
+      bends: bends,
+      excessDetour: excessDetour,
+      violations: violations,
+      valid: violations.length === 0,
+      score: scoreOf(fit, crossings, bends, excessDetour)
+    };
+  }
+
+  /**
+   * Crossings and bends of each route, so a caller can tell which routes a
+   * change made worse. A crossing counts once for each of its two routes.
+   *
+   * @returns {Object<string, {crossings:number, bends:number}>}
+   */
+  function measureRoutes(scene) {
+    var routes = scene.routes || [];
+    var measures = {};
+    routes.forEach(function (route) { measures[route.id] = { crossings: 0, bends: bendsOf(route) }; });
+    for (var i = 0; i < routes.length; i++) {
+      for (var j = i + 1; j < routes.length; j++) {
+        var count = countCrossings([routes[i], routes[j]], TOLERANCES.overlap);
+        measures[routes[i].id].crossings += count;
+        measures[routes[j].id].crossings += count;
+      }
+    }
+    return measures;
+  }
+
+  window.UMLLayoutQuality = {
+    WEIGHTS: WEIGHTS,
+    TOLERANCES: TOLERANCES,
+    createScene: createScene,
+    copyScene: copyScene,
+    evaluate: evaluate,
+    measureRoutes: measureRoutes
+  };
+})();
+/**
+ * UMLCompactLayout — squeeze empty space out of a drawing and choose the best
+ * compact drawing a renderer can produce.
+ *
+ * Two concerns live here, joined only by positions:
+ *
+ *   squeeze(bodies, scene, clearances[, options]) → {[id]: {x, y}}
+ *     Geometry. The tightest positions that keep the order of the bodies on
+ *     each axis, never widen a gap, and keep every gap at least as wide as
+ *     what the scene shows occupying it.
+ *   optimize(adapter, pane) → {svg, scene, metrics, passes, issues}
+ *     Policy. Realize, squeeze, verify and select within a budget of routing
+ *     passes. Knows renderers only through the adapter.
+ *
+ * Pure: no DOM, no timers, no randomness, no renderer state; inputs are never
+ * mutated. Ties go to the earlier item.
+ */
+(function () {
+  'use strict';
+
+  var Quality = window.UMLLayoutQuality;
+
+  // Within this distance a point lies on a side and a segment is straight.
+  var ON_LINE_TOLERANCE = 0.5;
+  var GEOMETRY_EPSILON = 1e-9;
+
+  // `alignKey`: the body field naming a group that keeps a common start
+  // edge on that axis (left on x, top on y). `besideLine`: text reads along
+  // x. On y (true) a label beside a vertical line takes only its height
+  // along it and may sit beside the line's end markers, and a label along a
+  // horizontal lead sits between that lead and the next one. On x a label
+  // along a horizontal line takes its width and keeps clear of the line's
+  // ends, and a label beside a vertical lead may sit on either side of it.
+  var AXES = [
+    { start: 'x', size: 'width', otherStart: 'y', otherSize: 'height', alignKey: 'alignLeft', besideLine: false },
+    { start: 'y', size: 'height', otherStart: 'x', otherSize: 'width', alignKey: 'alignTop', besideLine: true }
+  ];
+
+  // ───── Small helpers ──────────────────────────────────────────────
+
+  function startOf(rect, axis) { return rect[axis.start]; }
+  function endOf(rect, axis) { return rect[axis.start] + rect[axis.size]; }
+  function otherStartOf(rect, axis) { return rect[axis.otherStart]; }
+  function otherEndOf(rect, axis) { return rect[axis.otherStart] + rect[axis.otherSize]; }
+
+  function overlapOf(a0, a1, b0, b1) {
+    return Math.min(a1, b1) - Math.max(a0, b0);
+  }
+
+  // The stretch of the other axis two rectangles share; when they do not
+  // overlap there, the stretch between them.
+  function bandOf(a, b, axis) {
+    var from = Math.max(otherStartOf(a, axis), otherStartOf(b, axis));
+    var to = Math.min(otherEndOf(a, axis), otherEndOf(b, axis));
+    return { from: Math.min(from, to), to: Math.max(from, to) };
+  }
+
+  function crossesBand(lo, hi, band) {
+    return hi > band.from && lo < band.to;
+  }
+
+  function mergedLength(intervals) {
+    var sorted = intervals.slice().sort(function (p, q) { return p[0] - q[0] || p[1] - q[1]; });
+    var total = 0, from = -Infinity, to = -Infinity;
+    sorted.forEach(function (iv) {
+      if (iv[0] > to) {
+        if (to > from) total += to - from;
+        from = iv[0];
+        to = iv[1];
+      } else if (iv[1] > to) {
+        to = iv[1];
+      }
+    });
+    if (to > from) total += to - from;
+    return total;
+  }
+
+  function cleanPoints(route) {
+    var out = [];
+    (route.points || []).forEach(function (p) {
+      var last = out[out.length - 1];
+      if (!last || Math.abs(last.x - p.x) > GEOMETRY_EPSILON || Math.abs(last.y - p.y) > GEOMETRY_EPSILON) out.push(p);
+    });
+    return out;
+  }
+
+  // Maps a scene id (a body, or a node nested in one) to its body's id.
+  function bodyResolver(scene, bodiesById) {
+    var nodesById = {};
+    ((scene && scene.nodes) || []).forEach(function (n) { nodesById[n.id] = n; });
+    return function (id) {
+      var seen = {};
+      while (id != null && !seen[id]) {
+        if (bodiesById[id]) return id;
+        seen[id] = true;
+        id = nodesById[id] ? nodesById[id].parent : null;
+      }
+      return null;
+    };
+  }
+
+  function indexBodies(bodies) {
+    var byId = {};
+    bodies.forEach(function (b) { byId[b.id] = b; });
+    return byId;
+  }
+
+  // ───── What occupies a gap ────────────────────────────────────────
+
+  // What a label along an edge across a horizontal gap keeps from the
+  // edge's ends (`labelEndPad`, optional), else the label padding.
+  function labelEndPad(clearances) {
+    return clearances.labelEndPad != null ? clearances.labelEndPad : clearances.labelPad;
+  }
+
+  // A segment of the route runs straight across the whole gap, within `reach`.
+  function crossesGapStraight(pts, gapFrom, gapTo, axis, reach) {
+    for (var i = 1; i < pts.length; i++) {
+      var p = pts[i - 1], q = pts[i];
+      if (Math.abs(p[axis.otherStart] - q[axis.otherStart]) > ON_LINE_TOLERANCE) continue;
+      if (p[axis.otherStart] < reach.from || p[axis.otherStart] > reach.to) continue;
+      if (Math.min(p[axis.start], q[axis.start]) <= gapFrom + ON_LINE_TOLERANCE &&
+          Math.max(p[axis.start], q[axis.start]) >= gapTo - ON_LINE_TOLERANCE) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The width a gap between `a` (before) and `b` (after) must keep on `axis`:
+   * route tracks parallel to the facing sides, labels, and stubs of routes
+   * attached to the facing sides, merged, plus the clearance at both boxes.
+   * What lies outside the band where the two boxes face counts only when it
+   * belongs to an edge joining the two: that edge, with its labels, lives
+   * between them wherever it runs. On y the band includes the stretch where
+   * the leads of both boxes' routes run side by side (facingBand). On the axis
+   * where labels sit beside a line (AXES.besideLine), the end labels
+   * (`atEnd`) of an edge that crosses the gap straight sit beside its end
+   * markers, so they need only their sizes one after another, each with its
+   * padding on both sides, and share the gap with the stubs of that edge.
+   * Where the renderer sets the name label of such an edge beside the line
+   * too, clear of the markers and on the side free of the end labels
+   * (`nameLabelsShareStubs`), it shares the gap with both. Zero when nothing
+   * occupies the gap.
+   */
+  // The stretch of the other axis a body covers together with the leads of
+  // its routes: an end segment that leaves the body's side along the other
+  // axis (out of a box stacked in a column, sideways).
+  function withLeads(body, axis, ctx) {
+    var from = otherStartOf(body, axis), to = otherEndOf(body, axis);
+    ((ctx.scene && ctx.scene.routes) || []).forEach(function (route) {
+      var pts = cleanPoints(route);
+      if (pts.length < 2) return;
+      [[pts[0], pts[1]], [pts[pts.length - 1], pts[pts.length - 2]]].forEach(function (end) {
+        if (endBody(route, end[0], ctx) !== body.id || Math.abs(end[0][axis.start] - end[1][axis.start]) > ON_LINE_TOLERANCE) return;
+        from = Math.min(from, end[0][axis.otherStart], end[1][axis.otherStart]);
+        to = Math.max(to, end[0][axis.otherStart], end[1][axis.otherStart]);
+      });
+    });
+    return { from: from, to: to };
+  }
+
+  // The body a route end belongs to: whichever of the route's source and
+  // target bodies lies nearer. A renderer may list the points either way
+  // (the class renderer draws inheritance from the parent down).
+  function endBody(route, point, ctx) {
+    var source = ctx.bodyOf(route.source), target = ctx.bodyOf(route.target);
+    if (source == null || target == null) return source == null ? target : source;
+    return distanceToRect(point, ctx.byId[target]) < distanceToRect(point, ctx.byId[source]) ? target : source;
+  }
+
+  function distanceToRect(point, rect) {
+    var dx = Math.max(rect.x - point.x, 0, point.x - rect.x - rect.width);
+    var dy = Math.max(rect.y - point.y, 0, point.y - rect.y - rect.height);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // The stretch of the other axis two boxes cover together with their
+  // leads, where it is longer than what they cover themselves: two parallel
+  // leads bring the corridor between them, with the labels along them.
+  function leadBand(a, b, axis, ctx) {
+    var band = bandOf(a, b, axis);
+    var ea = withLeads(a, axis, ctx), eb = withLeads(b, axis, ctx);
+    var from = Math.max(ea.from, eb.from), to = Math.min(ea.to, eb.to);
+    return to - from > band.to - band.from ? { from: from, to: to } : band;
+  }
+
+  // Where two boxes face each other across the gap: the stretch of the
+  // other axis both cover, on the y axis each with its leads (out of a
+  // column, sideways), where labels sit beside a line (AXES.besideLine).
+  function facingBand(a, b, axis, ctx) {
+    return axis.besideLine ? leadBand(a, b, axis, ctx) : bandOf(a, b, axis);
+  }
+
+  // Where a label in the gap counts. A renderer whose labels need the
+  // corridor between two parallel leads (`labelsBesideLeads`, optional)
+  // gets it on both axes: on x, a label beside a line running down out of
+  // one of two boxes side by side lies there, below both.
+  function labelBandOf(a, b, axis, ctx, band) {
+    return ctx.clearances.labelsBesideLeads && !axis.besideLine ? leadBand(a, b, axis, ctx) : band;
+  }
+
+  function occupiedWidth(a, b, axis, ctx, clearance) {
+    var scene = ctx.scene, clearances = ctx.clearances;
+    var gapFrom = endOf(a, axis), gapTo = startOf(b, axis);
+    var band = facingBand(a, b, axis, ctx);
+    var labelBand = labelBandOf(a, b, axis, ctx, band);
+    var everywhere = { from: -Infinity, to: Infinity };
+    var intervals = [];
+    var halfLane = clearances.lanePitch / 2;
+    var routesById = {};
+    var straightAcross = {};
+    var stacked = 0, beside = 0;
+    function bandFor(route) { return route && ctx.joins(route, a, b) ? everywhere : band; }
+
+    ((scene && scene.routes) || []).forEach(function (route) {
+      routesById[route.id] = route;
+      var reach = bandFor(route);
+      var pts = cleanPoints(route);
+      straightAcross[route.id] = axis.besideLine && crossesGapStraight(pts, gapFrom, gapTo, axis, reach);
+      for (var i = 1; i < pts.length; i++) {
+        var p = pts[i - 1], q = pts[i];
+        var across = Math.abs(p[axis.start] - q[axis.start]) <= ON_LINE_TOLERANCE;
+        var at = p[axis.start];
+        if (!across || at <= gapFrom || at >= gapTo) continue;
+        var lo = Math.min(p[axis.otherStart], q[axis.otherStart]);
+        var hi = Math.max(p[axis.otherStart], q[axis.otherStart]);
+        if (crossesBand(lo, hi, reach)) intervals.push([at - halfLane, at + halfLane]);
+      }
+      [pts[0], pts[pts.length - 1]].forEach(function (end) {
+        if (!end) return;
+        var along = end[axis.otherStart];
+        if (along < reach.from || along > reach.to) return;
+        if (Math.abs(end[axis.start] - gapFrom) <= ON_LINE_TOLERANCE) intervals.push([gapFrom, gapFrom + clearances.stub]);
+        if (Math.abs(end[axis.start] - gapTo) <= ON_LINE_TOLERANCE) intervals.push([gapTo - clearances.stub, gapTo]);
+      });
+    });
+
+    ((scene && scene.labels) || []).forEach(function (label) {
+      var lo = startOf(label, axis), hi = endOf(label, axis);
+      if (hi <= gapFrom || lo >= gapTo) return;
+      if (label.atEnd && straightAcross[label.owner]) {
+        stacked += label[axis.size] + 2 * clearances.labelPad;
+        return;
+      }
+      if (clearances.nameLabelsShareStubs && straightAcross[label.owner]) {
+        beside = Math.max(beside, label[axis.size] + 2 * clearances.labelPad);
+        return;
+      }
+      var owner = routesById[label.owner];
+      var reach = owner && ctx.joins(owner, a, b) ? everywhere : labelBand;
+      if (!crossesBand(otherStartOf(label, axis), otherEndOf(label, axis), reach)) return;
+      var pad = !axis.besideLine && owner && ctx.joins(owner, a, b) ? labelEndPad(clearances) : clearances.labelPad;
+      intervals.push([lo - pad, hi + pad]);
+    });
+
+    var clipped = intervals.map(function (iv) {
+      return [Math.max(iv[0], gapFrom), Math.min(iv[1], gapTo)];
+    }).filter(function (iv) { return iv[1] > iv[0]; });
+    var length = Math.max(mergedLength(clipped), stacked, beside);
+    if (!(length > 0)) return 0;
+    // What already reaches a box (a stub is the lead beside its box) takes
+    // the place of the clearance on that side.
+    var atFrom = clipped.some(function (iv) { return iv[0] <= gapFrom + ON_LINE_TOLERANCE; });
+    var atTo = clipped.some(function (iv) { return iv[1] >= gapTo - ON_LINE_TOLERANCE; });
+    return length + ((atFrom ? 0 : 1) + (atTo ? 0 : 1)) * clearance;
+  }
+
+  // ───── Pair constraints ───────────────────────────────────────────
+
+  // ───── What moves together ────────────────────────────────────────
+
+  /**
+   * Pairs of bodies that keep their offset on `axis`, as a lookup
+   * `tied(a, b)`: the two ends of a route drawn as one straight segment
+   * across the axis (so the edge stays straight), and bodies sharing the
+   * axis's align key: `alignTop` on the vertical axis, `alignLeft` on the
+   * horizontal one (a group keeps a common top or left edge).
+   */
+  function tiesOnAxis(bodies, scene, axis) {
+    var byId = indexBodies(bodies);
+    var resolve = bodyResolver(scene, byId);
+    var key = {};
+    function tie(p, q) {
+      if (p == null || q == null || p === q) return;
+      key[p + '\u0000' + q] = key[q + '\u0000' + p] = true;
+    }
+    ((scene && scene.routes) || []).forEach(function (route) {
+      var pts = cleanPoints(route);
+      if (pts.length !== 2) return;
+      if (Math.abs(pts[0][axis.start] - pts[1][axis.start]) > ON_LINE_TOLERANCE) return;
+      tie(resolve(route.source), resolve(route.target));
+    });
+    var alignKey = axis.alignKey;
+    bodies.forEach(function (p) {
+      bodies.forEach(function (q) {
+        if (p[alignKey] != null && p[alignKey] === q[alignKey]) tie(p.id, q.id);
+      });
+    });
+    return function (a, b) { return !!key[a.id + '\u0000' + b.id]; };
+  }
+
+  /**
+   * How far `b` may move relative to `a` on `axis`: δb − δa ∈ [lo, hi], with
+   * lo ≤ 0 ≤ hi and whole units, so staying put is always allowed.
+   * `a` is the earlier of the two on the axis.
+   *
+   *  - tied (a straight edge across the axis, or a shared align key on
+   *    this axis): they keep their offset;
+   *  - facing across a gap (sharing, or nearly sharing, the other axis): the
+   *    gap may shrink to what occupies it, never grow;
+   *  - apart on both axes: the gap may shrink until the starts or ends meet
+   *    (the other axis keeps them apart), never grow;
+   *  - overlapping extents on this axis (the other axis keeps them apart,
+   *    and they have no order on this one): free while the drawing closes up
+   *    (`free`), so an unrelated box in another row or column never holds a
+   *    gap open; while slack is shared out they keep the offset the closing
+   *    left them, so nothing drifts.
+   */
+  function pairRange(a, b, axis, ctx) {
+    var sA = startOf(a, axis), eA = endOf(a, axis), sB = startOf(b, axis), eB = endOf(b, axis);
+    if (ctx.tied(a, b)) return { lo: 0, hi: 0 };
+    if (eA > sB + GEOMETRY_EPSILON) return { lo: -Infinity, hi: Infinity, free: true };
+
+    var base = ctx.clearances.boxClearance + Math.max(ctx.extra(a.id), ctx.extra(b.id));
+    var clearance = base + ctx.separation(a.id, b.id, axis.start);
+    // What lies between the two across the axis (package frames) reaches
+    // as far as its separation there: nearer than that, they face.
+    var other = axis.start === 'x' ? 'y' : 'x';
+    var across = Math.max(ctx.separation(a.id, b.id, other), ctx.separation(b.id, a.id, other));
+    if (ctx.otherOverlap(a, b) > -Math.max(clearance, base + across)) {
+      var gap = sB - eA;
+      var asked = Math.max(ctx.room(a.id, 'after'), ctx.room(b.id, 'before'));
+      var required = Math.min(gap, Math.max(clearance, asked, occupiedWidth(a, b, axis, ctx, clearance)));
+      return { lo: -Math.floor(gap - required + GEOMETRY_EPSILON), hi: 0 };
+    }
+    return { lo: -Math.floor(Math.min(sB - sA, eB - eA) + GEOMETRY_EPSILON), hi: 0 };
+  }
+
+  // ───── Difference constraints ─────────────────────────────────────
+
+  /**
+   * Least solution of δ[to] ≥ δ[from] + w (pair edges) and δ[g] ≥ lower[g].
+   * Whole-unit weights keep the solution whole. δ = 0 is feasible and every
+   * variable has a finite lower bound, so the relaxation settles.
+   */
+  function leastSolution(pairEdges, lower) {
+    var value = lower.slice();
+    for (var round = 0; round <= value.length; round++) {
+      var changed = false;
+      for (var e = 0; e < pairEdges.length; e++) {
+        var edge = pairEdges[e];
+        var candidate = value[edge.from] + edge.w;
+        if (candidate > value[edge.to]) { value[edge.to] = candidate; changed = true; }
+      }
+      if (!changed) break;
+    }
+    return value;
+  }
+
+  // Greatest solution with δ[g] ≤ upper[g]: the least solution of the mirror.
+  function greatestSolution(pairEdges, upper) {
+    var mirrored = pairEdges.map(function (edge) { return { from: edge.to, to: edge.from, w: edge.w }; });
+    var negated = upper.map(function (u) { return -u; });
+    return leastSolution(mirrored, negated).map(function (v) { return -v; });
+  }
+
+  /**
+   * The offsets of the bodies on one axis, within the drawing's extent.
+   * Without pins: compress towards the start (the least solution); then push
+   * every body as far towards the end as it can go without reopening any
+   * gap the compression closed or moving a free pair apart, and take the
+   * midpoint of the two, floored (flooring keeps whole-unit difference
+   * constraints true). Every gap ends as tight as the compression made it;
+   * only slack no gap needs (a short row beside a long one) is shared.
+   * With pins: bodies after a pin close up to it as in the least solution;
+   * bodies the least solution cannot move close up to it from the other side.
+   */
+  function solveAxis(bodies, ranges, axis) {
+    var pairEdges = [];
+    ranges.forEach(function (r) {
+      if (isFinite(r.lo)) pairEdges.push({ from: r.a, to: r.b, w: r.lo });
+      if (isFinite(r.hi)) pairEdges.push({ from: r.b, to: r.a, w: -r.hi });
+    });
+
+    var minStart = Infinity, maxEnd = -Infinity;
+    bodies.forEach(function (b) {
+      minStart = Math.min(minStart, startOf(b, axis));
+      maxEnd = Math.max(maxEnd, endOf(b, axis));
+    });
+    var anyPin = bodies.some(function (b) { return b.pinned; });
+    var lower = bodies.map(function (b) {
+      return b.pinned ? 0 : Math.ceil(minStart - startOf(b, axis) - GEOMETRY_EPSILON);
+    });
+    var upper = bodies.map(function (b) {
+      return b.pinned ? 0 : Math.floor(maxEnd - endOf(b, axis) + GEOMETRY_EPSILON);
+    });
+
+    var least = leastSolution(pairEdges, lower);
+    if (!anyPin) {
+      // A gap may not open again beyond what the least solution left, and
+      // a free pair keeps the offset the least solution gave it.
+      var keepClosed = pairEdges.slice();
+      ranges.forEach(function (r) {
+        if (isFinite(r.hi) || r.free) keepClosed.push({ from: r.b, to: r.a, w: least[r.a] - least[r.b] });
+        if (r.free) keepClosed.push({ from: r.a, to: r.b, w: least[r.b] - least[r.a] });
+      });
+      var balanced = greatestSolution(keepClosed, upper);
+      return least.map(function (lo, i) { return Math.floor((lo + balanced[i]) / 2); });
+    }
+    var greatest = greatestSolution(pairEdges, upper);
+    var raised = least.map(function (lo, i) {
+      return lo === 0 && greatest[i] > 0 ? greatest[i] : lower[i];
+    });
+    return leastSolution(pairEdges, raised);
+  }
+
+  // Bodies in axis order: by start, then by input order.
+  function axisOrder(bodies, axis) {
+    return bodies.map(function (b, i) { return i; }).sort(function (i, j) {
+      return startOf(bodies[i], axis) - startOf(bodies[j], axis) || i - j;
+    });
+  }
+
+  // `joins(route, a, b)`: the route's two ends are the bodies a and b.
+  function routeJoiner(bodies, scene) {
+    var resolve = bodyResolver(scene, indexBodies(bodies));
+    return function (route, a, b) {
+      var s = resolve(route.source), t = resolve(route.target);
+      return (s === a.id && t === b.id) || (s === b.id && t === a.id);
+    };
+  }
+
+  function squeezeAxis(bodies, scene, clearances, axis, otherOverlap, extra, room, separation) {
+    var order = axisOrder(bodies, axis);
+    var ctx = {
+      scene: scene, clearances: clearances, otherOverlap: otherOverlap, extra: extra, separation: separation,
+      room: function (id, side) {
+        var at = room[id] && room[id][side];
+        return Number(at && at[axis.start]) || 0;
+      },
+      tied: tiesOnAxis(bodies, scene, axis),
+      joins: routeJoiner(bodies, scene),
+      bodyOf: bodyResolver(scene, indexBodies(bodies)),
+      byId: indexBodies(bodies)
+    };
+    var ranges = [];
+    for (var p = 0; p < order.length; p++) {
+      for (var q = p + 1; q < order.length; q++) {
+        var range = pairRange(bodies[order[p]], bodies[order[q]], axis, ctx);
+        ranges.push({ a: order[p], b: order[q], lo: range.lo, hi: range.hi, free: !!range.free });
+      }
+    }
+    return solveAxis(bodies, ranges, axis);
+  }
+
+  function overlapOnOtherAxis(axis) {
+    return function (a, b) {
+      return overlapOf(otherStartOf(a, axis), otherEndOf(a, axis), otherStartOf(b, axis), otherEndOf(b, axis));
+    };
+  }
+
+  /**
+   * The tightest positions for the bodies of a drawing, x first, then y.
+   * Bodies joined by a straight edge keep their offset across it, so the
+   * edge stays straight; bodies sharing an `alignTop` (or `alignLeft`) key
+   * keep a common top (or left) edge. Other bodies keep their order on each
+   * axis.
+   *
+   * @param {Array<{id, x, y, width, height, pinned, alignTop, alignLeft}>} bodies
+   * @param {object} scene — what the drawing shows, in the same coordinates
+   * @param {{lanePitch, boxClearance, stub, labelPad, labelEndPad?, labelsBesideLeads?, nameLabelsShareStubs?}} clearances
+   *   labelEndPad (optional, default labelPad) — what the label of an edge
+   *   joining two boxes side by side keeps from that edge's ends
+   *   labelsBesideLeads (optional, default false) — a label in the corridor
+   *   between the parallel leads of two boxes side by side keeps its room
+   *   between them, as it does between two boxes stacked in a column
+   *   nameLabelsShareStubs (optional, default false) — the name label of an
+   *   edge crossing a gap straight shares the gap with its stubs and end
+   *   labels, as the renderer sets it beside the line
+   * @param {{widen?: Object<string, number>, room?: Object<string, {before?: {x?, y?}, after?: {x?, y?}}>, separation?: function(string, string, string): number}} [options]
+   *   widen — extra box clearance for every pair that includes one of these
+   *   bodies; room — the least gap these bodies keep, per axis, to the box
+   *   they face before them (left, above) or after them (right, below); a
+   *   gap already narrower stays as it is; separation(aId, bId, 'x'|'y') —
+   *   extra clearance a pair keeps on that axis, `a` before `b` (for what
+   *   the drawing puts between them, such as package frames)
+   * @returns {Object<string, {x:number, y:number}>}
+   */
+  function squeeze(bodies, scene, clearances, options) {
+    var widen = (options && options.widen) || {};
+    var room = (options && options.room) || {};
+    var extra = function (id) { return Number(widen[id]) || 0; };
+    var pairSeparation = options && options.separation;
+    var separation = function (aId, bId, axisStart) {
+      return pairSeparation ? Number(pairSeparation(aId, bId, axisStart)) || 0 : 0;
+    };
+    var xAxis = AXES[0], yAxis = AXES[1];
+
+    var dx = squeezeAxis(bodies, scene, clearances, xAxis, overlapOnOtherAxis(xAxis), extra, room, separation);
+    var shifted = bodies.map(function (b, i) { return { x: b.x + dx[i], width: b.width }; });
+    var indexOf = {};
+    bodies.forEach(function (b, i) { indexOf[b.id] = i; });
+    var originalOverlap = overlapOnOtherAxis(yAxis);
+    // A pair faces across a vertical gap if it shares x before or after the x pass.
+    var yOverlap = function (a, b) {
+      var sa = shifted[indexOf[a.id]], sb = shifted[indexOf[b.id]];
+      return Math.max(originalOverlap(a, b), overlapOf(sa.x, sa.x + sa.width, sb.x, sb.x + sb.width));
+    };
+    var dy = squeezeAxis(bodies, scene, clearances, yAxis, yOverlap, extra, room, separation);
+
+    var positions = {};
+    bodies.forEach(function (b, i) { positions[b.id] = { x: b.x + dx[i], y: b.y + dy[i] }; });
+    return positions;
+  }
+
+  /**
+   * Opens space at each listed body, `by.x` across and `by.y` down: every
+   * body starting after the listed body's start moves on by that much. If
+   * that would move a pinned body, the others move back instead; if both
+   * sides hold a pin, that cut is skipped. Bodies joined by a straight edge
+   * across an axis (a team, see tiesOnAxis in `scene`) move on that axis only
+   * when all of them lie after the cut, so the edge stays straight. Used to
+   * repair a drawing that overlaps.
+   */
+  function widenAround(bodies, ids, by, scene) {
+    var listed = {};
+    ids.forEach(function (id) { listed[id] = true; });
+    var shift = bodies.map(function () { return { x: 0, y: 0 }; });
+    AXES.forEach(function (axis) {
+      var team = teamsOnAxis(bodies, scene, axis);
+      bodies.forEach(function (anchor) {
+        if (!listed[anchor.id]) return;
+        var cut = startOf(anchor, axis);
+        var beyond = bodies.map(function (b) { return startOf(b, axis) > cut + GEOMETRY_EPSILON; });
+        var after = bodies.map(function (b, i) { return team[i].every(function (j) { return beyond[j]; }); });
+        var pinnedAfter = bodies.some(function (b, i) { return b.pinned && after[i]; });
+        var pinnedBefore = bodies.some(function (b, i) { return b.pinned && !after[i]; });
+        if (pinnedAfter && pinnedBefore) return;
+        var amount = by[axis.start];
+        bodies.forEach(function (b, i) {
+          if (after[i] !== pinnedAfter) shift[i][axis.start] += pinnedAfter ? -amount : amount;
+        });
+      });
+    });
+    var positions = {};
+    bodies.forEach(function (b, i) { positions[b.id] = { x: b.x + shift[i].x, y: b.y + shift[i].y }; });
+    return positions;
+  }
+
+  // For each body, the indices of the bodies tied to it on `axis`, itself
+  // included and ties followed through: they keep their offsets there.
+  function teamsOnAxis(bodies, scene, axis) {
+    var tied = tiesOnAxis(bodies, scene, axis);
+    var root = bodies.map(function (b, i) { return i; });
+    function find(i) { while (root[i] !== i) i = root[i]; return i; }
+    bodies.forEach(function (p, i) {
+      bodies.forEach(function (q, j) { if (j > i && tied(p, q)) root[find(j)] = find(i); });
+    });
+    var members = bodies.map(function () { return []; });
+    bodies.forEach(function (b, i) { members[find(i)].push(i); });
+    return bodies.map(function (b, i) { return members[find(i)]; });
+  }
+
+  // ───── Coordinator ────────────────────────────────────────────────
+
+  var COMPACT_POLICY = Object.freeze({
+    // Routing passes by boxes + edges: the first tier that holds wins.
+    passBudgets: Object.freeze([
+      Object.freeze({ upTo: 12, passes: 8 }),
+      Object.freeze({ upTo: 30, passes: 5 })
+    ]),
+    passesBeyond: 3,
+    squeezeRetries: 2,   // re-squeezes with wider gaps after a rejected squeeze
+    repairAttempts: 3,   // widenings of a reference that overlaps
+    scoreTie: 0.005      // scores closer than this are a tie (spec 6.1)
+  });
+
+  function passBudget(boxCount, edgeCount) {
+    var total = (Number(boxCount) || 0) + (Number(edgeCount) || 0);
+    for (var i = 0; i < COMPACT_POLICY.passBudgets.length; i++) {
+      if (total <= COMPACT_POLICY.passBudgets[i].upTo) return COMPACT_POLICY.passBudgets[i].passes;
+    }
+    return COMPACT_POLICY.passesBeyond;
+  }
+
+  // One optimize call: the adapter, the pane, and every drawing realized.
+  function createRun(adapter, pane) {
+    var size = adapter.size || {};
+    return { adapter: adapter, pane: pane, budget: passBudget(size.boxes, size.edges), passes: 0, attempts: [] };
+  }
+
+  function hasPass(run) {
+    return run.passes < run.budget;
+  }
+
+  // A drawing of `placement`, judged and recorded in the run. `shown`: it
+  // is the picture the reader would get (with the adapter's annotations).
+  function recordAttempt(run, placement, drawn, shown) {
+    var scene = drawn.scene || Quality.createScene();
+    var attempt = {
+      order: run.attempts.length,
+      placement: placement,
+      svg: drawn.svg,
+      scene: scene,
+      metrics: Quality.evaluate(scene, run.pane),
+      shown: shown
+    };
+    run.attempts.push(attempt);
+    return attempt;
+  }
+
+  function annotates(adapter) {
+    return typeof adapter.annotate === 'function';
+  }
+
+  /**
+   * One routing pass: realize a placement, add the adapter's annotations if
+   * it has any, and judge the result. Annotating is the costly part (callouts
+   * are placed by a search of their own), so when `keepable` rejects the
+   * bare drawing the annotations are skipped: they only add labels, which
+   * never remove a crossing, bend or overlap, so they could not save it.
+   * Null when the budget is spent.
+   */
+  function realizeAttempt(run, placement, keepable) {
+    if (!hasPass(run)) return null;
+    run.passes++;
+    var drawn = run.adapter.realize(placement) || {};
+    if (!annotates(run.adapter)) return recordAttempt(run, placement, drawn, true);
+    if (keepable) {
+      var bare = recordAttempt(run, placement, drawn, false);
+      if (!keepable(bare)) return bare;
+    }
+    return recordAttempt(run, placement, run.adapter.annotate(drawn) || {}, true);
+  }
+
+  function movesAnything(bodies, positions) {
+    return bodies.some(function (b) { return positions[b.id].x !== b.x || positions[b.id].y !== b.y; });
+  }
+
+  function realizeAt(run, attempt, bodies, positions, keepable) {
+    if (!movesAnything(bodies, positions)) return null;
+    return realizeAttempt(run, run.adapter.withPositions(attempt.placement, positions), keepable);
+  }
+
+  function noWorse(attempt, base) {
+    return attempt.metrics.valid && withinCounts(attempt, base.metrics);
+  }
+
+  // No more crossings and bends than `counts` allows.
+  function withinCounts(attempt, counts) {
+    return excessOver(attempt, counts) === 0;
+  }
+
+  // The crossings and bends a drawing has beyond `counts` (none without).
+  function excessOver(attempt, counts) {
+    if (!counts) return 0;
+    return Math.max(0, attempt.metrics.crossings - counts.crossings) + Math.max(0, attempt.metrics.bends - counts.bends);
+  }
+
+  // The bodies a scene element sits at: a node's body, a route's two ends,
+  // a label's owner.
+  function bodiesAt(sceneIds, scene, bodies) {
+    var resolve = bodyResolver(scene, indexBodies(bodies));
+    var routesById = {}, labelsById = {};
+    (scene.routes || []).forEach(function (r) { routesById[r.id] = r; });
+    (scene.labels || []).forEach(function (l) { labelsById[l.id] = l; });
+    var found = {};
+    function visit(id) {
+      if (labelsById[id]) id = labelsById[id].owner;
+      var ends = routesById[id] ? [routesById[id].source, routesById[id].target] : [id];
+      ends.forEach(function (end) {
+        var body = resolve(end);
+        if (body != null) found[body] = true;
+      });
+    }
+    sceneIds.forEach(visit);
+    // In body order, so the result does not depend on scene order.
+    return bodies.map(function (b) { return b.id; }).filter(function (id) { return found[id]; });
+  }
+
+  function violationParticipants(attempt) {
+    var ids = [];
+    attempt.metrics.violations.forEach(function (v) { ids.push(v.a, v.b); });
+    return ids;
+  }
+
+  // Bodies at the routes a squeeze made worse, or at a new violation.
+  function worsenedBodies(base, squeezed, bodies) {
+    var before = Quality.measureRoutes(base.scene), after = Quality.measureRoutes(squeezed.scene);
+    var ids = violationParticipants(squeezed);
+    (squeezed.scene.routes || []).forEach(function (route) {
+      var was = before[route.id] || { crossings: 0, bends: 0 };
+      var now = after[route.id];
+      if (now.crossings > was.crossings || now.bends > was.bends) ids.push(route.id);
+    });
+    return bodiesAt(ids, squeezed.scene, bodies);
+  }
+
+  // Extra clearance for the listed bodies; every body when none is known.
+  function widening(bodies, ids, by) {
+    var widen = {};
+    (ids.length ? ids : bodies.map(function (b) { return b.id; })).forEach(function (id) { widen[id] = by; });
+    return widen;
+  }
+
+  // The labels a drawing's violations name, and the label (a note) a named
+  // leader route starts from: room for the note is what moves its leader.
+  function violatingLabels(attempt) {
+    var labelsById = {}, routesById = {}, found = [];
+    (attempt.scene.labels || []).forEach(function (l) { labelsById[l.id] = l; });
+    (attempt.scene.routes || []).forEach(function (r) { routesById[r.id] = r; });
+    function add(id) {
+      if (labelsById[id] && found.indexOf(labelsById[id]) < 0) found.push(labelsById[id]);
+    }
+    attempt.metrics.violations.forEach(function (v) {
+      [v.a, v.b].forEach(function (id) {
+        add(id);
+        if (routesById[id]) add(routesById[id].source);
+      });
+    });
+    return found;
+  }
+
+  // The space a label takes on each axis with its padding.
+  function labelNeed(label, clearances) {
+    return { x: label.width + 2 * clearances.labelPad, y: label.height + 2 * clearances.labelPad };
+  }
+
+  /**
+   * The gap the bodies at each misplaced label's line keep so the renderer
+   * has room to put that label back by its line: per axis, the label's size
+   * with its padding plus the box clearance at both boxes, on the side of
+   * each body where the label sat in the drawing before the squeeze (both
+   * sides when it was not there).
+   */
+  function roomForLabels(squeezed, base, bodies, clearances, room) {
+    var before = {};
+    (base.scene.labels || []).forEach(function (l) { before[l.id] = l; });
+    var byId = indexBodies(bodies);
+    violatingLabels(squeezed).forEach(function (label) {
+      var need = labelNeed(label, clearances);
+      var was = before[label.id];
+      bodiesAt([label.id], squeezed.scene, bodies).forEach(function (id) {
+        var at = room[id] = room[id] || { before: { x: 0, y: 0 }, after: { x: 0, y: 0 } };
+        AXES.forEach(function (axis) {
+          var gap = need[axis.start] + 2 * clearances.boxClearance;
+          var labelMid = was ? startOf(was, axis) + was[axis.size] / 2 : null;
+          var bodyMid = startOf(byId[id], axis) + byId[id][axis.size] / 2;
+          if (labelMid === null || labelMid <= bodyMid) at.before[axis.start] = Math.max(at.before[axis.start], gap);
+          if (labelMid === null || labelMid >= bodyMid) at.after[axis.start] = Math.max(at.after[axis.start], gap);
+        });
+      });
+    });
+    return room;
+  }
+
+  /**
+   * The squeeze of one valid drawing, done in steps of one routing pass.
+   * A squeeze is kept only if it is valid and has no more crossings and
+   * bends than the drawing it came from. After a rejection, the pairs at the
+   * routes that got worse keep one more lane pitch of clearance per retry,
+   * and the bodies at a misplaced label keep the room that label needs.
+   */
+  function createSqueezeJob(run, base) {
+    return {
+      base: base,
+      bodies: run.adapter.bodies(base.placement),
+      tries: 0,
+      widenIds: [],
+      options: { widen: {}, room: {}, separation: run.adapter.separation || null },
+      result: null,
+      done: false
+    };
+  }
+
+  function stepSqueezeJob(run, job) {
+    if (job.done || !hasPass(run)) return;
+    var clearances = run.adapter.clearances;
+    var squeezed = realizeAt(run, job.base, job.bodies, squeeze(job.bodies, job.base.scene, clearances, job.options),
+      function (bare) { return noWorse(bare, job.base); });
+    job.tries++;
+    if (!squeezed) { job.done = true; return; }
+    if (noWorse(squeezed, job.base)) { job.result = squeezed; job.done = true; return; }
+    if (job.tries > COMPACT_POLICY.squeezeRetries) { job.done = true; return; }
+    worsenedBodies(job.base, squeezed, job.bodies).forEach(function (id) {
+      if (job.widenIds.indexOf(id) < 0) job.widenIds.push(id);
+    });
+    job.options = {
+      widen: widening(job.bodies, job.widenIds, job.tries * clearances.lanePitch),
+      room: roomForLabels(squeezed, job.base, job.bodies, clearances, job.options.room),
+      separation: job.options.separation
+    };
+  }
+
+  // Widen around what overlaps until the drawing is valid, at most
+  // `attempts` times: by a lane and the box clearance, or by what a
+  // misplaced label needs.
+  function repairAttempt(run, attempt, attempts) {
+    var clearances = run.adapter.clearances;
+    var least = clearances.boxClearance + clearances.lanePitch;
+    for (var k = 0; k < attempts && !attempt.metrics.valid; k++) {
+      var bodies = run.adapter.bodies(attempt.placement);
+      var ids = bodiesAt(violationParticipants(attempt), attempt.scene, bodies);
+      if (!ids.length) ids = bodies.map(function (b) { return b.id; });
+      var by = { x: least, y: least };
+      violatingLabels(attempt).forEach(function (label) {
+        var need = labelNeed(label, clearances);
+        by.x = Math.max(by.x, need.x);
+        by.y = Math.max(by.y, need.y);
+      });
+      var next = realizeAt(run, attempt, bodies, widenAround(bodies, ids, by, attempt.scene));
+      if (!next) break;
+      attempt = next;
+    }
+    return attempt;
+  }
+
+  // The widenings a reference that overlaps may have, with `spent` of
+  // `budget` passes gone and `candidateCount` candidates in the search:
+  // every other candidate keeps a pass to be drawn and one to be squeezed.
+  function repairsLeft(budget, spent, candidateCount) {
+    return Math.min(COMPACT_POLICY.repairAttempts, Math.max(0, budget - spent - 2 * (candidateCount - 1)));
+  }
+
+  /**
+   * The widenings `optimize` can give the reference (its first candidate)
+   * of an adapter of this `size` ({boxes, edges}) with `candidateCount`
+   * candidates, should it overlap once drawn.
+   */
+  function referenceRepairs(size, candidateCount) {
+    return repairsLeft(passBudget(size && size.boxes, size && size.edges), 1, candidateCount);
+  }
+
+  // Predicted scale of a placement in the pane, from the adapter's estimate.
+  function estimatedScale(adapter, placement, pane) {
+    var size = adapter.estimate(placement) || {};
+    if (!(size.width > 0 && size.height > 0)) return -Infinity;
+    return Math.min(pane.width / size.width, pane.height / size.height);
+  }
+
+  function rankCandidates(adapter, placements, pane) {
+    if (typeof adapter.estimate !== 'function') return placements;
+    return placements.map(function (placement, i) {
+      return { placement: placement, i: i, scale: estimatedScale(adapter, placement, pane) };
+    }).sort(function (p, q) {
+      return q.scale - p.scale || p.i - q.i;
+    }).map(function (ranked) { return ranked.placement; });
+  }
+
+  // The better of two valid drawings (spec 6.1): higher score; within the
+  // tie, smaller em-area; then the earlier one.
+  function better(a, b) {
+    var gap = b.metrics.score - a.metrics.score;
+    if (Math.abs(gap) > COMPACT_POLICY.scoreTie) return gap > 0 ? b : a;
+    if (b.metrics.emArea < a.metrics.emArea) return b;
+    if (b.metrics.emArea > a.metrics.emArea) return a;
+    return b.order < a.order ? b : a;
+  }
+
+  function fewerViolations(a, b) {
+    return b.metrics.violations.length < a.metrics.violations.length ? b : a;
+  }
+
+  /**
+   * Choose the best compact drawing a renderer can make for a pane.
+   *
+   * Realizes the first candidate (the renderer's normal placement) as the
+   * reference, repairing it if it overlaps, with at most the passes that
+   * still leave two (drawn and squeezed) for every other candidate. Then, in estimated-fit order
+   * (the reference among them), every candidate is realized and squeezed
+   * once; only then do rejected squeezes get their retries, in the same
+   * order. The bound is the adapter's limits (its drawing without compact
+   * layout), else the reference as first drawn. A valid candidate is
+   * squeezed when it stays within the bound, has no more crossings and bends
+   * than the reference as first drawn (repaired or not), or has fewer extra
+   * than the valid reference. Of the valid drawings, returns the one with
+   * fewest crossings and bends beyond the bound, then the best (`better`);
+   * if none is valid, the one with fewest violations.
+   *
+   * An adapter with `annotate` has every drawing judged with its annotations,
+   * as the reader will see it, and squeezed with them in its scene. Only a
+   * squeeze already rejected bare (invalid, or more crossings and bends than
+   * its base) is left unannotated and never returned.
+   *
+   * @param {object} adapter — the renderer, as seen by compact layout:
+   *   candidates() → [placement]  (first is the normal placement)
+   *   bodies(placement) → [{id, x, y, width, height, pinned, alignTop, alignLeft}]
+   *   withPositions(placement, {[id]: {x, y}}) → a new placement
+   *   realize(placement) → {svg, scene}  (one routing pass)
+   *   clearances: {lanePitch, boxClearance, stub, labelPad, labelEndPad?, labelsBesideLeads?, nameLabelsShareStubs?}
+   *   separation(aId, bId, 'x'|'y') → number  (optional; extra clearance a
+   *     pair of bodies keeps on that axis, see squeeze)
+   *   size: {boxes, edges}  (decides the pass budget)
+   *   estimate(placement) → {width, height}  (optional, ranks candidates)
+   *   limits: {crossings, bends}  (optional; those of the renderer's drawing
+   *     without compact layout, which compact should not exceed)
+   *   annotate({svg, scene}) → {svg, scene}  (optional; what is drawn over a
+   *     finished drawing, such as teaching callouts: may only add labels,
+   *     lower the smallest font and grow the size, and must leave the
+   *     drawing it is given unchanged)
+   * @param {{width:number, height:number}} pane
+   * @returns {{svg, scene, metrics, passes:number, issues:number}}
+   */
+  // The placements without repeats: a placement equal to an earlier one
+  // would spend a routing pass on the same drawing.
+  function distinctPlacements(placements) {
+    var seen = {};
+    return placements.filter(function (placement) {
+      var key;
+      try { key = JSON.stringify(placement); } catch (e) { return true; }
+      if (key === undefined) return true;
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+
+  function optimize(adapter, pane) {
+    var run = createRun(adapter, pane);
+    var candidates = distinctPlacements(adapter.candidates() || []);
+    if (!candidates.length) return { svg: '', scene: null, metrics: null, passes: 0, issues: 0 };
+
+    var drawn = realizeAttempt(run, candidates[0]);
+    // The counts of the reference as drawn: a repair only widens, and an
+    // invalid reference still says what the normal placement costs.
+    var counts = { crossings: drawn.metrics.crossings, bends: drawn.metrics.bends };
+    // Every other candidate keeps a pass to be drawn and one to be squeezed.
+    var repairs = repairsLeft(run.budget, run.passes, candidates.length);
+    var reference = repairAttempt(run, drawn, repairs);
+    var referenceExcess = reference.metrics.valid ? excessOver(reference, counts) : Infinity;
+    // What compact may not exceed: the drawing without compact layout where
+    // the adapter knows it, else the reference as drawn.
+    var bound = adapter.limits || counts;
+
+    var drawings = [], jobs = [];
+    rankCandidates(adapter, candidates, pane).forEach(function (placement) {
+      var attempt = placement === candidates[0] ? reference : realizeAttempt(run, placement);
+      if (!attempt || !attempt.metrics.valid) return;
+      var excess = excessOver(attempt, counts);
+      if (excessOver(attempt, bound) > 0 && excess > 0 && excess >= referenceExcess) return;
+      drawings.push(attempt);
+      var job = createSqueezeJob(run, attempt);
+      stepSqueezeJob(run, job);
+      jobs.push(job);
+    });
+    jobs.forEach(function (job) {
+      while (!job.done && hasPass(run)) stepSqueezeJob(run, job);
+    });
+    jobs.forEach(function (job) { if (job.result) drawings.push(job.result); });
+
+    function preferred(a, b) {
+      var byBound = excessOver(a, bound) - excessOver(b, bound);
+      if (byBound) return byBound < 0 ? a : b;
+      return better(a, b);
+    }
+    var shown = run.attempts.filter(function (attempt) { return attempt.shown; });
+    var best = drawings.length ? drawings.reduce(preferred) : shown.reduce(fewerViolations);
+    return {
+      svg: best.svg,
+      scene: best.scene,
+      metrics: best.metrics,
+      passes: run.passes,
+      issues: best.metrics.valid ? 0 : best.metrics.violations.length
+    };
+  }
+
+  window.UMLCompactLayout = {
+    POLICY: COMPACT_POLICY,
+    passBudget: passBudget,
+    referenceRepairs: referenceRepairs,
+    squeeze: squeeze,
+    optimize: optimize
+  };
+})();
+/**
+ * UMLCompactMemo — the compact drawings already made in this page (or
+ * worker), so a render repeated with the same inputs (a tutorial re-inferring
+ * an unchanged diagram, a pane drawn again) does not search again.
+ *
+ *   keyOf(kind, inputs) → a key for everything a drawing depends on: the
+ *     renderer kind, its inputs (parsed spec, colours, pane), and the text
+ *     measurement; null when an input cannot be written down faithfully.
+ *   remember(key, compute) → compute()'s value for that key, computed on
+ *     the first call only; a null key, or a compute that throws, is never
+ *     remembered.
+ *   forget() → drops everything (tests).
+ *
+ * In memory only, bounded to LIMIT entries (the least recently used goes
+ * first). Values are frozen: markup strings or records of strings and numbers,
+ * never DOM nodes or scenes a caller could change.
+ */
+(function () {
+  'use strict';
+
+  var LIMIT = 32;
+  // Insertion order is use order: a hit moves its entry to the end.
+  var entries = new Map();
+
+  // Thrown by the key's replacer for a value JSON would drop or change.
+  var UNKEYABLE = {};
+
+  function faithful(name, value) {
+    var type = typeof value;
+    if (type === 'function' || type === 'symbol' || type === 'bigint') throw UNKEYABLE;
+    if (type === 'number' && !isFinite(value)) throw UNKEYABLE;
+    if (value === undefined && Array.isArray(this)) throw UNKEYABLE;
+    // A plain object, from any realm: its prototype is an Object.prototype
+    // (whose own prototype is null), or it has none.
+    if (value && type === 'object' && !Array.isArray(value)) {
+      var proto = Object.getPrototypeOf(value);
+      if (proto !== null && Object.getPrototypeOf(proto) !== null) throw UNKEYABLE;
+    }
+    return value;
+  }
+
+  function keyOf(kind, inputs) {
+    try {
+      return JSON.stringify([kind, window.UMLShared.textMeasurementFingerprint(), inputs], faithful);
+    } catch (e) {
+      if (e === UNKEYABLE) return null;
+      throw e;
+    }
+  }
+
+  function remember(key, compute) {
+    if (key === null) return compute();
+    if (entries.has(key)) {
+      var hit = entries.get(key);
+      entries.delete(key);
+      entries.set(key, hit);
+      return hit;
+    }
+    var value = Object.freeze(compute());
+    entries.set(key, value);
+    if (entries.size > LIMIT) entries.delete(entries.keys().next().value);
+    return value;
+  }
+
+  function forget() {
+    entries.clear();
+  }
+
+  window.UMLCompactMemo = { LIMIT: LIMIT, keyOf: keyOf, remember: remember, forget: forget };
+})();
+/**
  * UML Class Diagram Renderer
  *
  * Custom SVG renderer for UML class diagrams with proper shared-target
@@ -7774,6 +11127,7 @@
  *   class Animal { +name: str; +speak() }
  *   abstract class Shape { -color: int; +{abstract} area(): double }
  *   interface Drawable { +draw() }
+ *   package zoo::animals { class Dog }   UML package around the classes declared in it
  *   Dog --|> Animal
  *   Circle ..|> Drawable
  *   Zoo *-- Animal : contains
@@ -7835,6 +11189,9 @@
    */
   function parse(text) {
     var lines = text.split('\n');
+    // Source line of each working line: statements of a one-line package
+    // are read as extra lines but keep their line's index (route ids).
+    var lineOrigins = lines.map(function(_, index) { return index; });
     var classes = [];
     var relationships = [];
     var classMap = {};
@@ -7843,8 +11200,10 @@
     var braceDepth = 0;
     var direction = 'TB';
     var layoutPreference = null;
+    var pane = null;
     var shadowEnabled = true;
     var directionLocked = false;
+    var packageScope = UMLShared.createPackageScope();
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
@@ -7858,9 +11217,11 @@
         } else if (layoutDirective.direction) {
           direction = layoutDirective.direction;
           layoutPreference = null;
+          pane = null;
           directionLocked = true;
         } else {
           layoutPreference = layoutDirective.layoutPreference;
+          pane = layoutDirective.pane;
         }
         continue;
       }
@@ -7889,6 +11250,21 @@
         continue;
       }
 
+      // Packages contain the classes declared inside them.
+      var packageOpener = UMLShared.parsePackageOpener(line);
+      if (packageOpener) {
+        packageScope.openPackage(packageOpener);
+        // A one-line block's statements are read as the lines that follow.
+        var inlineLines = packageOpener.inlineLines;
+        Array.prototype.splice.apply(lines, [i + 1, 0].concat(inlineLines));
+        Array.prototype.splice.apply(lineOrigins, [i + 1, 0].concat(inlineLines.map(function() { return lineOrigins[i]; })));
+        continue;
+      }
+      if (line === '}') {
+        packageScope.close();
+        continue;
+      }
+
       // Note
       var noteIdx = UMLShared.parseNoteLine(line, lines, i, notes);
       if (noteIdx >= 0) { i = noteIdx; continue; }
@@ -7896,6 +11272,7 @@
       // Try to parse class declaration
       var cls = parseClassDecl(line);
       if (cls) {
+        packageScope.declare(cls, cls.name);
         // Check if this line also contains opening brace
         if (line.indexOf('{') !== -1) {
           braceDepth = 1;
@@ -7928,10 +11305,14 @@
       // Try to parse relationship
       var rel = parseRelationship(line);
       if (rel) {
-        rel.sourceIndex = i;
+        rel.sourceIndex = lineOrigins[i];
         relationships.push(rel);
         continue;
       }
+
+      // Any other block (`together {`, `skinparam class {`) must not take a
+      // package's closing brace.
+      if (/\{\s*$/.test(line)) packageScope.openWrapper();
     }
 
     // Auto-upgrade: generalization targeting an interface becomes realization,
@@ -7951,8 +11332,10 @@
       classes: classes,
       relationships: relationships,
       notes: notes,
+      packages: packageScope.packages,
       direction: direction,
       layoutPreference: layoutPreference,
+      pane: pane,
       shadowEnabled: shadowEnabled,
       directionLocked: directionLocked
     };
@@ -7961,7 +11344,8 @@
   /**
    * Parse a class declaration line.
    * Supports: class Name, abstract class Name, interface Name,
-   *           class Name <<stereotype>>
+   *           class Name <<stereotype>>, and package Name (a package
+   *           drawn without its members, as a node like a class)
    */
   function parseClassDecl(line) {
     // Remove trailing { if present
@@ -7979,7 +11363,7 @@
     var highlight = null;
     var texture = null;
     var hl = UMLShared.parseHighlightColor(cleanLine);
-    if (/^(?:abstract\s+class|class|interface|enum)\s+\S/i.test(hl.stripped)) {
+    if (/^(?:abstract\s+class|class|interface|enum|package)\s+\S/i.test(hl.stripped)) {
       cleanLine = hl.stripped;
       highlight = hl.highlight;
       texture = hl.texture;
@@ -7995,7 +11379,7 @@
     // `#color` may also appear before the stereotype (`class Foo #red <<s>>`).
     if (!highlight && !texture) {
       var hl2 = UMLShared.parseHighlightColor(cleanLine);
-      if (/^(?:abstract\s+class|class|interface|enum)\s+\S/i.test(hl2.stripped)) {
+      if (/^(?:abstract\s+class|class|interface|enum|package)\s+\S/i.test(hl2.stripped)) {
         cleanLine = hl2.stripped;
         highlight = hl2.highlight;
         texture = hl2.texture;
@@ -8014,18 +11398,33 @@
     } else if (/^class\s+/.test(cleanLine)) {
       classType = 'class';
       name = cleanLine.replace(/^class\s+/, '').trim();
+    } else if (/^package\s+/.test(cleanLine)) {
+      // A package line without braces (parse() reads `package Name {` as
+      // the frame around its members) is a package drawn without members.
+      classType = 'package';
+      name = cleanLine.replace(/^package\s+/, '').trim();
     } else {
       return null;
     }
 
     if (!name) return null;
 
+    // Keep the reference identifier separate from a quoted display name.
+    var label = null;
+    var alias = name.match(/^("(?:[^"\\]|\\.)*"|\S+)\s+as\s+("(?:[^"\\]|\\.)*"|\S+)$/i);
+    if (alias) {
+      label = alias[1].replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1');
+      name = alias[2].replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1');
+    }
+
     return {
       name: name,
+      label: label,
       type: classType,
       stereotype: stereotype,
       highlight: highlight,
       texture: texture,
+      package: null,
       attributes: [],
       methods: [],
     };
@@ -8233,11 +11632,119 @@
 
   // ─── Layout ───────────────────────────────────────────────────────
 
+  // A package drawn without its members (UML 2.5.1, 12.2.4): the name, with
+  // any stereotype above it, stands in the large rectangle, and the small
+  // tab on the left of the top edge stays empty. The node's box covers both
+  // parts; tabW and tabH give the tab in the box's top left corner.
+  var PACKAGE_NODE = { tabH: 12, tabMinW: 30, tabMaxW: 54, padY: 10, minWidth: 120 };
+
+  function measurePackageNode(cls) {
+    var stereotypeText = cls.stereotype ? '\u00AB' + cls.stereotype + '\u00BB' : '';
+    var stereotypeH = stereotypeText ? CFG.lineHeight : 0;
+    var nameW = UMLShared.textWidth(cls.label || cls.name, true, CFG.fontSizeBold);
+    if (stereotypeText) {
+      nameW = Math.max(nameW, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype));
+    }
+    var width = Math.ceil(Math.max(PACKAGE_NODE.minWidth, nameW + CFG.padX * 2) / 2) * 2;
+    var height = PACKAGE_NODE.tabH + PACKAGE_NODE.padY * 2 + CFG.lineHeight + stereotypeH;
+    return {
+      width: width,
+      height: height,
+      nameH: height,
+      stereotypeH: stereotypeH,
+      propertyH: 0,
+      attrH: 0,
+      methH: 0,
+      stereotypeText: stereotypeText,
+      propertyText: '',
+      tabW: Math.max(PACKAGE_NODE.tabMinW, Math.min(PACKAGE_NODE.tabMaxW, Math.round(width * 0.3))),
+      tabH: PACKAGE_NODE.tabH,
+    };
+  }
+
+  // The outline of a package node differs from its box right of the tab,
+  // where the top edge lies one tab height lower. Move a route end that the
+  // router put on the box onto the outline. Returns new points.
+  function snapRouteEndsToPackageOutline(points, fromEntry, toEntry) {
+    if (!points || points.length < 2) return points;
+    var snapped = points.map(function(point) { return { x: point.x, y: point.y }; });
+    function snap(endIndex, neighborIndex, entry) {
+      if (!entry || !entry.cls || entry.cls.type !== 'package') return;
+      var end = snapped[endIndex], neighbor = snapped[neighborIndex];
+      var bodyTop = entry.y + entry.box.tabH;
+      var vertical = Math.abs(neighbor.x - end.x) < 0.75, horizontal = Math.abs(neighbor.y - end.y) < 0.75;
+      // From above, right of the tab: the line runs on to the large rectangle.
+      if (vertical && neighbor.y < end.y && Math.abs(end.y - entry.y) < 0.75 &&
+          end.x > entry.x + entry.box.tabW + 0.5) {
+        end.y = bodyTop;
+        return;
+      }
+      // At the right edge beside the tab there is no outline: lower the last
+      // lane onto the large rectangle. The lane before it only changes length.
+      if (horizontal && snapped.length > 2 && Math.abs(end.x - (entry.x + entry.box.width)) < 0.75 &&
+          end.y < bodyTop + 0.5) {
+        var laneY = bodyTop + Math.min(8, (entry.box.height - entry.box.tabH) / 2);
+        end.y = laneY;
+        neighbor.y = laneY;
+      }
+    }
+    snap(0, 1, fromEntry);
+    snap(snapped.length - 1, snapped.length - 2, toEntry);
+    return snapped;
+  }
+
+  // The shortest orthogonal line between two rectangles that do not
+  // overlap: straight where they face each other over a stretch that keeps
+  // `margin` from their corners, otherwise with one corner. Rectangles that
+  // face each other over less than that count as apart on that axis too, in
+  // the order of their centres. A line with one corner leaves and arrives
+  // over a stretch of `margin` or more, so it runs through neither
+  // rectangle (rectangles too small for that keep both lines).
+  // `blocked(points)` tells whether a candidate crosses something in its
+  // way; of the two one-corner candidates, the first clear one is used.
+  // Returns null for rectangles that overlap.
+  function routeBetweenOutlines(a, b, blocked) {
+    var margin = 12;
+    var aAbove = a.y + a.height <= b.y, aBelow = a.y >= b.y + b.height;
+    var aLeft = a.x + a.width <= b.x, aRight = a.x >= b.x + b.width;
+    if (!(aAbove || aBelow || aLeft || aRight)) return null;
+    // The stretch the two share on the axis they are not apart on.
+    var x1 = Math.max(a.x, b.x), x2 = Math.min(a.x + a.width, b.x + b.width);
+    var y1 = Math.max(a.y, b.y), y2 = Math.min(a.y + a.height, b.y + b.height);
+    if ((aAbove || aBelow) && x2 - x1 >= margin * 2) {
+      var x = Math.round((x1 + x2) / 2);
+      return [{ x: x, y: aAbove ? a.y + a.height : a.y }, { x: x, y: aAbove ? b.y : b.y + b.height }];
+    }
+    if ((aLeft || aRight) && y2 - y1 >= margin * 2) {
+      var y = Math.round((y1 + y2) / 2);
+      return [{ x: aLeft ? a.x + a.width : a.x, y: y }, { x: aLeft ? b.x : b.x + b.width, y: y }];
+    }
+
+    var ax = Math.round(a.x + a.width / 2), ay = Math.round(a.y + a.height / 2);
+    var bx = Math.round(b.x + b.width / 2), by = Math.round(b.y + b.height / 2);
+    var above = aAbove || (!aBelow && ay < by), left = aLeft || (!aRight && ax < bx);
+    var verticalFirst = [{ x: ax, y: above ? a.y + a.height : a.y }, { x: ax, y: by }, { x: left ? b.x : b.x + b.width, y: by }];
+    var horizontalFirst = [{ x: left ? a.x + a.width : a.x, y: ay }, { x: bx, y: ay }, { x: bx, y: above ? b.y : b.y + b.height }];
+    // Each stretch runs away from its own rectangle, toward the other one.
+    function reaches(points) {
+      var down = above ? 1 : -1, right = left ? 1 : -1;
+      return [[points[0], points[1]], [points[1], points[2]]].every(function(stretch) {
+        return (stretch[1].x - stretch[0].x) * right + (stretch[1].y - stretch[0].y) * down >= margin;
+      });
+    }
+    var candidates = [verticalFirst, horizontalFirst];
+    var reaching = candidates.filter(reaches);
+    if (!reaching.length) reaching = candidates;
+    var clear = reaching.filter(function(points) { return !blocked(points); });
+    return clear.length ? clear[0] : reaching[0];
+  }
+
   /**
    * Measure a class box.
    * Returns { width, height, nameH, stereotypeH, propertyH, attrH, methH }
    */
   function measureBox(cls) {
+    if (cls.type === 'package') return measurePackageNode(cls);
     var hasStereotype = cls.type === 'interface' || cls.type === 'enum' || cls.stereotype;
     var stereotypeText = '';
     if (cls.stereotype) stereotypeText = '\u00AB' + cls.stereotype + '\u00BB';
@@ -8253,7 +11760,7 @@
     var propertyH = propertyText ? CFG.lineHeight : 0;
     var nameH = CFG.padY * 2 + CFG.lineHeight + stereotypeH + propertyH;
 
-    var nameW = UMLShared.textWidth(cls.name, true, CFG.fontSizeBold);
+    var nameW = UMLShared.textWidth(cls.label || cls.name, true, CFG.fontSizeBold);
     if (hasStereotype) {
       nameW = Math.max(nameW, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype));
     }
@@ -8315,12 +11822,9 @@
     return 0;
   }
 
-  function withAdaptiveClassTypography(parsed, fn) {
-    var bump = adaptiveClassFontBump(parsed);
-    if (!bump) return fn();
-    var compactTypography = parsed && parsed.layoutPreference === 'compact';
-
-    var saved = {
+  // The metrics a render may change for its duration (see withClassMetrics).
+  function snapshotClassMetrics() {
+    return {
       fontSize: CFG.fontSize,
       fontSizeBold: CFG.fontSizeBold,
       fontSizeStereotype: CFG.fontSizeStereotype,
@@ -8336,6 +11840,80 @@
       notePadX: UMLShared.NOTE_CFG.padX,
       notePadY: UMLShared.NOTE_CFG.padY
     };
+  }
+
+  function restoreClassMetrics(metrics) {
+    CFG.fontSize = metrics.fontSize;
+    CFG.fontSizeBold = metrics.fontSizeBold;
+    CFG.fontSizeStereotype = metrics.fontSizeStereotype;
+    CFG.lineHeight = metrics.lineHeight;
+    CFG.padX = metrics.padX;
+    CFG.padY = metrics.padY;
+    CFG.labelOffset = metrics.labelOffset;
+    CFG.multOffset = metrics.multOffset;
+    CFG.svgPad = metrics.svgPad;
+    UMLShared.NOTE_CFG.fontSize = metrics.noteFontSize;
+    UMLShared.NOTE_CFG.codeFontSize = metrics.noteCodeFontSize;
+    UMLShared.NOTE_CFG.lineHeight = metrics.noteLineHeight;
+    UMLShared.NOTE_CFG.padX = metrics.notePadX;
+    UMLShared.NOTE_CFG.padY = metrics.notePadY;
+  }
+
+  // Compact text is three pixels above the base member size, the same for
+  // members, stereotypes, relation labels, multiplicities and notes, so no
+  // small label scales the whole drawing up. Every class text size stays
+  // within base + 0..4 px, the range js/uml-live.js measures for workers.
+  var COMPACT_CLASS_TYPE_BUMP = 3;
+
+  // Compact metric table (spec 6.5), derived from the base metrics in CFG.
+  // Paddings and margin are stated in em of the member font.
+  function compactClassMetrics(base) {
+    var memberFont = base.fontSize + COMPACT_CLASS_TYPE_BUMP;
+    return {
+      fontSize: memberFont,
+      fontSizeBold: base.fontSizeBold + COMPACT_CLASS_TYPE_BUMP,
+      fontSizeStereotype: memberFont,
+      lineHeight: memberFont + 7,
+      padX: Math.round(memberFont * 0.6),
+      padY: Math.round(memberFont * 0.25),
+      labelOffset: base.labelOffset + Math.ceil(COMPACT_CLASS_TYPE_BUMP / 2),
+      multOffset: base.multOffset + COMPACT_CLASS_TYPE_BUMP,
+      svgPad: Math.round(memberFont * 0.7),
+      noteFontSize: memberFont,
+      noteCodeFontSize: memberFont,
+      noteLineHeight: memberFont + 5,
+      notePadX: Math.round(memberFont * 0.6),
+      notePadY: Math.round(memberFont * 0.35)
+    };
+  }
+
+  function withClassMetrics(metrics, fn) {
+    var saved = snapshotClassMetrics();
+    try {
+      restoreClassMetrics(metrics);
+      return fn();
+    } finally {
+      restoreClassMetrics(saved);
+    }
+  }
+
+  // A hand-arranged spec (@layout block or @pos) keeps today's compact path.
+  function hasAuthoredLayout(layout) {
+    if (!layout) return false;
+    return Object.keys(layout.positions || {}).length > 0 || Object.keys(layout.routes || {}).length > 0;
+  }
+
+  function usesOptimizedCompactLayout(parsed) {
+    return !!parsed && parsed.layoutPreference === 'compact' && !hasAuthoredLayout(parsed.layout);
+  }
+
+  function withAdaptiveClassTypography(parsed, fn) {
+    if (usesOptimizedCompactLayout(parsed)) return withClassMetrics(compactClassMetrics(snapshotClassMetrics()), fn);
+    var bump = adaptiveClassFontBump(parsed);
+    if (!bump) return fn();
+    var compactTypography = parsed && parsed.layoutPreference === 'compact';
+
+    var saved = snapshotClassMetrics();
 
     try {
       CFG.fontSize += bump;
@@ -8368,20 +11946,7 @@
       }
       return fn();
     } finally {
-      CFG.fontSize = saved.fontSize;
-      CFG.fontSizeBold = saved.fontSizeBold;
-      CFG.fontSizeStereotype = saved.fontSizeStereotype;
-      CFG.lineHeight = saved.lineHeight;
-      CFG.padX = saved.padX;
-      CFG.padY = saved.padY;
-      CFG.labelOffset = saved.labelOffset;
-      CFG.multOffset = saved.multOffset;
-      CFG.svgPad = saved.svgPad;
-      UMLShared.NOTE_CFG.fontSize = saved.noteFontSize;
-      UMLShared.NOTE_CFG.codeFontSize = saved.noteCodeFontSize;
-      UMLShared.NOTE_CFG.lineHeight = saved.noteLineHeight;
-      UMLShared.NOTE_CFG.padX = saved.notePadX;
-      UMLShared.NOTE_CFG.padY = saved.notePadY;
+      restoreClassMetrics(saved);
     }
   }
 
@@ -8425,6 +11990,9 @@
       methH: box.methH,
       stereotypeText: box.stereotypeText,
       propertyText: box.propertyText,
+      // A package node keeps its tab (measurePackageNode).
+      tabW: box.tabW,
+      tabH: box.tabH,
     };
   }
 
@@ -8680,7 +12248,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var engineOptions = {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: effectiveDirection,
@@ -8690,7 +12258,8 @@
       labelFontSize: CFG.fontSizeStereotype,
       markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4,
       edgeSizes: classEdgeSizes
-    });
+    };
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, engineOptions);
 
     // Read back positions
     for (var n in result.nodes) {
@@ -8968,13 +12537,11 @@
               upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
             }
 
-            var candidateDeltas = collectShiftCandidates(currentName);
+            var candidateDeltas = UMLShared.distinctNudgeDeltas(collectShiftCandidates(currentName), maxShift, lower, upper);
             var bestDelta = 0;
             var bestScore = currentScore;
             for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
-              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
-              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
-              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+              var candidateDelta = candidateDeltas[cdi];
 
               var candidateScore = entryRouteScore(currentName, candidateDelta);
               if (candidateScore + 4 < bestScore) {
@@ -9187,7 +12754,10 @@
       height: maxY - minY,
       offsetX: -minX,
       offsetY: -minY,
-      layoutResult: result // passthrough edge route if ever needed by generateSVG
+      layoutResult: result, // passthrough edge route if ever needed by generateSVG
+      // What the layered engine was given, so compact layout can place the
+      // same input again with packages kept together.
+      engineInput: { nodes: layoutNodes, edges: layoutEdges, options: engineOptions }
     };
   }
 
@@ -9195,12 +12765,86 @@
 
 
 
+  // `endLabels` maps a class name to the label rectangles ({left, right,
+  // top, bottom}) drawn at its ends of relationships: multiplicities and
+  // role names belong inside the class's package.
+  function layoutClassPackages(parsed, entries, endLabels) {
+    if (!parsed.packages || !parsed.packages.length) return [];
+    return UMLShared.layoutPackageFrames(parsed.packages, function(id) {
+      var entry = entries[id];
+      if (!entry) return null;
+      var minX = entry.x, minY = entry.y;
+      var maxX = entry.x + entry.box.width, maxY = entry.y + entry.box.height;
+      ((endLabels && endLabels[id]) || []).forEach(function(rect) {
+        minX = Math.min(minX, rect.left); minY = Math.min(minY, rect.top);
+        maxX = Math.max(maxX, rect.right); maxY = Math.max(maxY, rect.bottom);
+      });
+      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }, Object.keys(entries), classPackageStyle());
+  }
+
+  // The typography of package tabs, from the current metrics.
+  function classPackageStyle() {
+    return { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight };
+  }
+
+  // Member note targets are derived from class positions: rebuild them once
+  // manual positions have moved the classes.
+  function refreshMemberNoteTargets(entries) {
+    for (var name in entries) {
+      if (Object.prototype.hasOwnProperty.call(entries, name) && entries[name].cls) {
+        entries[name].noteTargets = buildMemberNoteTargets(entries[name]);
+      }
+    }
+  }
+
+  // A package node: the tab, the large rectangle, and the name inside it.
+  // The unpainted rectangle marks the node's box for layout tools, as the
+  // border of a class does.
+  function drawPackageNode(svg, id, entry, fill, textureUrl, colors) {
+    var box = entry.box, x = entry.x, y = entry.y;
+    var bodyY = y + box.tabH, bodyH = box.height - box.tabH;
+    var outline = '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>';
+    svg.push('<g class="uml-package-node" data-uml-package-node="' + UMLShared.escapeXml(id) + '" filter="url(#uml-node-shadow)">');
+    svg.push('<rect data-package-node-part="tab" x="' + x + '" y="' + y + '" width="' + box.tabW + '" height="' + box.tabH +
+      '" fill="' + fill + outline);
+    svg.push('<rect data-package-node-part="body" x="' + x + '" y="' + bodyY + '" width="' + box.width + '" height="' + bodyH +
+      '" fill="' + fill + outline);
+    if (textureUrl) {
+      svg.push('<rect x="' + x + '" y="' + bodyY + '" width="' + box.width + '" height="' + bodyH +
+        '" fill="' + textureUrl + '" stroke="none"/>');
+    }
+    svg.push('</g>');
+    svg.push('<rect data-layout-bounds-id="' + UMLShared.escapeXml(id) + '" x="' + x + '" y="' + y + '" width="' + box.width +
+      '" height="' + box.height + '" fill="none" stroke="none"/>');
+
+    var textCx = x + box.width / 2;
+    var textTop = bodyY + (bodyH - box.stereotypeH - CFG.lineHeight) / 2;
+    if (box.stereotypeText) {
+      svg.push('<text x="' + textCx + '" y="' + (textTop + CFG.lineHeight * 0.75) + '" text-anchor="middle" ' +
+        'font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '">' +
+        UMLShared.escapeXml(box.stereotypeText) + '</text>');
+    }
+    svg.push('<text x="' + textCx + '" y="' + (textTop + box.stereotypeH + CFG.lineHeight * 0.75) + '" text-anchor="middle" ' +
+      'font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+      UMLShared.escapeXml(entry.cls.label || entry.cls.name) + '</text>');
+  }
+
   /**
    * Generate full SVG string from layout and relationships.
    */
-  function generateSVG(layout, parsed, colors) {
+  function generateSVG(layout, parsed, colors, record) {
     var entries = layout.entries;
     var relationships = parsed.relationships;
+    // When given, `record.scene` receives what is drawn (a UMLLayoutQuality
+    // scene in layout coordinates) and the canvas also covers every route.
+    var scene = record && record.scene ? record.scene : null;
+    // Compact layout: a multiplicity with no clear spot beside its end
+    // searches along its line before settling for an overlap.
+    var searchesAlongRoute = !!(record && record.searchesAlongRoute);
+    // Compact layout: each relationship tries its cheapest anchor pairs
+    // first (it routes many trial placements; see computeOrthogonalRoute).
+    var routesCheapestFirst = !!(record && record.routesCheapestFirst);
 
     var svg = [];
     var labelSvg = [];
@@ -9224,6 +12868,45 @@
       });
     }
 
+    // Packages enclose their classes as placed, manual positions included,
+    // and are drawn behind everything. Their name tabs are labels too:
+    // relationship labels, multiplicities, and notes keep clear of them.
+    // The shapes fill this slot once the end labels are placed, so that
+    // each frame also encloses the labels at its classes.
+    var packageFrames = layoutClassPackages(parsed, entries);
+    var packageShapesSlot = svg.length;
+    svg.push('');
+    packageFrames.forEach(function(frame) {
+      placedLabels.push({ left: frame.tab.x, right: frame.tab.x + frame.tab.width, top: frame.tab.y, bottom: frame.tab.y + frame.tab.height });
+    });
+
+    // A line through a package reads as if it belonged there. A relationship
+    // may cross the outline of a package that holds one of its ends; it keeps
+    // out of every other package and off every package's name tab.
+    var packageParent = {};
+    (parsed.packages || []).forEach(function(pkg) { packageParent[pkg.id] = pkg.parent || null; });
+    function packagesHolding(name) {
+      var holding = {};
+      var id = entries[name] && entries[name].cls ? entries[name].cls.package : null;
+      while (id && !holding[id]) {
+        holding[id] = true;
+        id = packageParent[id];
+      }
+      return holding;
+    }
+    function packageRouteObstacles(fromName, toName) {
+      var fromPackages = packagesHolding(fromName), toPackages = packagesHolding(toName);
+      var obstacles = [];
+      packageFrames.forEach(function(frame) {
+        var tab = frame.tab, body = frame.body;
+        obstacles.push({ x1: tab.x, y1: tab.y, x2: tab.x + tab.width, y2: tab.y + tab.height });
+        if (!fromPackages[frame.id] && !toPackages[frame.id]) {
+          obstacles.push({ x1: body.x, y1: body.y, x2: body.x + body.width, y2: body.y + body.height });
+        }
+      });
+      return obstacles;
+    }
+
     function classNotePressureBaseName(targetName) {
       if (!targetName) return '';
       var cleanTarget = String(targetName).replace(/^"|"$/g, '').trim();
@@ -9244,6 +12927,35 @@
       if (rel && rel.from) attrs += ' data-layout-source="' + UMLShared.escapeXml(rel.from) + '"';
       if (rel && rel.to) attrs += ' data-layout-target="' + UMLShared.escapeXml(rel.to) + '"';
       return attrs;
+    }
+
+    // ── Scene record (compact layout only) ──
+    function recordRoute(id, points, source, target, bundle) {
+      if (!scene || !points || points.length < 2) return;
+      scene.addRoute({ id: id, points: UMLShared.simplifyOrthogonalPath(cloneClassRoutePoints(points)), source: source, target: target, bundle: bundle });
+    }
+
+    // Placement rects pad the text (font + 6 above the baseline, 4 below);
+    // the scene keeps the inked band: cap height above the baseline and
+    // descenders below it.
+    function recordTextLabel(id, rect, owner, kind) {
+      if (!scene || !rect) return;
+      var font = CFG.fontSizeStereotype;
+      var baseline = rect.bottom - 4;
+      scene.noteFont(font);
+      scene.addLabel({
+        id: id, owner: owner, kind: kind, atEnd: kind === 'multiplicity',
+        x: rect.left, y: Math.max(rect.top, baseline - font * 0.8),
+        width: rect.right - rect.left, height: font * 1.05
+      });
+    }
+
+    // A hierarchy edge from the parent's bottom edge (through its triangle)
+    // to the child's top; edges of one fan share a bundle.
+    function recordHierarchyRoute(groupKey, group, childName, pointsFromTriangle) {
+      var parent = entries[group.target];
+      var start = { x: pointsFromTriangle[0].x, y: parent.y + parent.box.height };
+      recordRoute('inherit:' + groupKey + ':' + childName, [start].concat(pointsFromTriangle), childName, group.target, groupKey);
     }
 
     var classNoteSidePressure = {};
@@ -9677,6 +13389,44 @@
       return filtered;
     }
 
+    /**
+     * Compact layout only: when no spot beside the end is clear, a clear spot
+     * by the end's first two segments, as near the end as possible and
+     * nearer to it than to the far end; null when there is none. The normal
+     * layout keeps its least-bad spot beside the end, so its output does not
+     * change.
+     */
+    function placeClassMultiplicityAlongRoute(routeInfo, isSource, text) {
+      var points = routeInfo.points;
+      var fromEnd = isSource ? points.slice(0, 3) : points.slice(-3).reverse();
+      if (fromEnd.length < 2) return null;
+      var lastSegment = points.length - 2;
+      var ownNearEnd = isSource ? [0, 1] : [lastSegment, lastSegment - 1];
+      var otherSegments = noteRouteSegments.filter(function(segment) {
+        return segment.routeIndex !== routeInfo.routeIndex || ownNearEnd.indexOf(segment.segmentIndex) < 0;
+      });
+      var placement = UMLShared.placeOrthogonalLabel(text, fromEnd, classObstacles.concat(noteMarkerObstacles), placedLabels, {
+        fontSize: CFG.fontSizeStereotype,
+        obstaclePad: 6,
+        labelPad: 8,
+        segmentPad: 3,
+        endpointPad: 6,
+        preferredGap: 6,
+        maxComfortGap: 12,
+        otherSegments: otherSegments,
+        // Fine steps near the end: on a short line the two ends' texts
+        // fit beside it one after the other only close to their ends.
+        fractions: [0.12, 0.16, 0.2, 0.24, 0.28, 0.32, 0.4, 0.5, 0.6, 0.7, 0.8, 0.88],
+        preferredPoint: fromEnd[0],
+        preferredPointWeight: 2
+      });
+      if (!placement || !isFinite(placement.score)) return null;
+      var end = fromEnd[0], farEnd = isSource ? points[points.length - 1] : points[0];
+      var cx = (placement.rect.left + placement.rect.right) / 2, cy = (placement.rect.top + placement.rect.bottom) / 2;
+      var nearer = Math.abs(cx - end.x) + Math.abs(cy - end.y) < Math.abs(cx - farEnd.x) + Math.abs(cy - farEnd.y);
+      return nearer ? placement : null;
+    }
+
     function placeClassMultiplicityLabel(routeInfo, endpointKey) {
       var isSource = endpointKey === 'source';
       var text = isSource ? routeInfo.rel.fromMult : routeInfo.rel.toMult;
@@ -9785,6 +13535,18 @@
         directCandidates.push({ x: endpoint.point.x + sideBias0 * secondaryOffset, y: endpoint.point.y + rowOffset + sourceInheritOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
         directCandidates.push({ x: endpoint.point.x + sideBias0 * primaryOffset, y: endpoint.point.y - 6 + sourceInheritOffset, anchor: sideBias0 < 0 ? 'end' : 'start' });
       }
+      // Compact layout: beside the end marker, just clear of the box, on
+      // either side of the line, so the two ends of a short vertical line
+      // keep their texts by their own ends.
+      if (searchesAlongRoute && (side === 'top' || side === 'bottom') && !sourceInheritOffset) {
+        var besideMarker = Math.max(CFG.diamondW, CFG.arrowSize) / 2 + 4;
+        var clearOfBoxY = side === 'top'
+          ? endpoint.point.y - 10
+          : endpoint.point.y + CFG.fontSizeStereotype + 12;
+        [sideBias0, -sideBias0].forEach(function(bias) {
+          directCandidates.push({ x: endpoint.point.x + bias * besideMarker, y: clearOfBoxY, anchor: bias < 0 ? 'end' : 'start' });
+        });
+      }
 
       if (!isSource &&
           endpoint.count > 1 &&
@@ -9837,7 +13599,10 @@
         }
       }
 
-      if (bestDirectPlacement) return bestDirectPlacement;
+      if (bestDirectPlacement) {
+        var alongRoute = searchesAlongRoute ? placeClassMultiplicityAlongRoute(routeInfo, isSource, text) : null;
+        return alongRoute || bestDirectPlacement;
+      }
 
       if (!isSource &&
           endpoint.count > 1 &&
@@ -10466,6 +14231,7 @@
       if (!points || UMLShared.routeHitsObstacle(points, classObstacles, skipNames, null)) {
         points = hierarchyOutsideFallback({ x: parentCx, y: triBot }, { x: childCx, y: child.y }, skipNames);
       }
+      recordHierarchyRoute(gk, group, childName, points);
       drawHierarchyPolyline(points, dashAttr);
     }
 
@@ -10527,6 +14293,21 @@
         for (var hds = 0; hds < sharedSegments.length; hds++) {
           drawHierarchySegment(sharedSegments[hds], dashAttr);
         }
+        if (scene) recordSharedHierarchyFan(gk, group, parentCx, triBot, group.children.length === 1 ? junctionYSingle : junctionY);
+      }
+    }
+
+    // The fan drawn as shared segments, as one route per child.
+    function recordSharedHierarchyFan(groupKey, group, fanParentCx, fanTriBot, fanJunctionY) {
+      for (var rfi = 0; rfi < group.children.length; rfi++) {
+        var fanChildName = group.children[rfi];
+        var fanChild = entries[fanChildName];
+        if (!fanChild) continue;
+        var fanChildCx = childConnX(fanChild, fanChildName, groupKey);
+        var fanPoints = Math.abs(fanParentCx - fanChildCx) < 1 && group.children.length === 1
+          ? [{ x: fanParentCx, y: fanTriBot }, { x: fanChildCx, y: fanChild.y }]
+          : [{ x: fanParentCx, y: fanTriBot }, { x: fanParentCx, y: fanJunctionY }, { x: fanChildCx, y: fanJunctionY }, { x: fanChildCx, y: fanChild.y }];
+        recordHierarchyRoute(groupKey, group, fanChildName, fanPoints);
       }
     }
 
@@ -10721,7 +14502,7 @@
       // the filled and hollow diamonds that distinguish their semantics.
       var markerRouteObstacles = noteMarkerObstacles.map(function(marker) {
         return { x1: marker.x, y1: marker.y, x2: marker.x + marker.w, y2: marker.y + marker.h };
-      });
+      }).concat(packageRouteObstacles(orel.from, orel.to));
       var markerIsClear = function(points) { return wholePartMarkerIsClear(points, orel, fromE); };
 
       var isSelfRelation = orel.from === orel.to;
@@ -10745,6 +14526,7 @@
         classNoteSidePressure[orel.to],
         {
           fastScore: useSmallClassRouteBudget,
+          cheapestFirst: routesCheapestFirst,
           maxSourceCandidates: 6,
           maxTargetCandidates: 6,
           occupiedAssociations: associationOccupiedSegments,
@@ -10827,7 +14609,9 @@
       }
 
       }
+      pathPoints = snapRouteEndsToPackageOutline(pathPoints, fromE, toE);
       var markerPathPoints = pathPoints;
+      recordRoute(classRelationRouteId(orel, oi), pathPoints, orel.from, orel.to, null);
       var p0 = markerPathPoints[0], p1 = markerPathPoints[1];
       var pLast = markerPathPoints[markerPathPoints.length - 1], pPrev = markerPathPoints[markerPathPoints.length - 2];
       var actualSourceSide = classEdgeForPoint(p0, fromE, sourceSide);
@@ -10979,6 +14763,7 @@
         if (routeInfo.fromMultPlacement) {
           placedLabels.push(routeInfo.fromMultPlacement.rect);
           pushClassTextSvg(labelSvg, routeInfo.rel.fromMult, routeInfo.fromMultPlacement, CFG.fontSizeStereotype);
+          recordTextLabel('mult-from:' + cti, routeInfo.fromMultPlacement.rect, classRelationRouteId(routeInfo.rel, routeInfo.routeIndex), 'multiplicity');
         }
       }
       if (routeInfo.rel.toMult) {
@@ -10986,6 +14771,7 @@
         if (routeInfo.toMultPlacement) {
           placedLabels.push(routeInfo.toMultPlacement.rect);
           pushClassTextSvg(labelSvg, routeInfo.rel.toMult, routeInfo.toMultPlacement, CFG.fontSizeStereotype);
+          recordTextLabel('mult-to:' + cti, routeInfo.toMultPlacement.rect, classRelationRouteId(routeInfo.rel, routeInfo.routeIndex), 'multiplicity');
         }
       }
     }
@@ -11008,8 +14794,88 @@
           { fontSize: CFG.fontSizeStereotype, className: 'uml-association-label-direction' }
         );
         placedLabels.push(UMLShared.unionRects(labelRect, directionRect));
+        recordTextLabel('label:' + cli, UMLShared.unionRects(labelRect, directionRect), classRelationRouteId(labelRouteInfo.rel, labelRouteInfo.routeIndex), 'relation');
       }
     }
+
+    // ── Fit the packages to their classes and the end labels drawn at them;
+    // draw the shapes behind everything and the names over the lines that
+    // cross their tabs ──
+    var endLabelsAt = {};
+    classRelationTextQueue.forEach(function(routeInfo) {
+      [[routeInfo.rel.from, routeInfo.fromMultPlacement], [routeInfo.rel.to, routeInfo.toMultPlacement]].forEach(function(end) {
+        if (end[1] && end[1].rect) (endLabelsAt[end[0]] = endLabelsAt[end[0]] || []).push(end[1].rect);
+      });
+    });
+    packageFrames = layoutClassPackages(parsed, entries, endLabelsAt);
+    var packageShapes = [];
+    UMLShared.drawPackageFrames(packageShapes, packageFrames, colors);
+    svg[packageShapesSlot] = packageShapes.join('');
+
+    // ── Dependencies that start or end at a package frame (UML 2.5.1,
+    // 7.7.4). The frames are final only now, so these are routed last,
+    // from outline to outline ──
+    var frameById = {};
+    packageFrames.forEach(function(frame) { frameById[frame.id] = frame; });
+    function dependencyEnd(name) {
+      var entry = entries[name];
+      if (entry) return { rect: { x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height }, entry: entry };
+      var frame = frameById[name];
+      return frame ? { rect: frame.body, frame: frame } : null;
+    }
+    function rectHolds(outer, inner) {
+      return inner.x >= outer.x && inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
+    }
+    // Over its name tab, a frame's outline is the tab's top edge, for a
+    // line that comes from above the tab.
+    function snapToFrameTab(end, neighbor, frame) {
+      if (!frame) return;
+      var fromAbove = Math.abs(neighbor.x - end.x) < 0.75 && neighbor.y < frame.tab.y;
+      if (fromAbove && Math.abs(end.y - frame.body.y) < 0.75 && end.x <= frame.tab.x + frame.tab.width) end.y = frame.tab.y;
+    }
+    relationships.forEach(function(rel, relIndex) {
+      if (rel.type !== 'dependency' || rel.from === rel.to) return;
+      var from = dependencyEnd(rel.from), to = dependencyEnd(rel.to);
+      if (!from || !to || (!from.frame && !to.frame)) return;
+      // A package and something inside it have no line between them.
+      if (rectHolds(from.rect, to.rect) || rectHolds(to.rect, from.rect)) return;
+      var skipNames = {};
+      skipNames[rel.from] = true;
+      skipNames[rel.to] = true;
+      // The name tabs of the two ends are in the way like any class.
+      var endTabs = [from.frame, to.frame].filter(Boolean).map(function(frame) {
+        return { x1: frame.tab.x, y1: frame.tab.y, x2: frame.tab.x + frame.tab.width, y2: frame.tab.y + frame.tab.height };
+      });
+      var points = routeBetweenOutlines(from.rect, to.rect, function(candidate) {
+        return UMLShared.routeHitsObstacle(candidate, classObstacles, skipNames, null) ||
+          UMLShared.routeHitsObstacle(candidate, endTabs, null, null);
+      });
+      if (!points) return;
+      points = snapRouteEndsToPackageOutline(points, from.entry, to.entry);
+      snapToFrameTab(points[0], points[1], from.frame);
+      snapToFrameTab(points[points.length - 1], points[points.length - 2], to.frame);
+
+      svg.push('<polyline points="' + points.map(function(point) { return point.x + ',' + point.y; }).join(' ') +
+        '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' +
+        classRelationRouteAttrs(rel, relIndex) + ' stroke-dasharray="8,4"/>');
+      var last = points[points.length - 1], previous = points[points.length - 2];
+      var intoRouteX = previous.x === last.x ? 0 : (previous.x > last.x ? 1 : -1);
+      var intoRouteY = previous.y === last.y ? 0 : (previous.y > last.y ? 1 : -1);
+      var arrow = offsetClassMarkerPoint(last.x, last.y, intoRouteX, intoRouteY, 'open-arrow');
+      UMLShared.drawOpenArrow(decorSvg, arrow.x, arrow.y, intoRouteX, intoRouteY, colors.line);
+      noteMarkerObstacles.push(pointObstacleRect(arrow.x, arrow.y, CFG.arrowSize + 6));
+
+      var segments = UMLShared.buildOrthogonalSegments(points);
+      noteRouteSegments = noteRouteSegments.concat(segments);
+      var placement = placeClassRelationLabel({ rel: rel, points: points, routeIndex: -1 });
+      if (placement) {
+        if (rel.label) pushClassTextSvg(labelSvg, rel.label, placement, CFG.fontSizeStereotype, 'italic');
+        placedLabels.push(placement.rect);
+      }
+    });
+    UMLShared.drawPackageNames(svg, packageFrames, colors);
+    if (scene) UMLShared.recordPackageFrames(scene, packageFrames);
 
     // ── Draw class boxes (on top of lines) ──
 
@@ -11025,6 +14891,11 @@
       // so skip the darker shade — the user's color should show verbatim.
       var hasBody = box.attrH > 0 || box.methH > 0;
       var headerFill = (cls.highlight && !hasBody) ? fills.fill : fills.headerFill;
+
+      if (cls.type === 'package') {
+        drawPackageNode(svg, en, e, headerFill, fills.textureUrl, colors);
+        continue;
+      }
 
       svg.push('<g filter="url(#uml-node-shadow)">');
 
@@ -11066,6 +14937,14 @@
 
       svg.push('</g>');
 
+      if (scene) {
+        scene.addNode({ id: en, x: x, y: y, width: box.width, height: box.height, kind: 'class',
+          parent: UMLShared.packageSceneId(cls.package) });
+        scene.noteFont(CFG.fontSizeBold);
+        if (box.stereotypeText || box.propertyText) scene.noteFont(CFG.fontSizeStereotype);
+        if (cls.attributes.length || cls.methods.length) scene.noteFont(CFG.fontSize);
+      }
+
       // Stereotype text
       var textCx = x + box.width / 2;
       var headerContentH = box.stereotypeH + CFG.lineHeight + (box.propertyH || 0);
@@ -11083,7 +14962,7 @@
       svg.push('<text x="' + textCx + '" y="' + nameY + '" text-anchor="middle" ' +
         'font-weight="bold" font-size="' + CFG.fontSizeBold + '" ' +
         (isAbstract ? 'font-style="italic" ' : '') +
-        'fill="' + colors.text + '">' + UMLShared.escapeXml(cls.name) + '</text>');
+        'fill="' + colors.text + '">' + UMLShared.escapeXml(cls.label || cls.name) + '</text>');
       // Property string below the name, such as {abstract}
       if (box.propertyText) {
         svg.push('<text x="' + textCx + '" y="' + (nameY + CFG.lineHeight) + '" text-anchor="middle" ' +
@@ -11133,6 +15012,17 @@
       if (routeObstacle) noteObstacles.push(routeObstacle);
     }
     for (var nmi = 0; nmi < noteMarkerObstacles.length; nmi++) noteObstacles.push(noteMarkerObstacles[nmi]);
+    // A note lies inside a package or outside it, never across its outline.
+    packageFrames.forEach(function(frame) {
+      var b = frame.body;
+      [
+        { isH: true, y: b.y, x1: b.x, x2: b.x + b.width },
+        { isH: true, y: b.y + b.height, x1: b.x, x2: b.x + b.width },
+        { isH: false, x: b.x, y1: b.y, y2: b.y + b.height },
+        { isH: false, x: b.x + b.width, y1: b.y, y2: b.y + b.height }
+      ].forEach(function(edge) { noteObstacles.push(segmentObstacleRect(edge, 2)); });
+      noteObstacles.push({ x: frame.tab.x, y: frame.tab.y, w: frame.tab.width, h: frame.tab.height });
+    });
 
     // The fixed local search can be surrounded by classes in a fan-out. Let
     // notes reach a clear lane outside the drawing, including space occupied
@@ -11530,14 +15420,49 @@
     for (var elbi = 0; elbi < placedLabels.length; elbi++) {
       expandClassExtraForRect(placedLabels[elbi], CFG.svgPad);
     }
+    for (var pkbi = 0; pkbi < packageFrames.length; pkbi++) {
+      expandClassExtraForRect(packageFrames[pkbi].outer, CFG.svgPad);
+    }
     for (var embi = 0; embi < noteMarkerObstacles.length; embi++) {
       expandClassExtraForRect(noteMarkerObstacles[embi], CFG.svgPad);
+    }
+
+    if (scene) {
+      for (var sni = 0; sni < notePositions.length; sni++) {
+        var sceneNote = notePositions[sni];
+        var sceneNoteId = '__note_' + sni;
+        var sceneNoteRect = { x: sceneNote.x, y: sceneNote.y, width: sceneNote.w, height: sceneNote.h };
+        // A note inside a package that holds its class belongs to it there;
+        // inside any other package it overlaps that package.
+        var noteTargetEntry = entries[noteTargetBaseName(sceneNote.note.target)];
+        var noteTargetPackage = noteTargetEntry && noteTargetEntry.cls ? noteTargetEntry.cls.package : null;
+        var notePackage = UMLShared.packageHolding(packageFrames, sceneNoteRect, function(id) {
+          return UMLShared.packageEncloses(parsed.packages, id, noteTargetPackage);
+        });
+        scene.addNode({ id: sceneNoteId, x: sceneNoteRect.x, y: sceneNoteRect.y, width: sceneNoteRect.width, height: sceneNoteRect.height,
+          kind: 'note', parent: UMLShared.packageSceneId(notePackage) });
+        scene.noteFont(UMLShared.NOTE_CFG.fontSize);
+        if (sceneNote.note.lines.some(function(line) { return line.trim().indexOf('```') === 0; })) {
+          scene.noteFont(UMLShared.NOTE_CFG.codeFontSize);
+        }
+        var sceneNoteEnds = classNoteConnectorEndpoints(sceneNote);
+        recordRoute('note-link:' + sni, noteConnectorRoutes[sni] || [sceneNoteEnds.from, sceneNoteEnds.to],
+          sceneNoteId, noteTargetBaseName(sceneNote.note.target), null);
+      }
+      // A compact canvas covers every route, so none is clipped.
+      scene.routes.forEach(function(sceneRoute) {
+        sceneRoute.points.forEach(function(pt) { expandClassExtraForRect({ x: pt.x, y: pt.y, w: 0, h: 0 }, CFG.svgPad); });
+      });
     }
 
     var ox = layout.offsetX + CFG.svgPad + extraLeft;
     var oy = layout.offsetY + CFG.svgPad + extraTop;
     var svgW = layout.width + CFG.svgPad * 2 + extraLeft + extraRight;
     var svgH = layout.height + CFG.svgPad * 2 + extraTop + extraBottom;
+    if (scene) {
+      scene.setSize(svgW, svgH);
+      scene.setOrigin(ox, oy);
+    }
     svg.unshift(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
 
     // ── Draw notes (using pre-computed positions) ──
@@ -11737,6 +15662,22 @@
     });
   }
 
+  // What one bend adds to a class route's score.
+  var CLASS_ROUTE_BEND_SCORE = 48;
+
+  // The fewest bends of an orthogonal route that leaves `source` and enters
+  // `target` straight through their sides: none when the target lies
+  // straight ahead, facing back; one for perpendicular sides; else two.
+  function leastClassRouteBends(source, target) {
+    var out = classSideVector(source.side), arrive = classSideVector(target.side);
+    var turn = out.x * -arrive.x + out.y * -arrive.y;
+    if (turn === 0) return 1;
+    if (turn < 0) return 2;
+    var ahead = (target.x - source.x) * out.x + (target.y - source.y) * out.y;
+    var aside = (target.x - source.x) * out.y - (target.y - source.y) * out.x;
+    return ahead > 0 && Math.abs(aside) < 0.5 ? 0 : 2;
+  }
+
   /**
    * Compute orthogonal (Manhattan) route between two class boxes using the
    * shared obstacle-aware router and multi-anchor candidate scoring.
@@ -11818,95 +15759,120 @@
       targetCandidates = targetCandidates.slice(0, routeOptions.maxTargetCandidates || 4);
     }
 
-    var best = null;
-    var bestCompact = null;
+    // Every anchor pair, with the least score a route between them can have:
+    // the endpoint distance plus the anchor and direction penalties (all
+    // other score terms are non-negative).
+    var anchorPairs = [];
     for (var si2 = 0; si2 < sourceCandidates.length; si2++) {
-      var sourceCandidate = sourceCandidates[si2];
       for (var ti = 0; ti < targetCandidates.length; ti++) {
-        var targetCandidate = targetCandidates[ti];
-        var directionPenalty = 0;
-        var sourceVec = classSideVector(sourceCandidate.side);
-        var targetVec = classSideVector(targetCandidate.side);
+        var pairSource = sourceCandidates[si2], pairTarget = targetCandidates[ti];
+        var pairPenalty = 0;
+        var sourceVec = classSideVector(pairSource.side);
+        var targetVec = classSideVector(pairTarget.side);
         var sourceOutward = dxAbs + dyAbs > 0 ? (toCx - fromCx) * sourceVec.x + (toCy - fromCy) * sourceVec.y : 0;
         var targetOutward = dxAbs + dyAbs > 0 ? (fromCx - toCx) * targetVec.x + (fromCy - toCy) * targetVec.y : 0;
         var oppositeThreshold = Math.max(28, (dxAbs + dyAbs) * 0.14);
         if (sourceOutward < -oppositeThreshold) {
-          directionPenalty += Math.min(900, Math.abs(sourceOutward) * 1.35);
+          pairPenalty += Math.min(900, Math.abs(sourceOutward) * 1.35);
         }
         if (targetOutward < -oppositeThreshold) {
-          directionPenalty += Math.min(700, Math.abs(targetOutward) * 1.1);
+          pairPenalty += Math.min(700, Math.abs(targetOutward) * 1.1);
         }
-        // Every score includes at least the endpoint distance and anchor
-        // penalties. Skip a grid search only when it cannot improve either
-        // the normal route or its compact alternative; all remaining score
-        // terms are non-negative. This preserves the selected geometry.
-        var scoreLowerBound = Math.abs(sourceCandidate.x - targetCandidate.x) +
-          Math.abs(sourceCandidate.y - targetCandidate.y) +
-          sourceCandidate.penalty + targetCandidate.penalty + directionPenalty;
-        if (best && bestCompact && scoreLowerBound + 0.01 >= best.score &&
-            scoreLowerBound + 0.01 >= bestCompact.compactScore) continue;
-        var associationTracks = routeOptions && routeOptions.occupiedAssociations;
-        // Search both the short physical-obstacle route and a separated route.
-        // Hierarchy fanouts stay soft constraints; they must not become walls
-        // that send an association around the entire inheritance tree.
-        for (var routePass = 0; routePass < (associationTracks ? 2 : 1); routePass++) {
-          var routed = UMLShared.routeOrthogonalConnector(sourceCandidate, targetCandidate, obstacles, {
-            skipNames: skipNames,
-            occupied: routePass ? associationTracks : null,
-            stub: stub,
-            bendPenalty: 46,
-            extraXs: [fromCx, toCx],
-            extraYs: [fromCy, toCy]
-          });
-          var points = enforceOrthogonalEndpointApproach(routed.points, fromE, toE, sourceCandidate.side, targetCandidate.side);
-          points = UMLShared.simplifyOrthogonalPath(points);
+        anchorPairs.push({
+          source: pairSource,
+          target: pairTarget,
+          directionPenalty: pairPenalty,
+          lowerBound: Math.abs(pairSource.x - pairTarget.x) + Math.abs(pairSource.y - pairTarget.y) +
+            pairSource.penalty + pairTarget.penalty + pairPenalty
+        });
+      }
+    }
+    // The compact optimizer routes many trial placements: it searches the
+    // cheapest pairs first, and counts the bends a pair cannot avoid in its
+    // bound, so the bound below rules out the rest sooner. Ties keep the
+    // preferred-side order.
+    if (routeOptions && routeOptions.cheapestFirst) {
+      anchorPairs.forEach(function(pair) {
+        pair.lowerBound += leastClassRouteBends(pair.source, pair.target) * CLASS_ROUTE_BEND_SCORE;
+      });
+      anchorPairs = anchorPairs.map(function(pair, order) { return { pair: pair, order: order }; })
+        .sort(function(a, b) { return a.pair.lowerBound - b.pair.lowerBound || a.order - b.order; })
+        .map(function(ranked) { return ranked.pair; });
+    }
 
-          if (UMLShared.routeHitsObstacle(points, obstacles, skipNames, null)) continue;
-          if (routeOptions && routeOptions.acceptRoute && !routeOptions.acceptRoute(points)) continue;
+    var best = null;
+    var bestCompact = null;
+    for (var pairIndex = 0; pairIndex < anchorPairs.length; pairIndex++) {
+      var sourceCandidate = anchorPairs[pairIndex].source;
+      var targetCandidate = anchorPairs[pairIndex].target;
+      var directionPenalty = anchorPairs[pairIndex].directionPenalty;
+      var scoreLowerBound = anchorPairs[pairIndex].lowerBound;
+      // Skip a grid search only when it cannot improve either the normal
+      // route or its compact alternative. This preserves the selected
+      // geometry.
+      if (best && bestCompact && scoreLowerBound + 0.01 >= best.score &&
+          scoreLowerBound + 0.01 >= bestCompact.compactScore) continue;
+      var associationTracks = routeOptions && routeOptions.occupiedAssociations;
+      // Search both the short physical-obstacle route and a separated route.
+      // Hierarchy fanouts stay soft constraints; they must not become walls
+      // that send an association around the entire inheritance tree.
+      for (var routePass = 0; routePass < (associationTracks ? 2 : 1); routePass++) {
+        var routed = UMLShared.routeOrthogonalConnector(sourceCandidate, targetCandidate, obstacles, {
+          skipNames: skipNames,
+          occupied: routePass ? associationTracks : null,
+          stub: stub,
+          bendPenalty: 46,
+          extraXs: [fromCx, toCx],
+          extraYs: [fromCy, toCy]
+        });
+        var points = enforceOrthogonalEndpointApproach(routed.points, fromE, toE, sourceCandidate.side, targetCandidate.side);
+        points = UMLShared.simplifyOrthogonalPath(points);
 
-          var crosses = UMLShared.countRouteCrossings(points, occupiedSegments);
-          var associationCrosses = UMLShared.countRouteCrossings(points, associationTracks);
-          var overlap = UMLShared.routeTrackOverlapLength(points, occupiedSegments);
-          // A crossing can be marked by a bridge. A shared shaft instead makes
-          // two associations look like one, so prefer a crossing over a merge.
-          var hierarchyCrosses = Math.max(0, crosses - associationCrosses);
-          var occupiedPenalty = associationCrosses * 150000 +
-            (overlap > 0 ? 300000 + overlap * 2000 : 0);
+        if (UMLShared.routeHitsObstacle(points, obstacles, skipNames, null)) continue;
+        if (routeOptions && routeOptions.acceptRoute && !routeOptions.acceptRoute(points)) continue;
 
-          // Penalize detours: routes whose total length is far greater than
-          // the straight-line distance between endpoints (route efficiency).
-          var routeLen = UMLShared.measureOrthogonalRoute(points);
-          var directDist = Math.abs(points[0].x - points[points.length - 1].x) +
-                           Math.abs(points[0].y - points[points.length - 1].y);
-          var detourPenalty = 0;
-          if (directDist > 0) {
-            var efficiency = routeLen / directDist;
-            // Penalize routes that are more than 1.5x the direct distance
-            if (efficiency > 1.5) detourPenalty = (efficiency - 1.5) * 300;
-          }
+        var crosses = UMLShared.countRouteCrossings(points, occupiedSegments);
+        var associationCrosses = UMLShared.countRouteCrossings(points, associationTracks);
+        var overlap = UMLShared.routeTrackOverlapLength(points, occupiedSegments);
+        // A crossing can be marked by a bridge. A shared shaft instead makes
+        // two associations look like one, so prefer a crossing over a merge.
+        var hierarchyCrosses = Math.max(0, crosses - associationCrosses);
+        var occupiedPenalty = associationCrosses * 150000 +
+          (overlap > 0 ? 300000 + overlap * 2000 : 0);
 
-          var score = routeLen +
-            UMLShared.countOrthogonalBends(points) * 48 +
-            sourceCandidate.penalty + targetCandidate.penalty + occupiedPenalty +
-            detourPenalty + directionPenalty;
-
-          var candidate = {
-            score: score + hierarchyCrosses * 150000,
-            compactScore: score + hierarchyCrosses * 250,
-            points: points,
-            length: routeLen,
-            directDistance: directDist,
-            associationCrosses: associationCrosses,
-            overlap: overlap
-          };
-          if (!best || candidate.score + 0.01 < best.score) best = candidate;
-          if (!bestCompact || candidate.compactScore + 0.01 < bestCompact.compactScore) bestCompact = candidate;
-          // A path already clear of independent associations cannot improve
-          // by searching the same grid with those associations as obstacles.
-          if (!associationTracks ||
-              (!UMLShared.countRouteCrossings(points, associationTracks) &&
-               !UMLShared.routeTrackOverlapLength(points, associationTracks))) break;
+        // Penalize detours: routes whose total length is far greater than
+        // the straight-line distance between endpoints (route efficiency).
+        var routeLen = UMLShared.measureOrthogonalRoute(points);
+        var directDist = Math.abs(points[0].x - points[points.length - 1].x) +
+                         Math.abs(points[0].y - points[points.length - 1].y);
+        var detourPenalty = 0;
+        if (directDist > 0) {
+          var efficiency = routeLen / directDist;
+          // Penalize routes that are more than 1.5x the direct distance
+          if (efficiency > 1.5) detourPenalty = (efficiency - 1.5) * 300;
         }
+
+        var score = routeLen +
+          UMLShared.countOrthogonalBends(points) * CLASS_ROUTE_BEND_SCORE +
+          sourceCandidate.penalty + targetCandidate.penalty + occupiedPenalty +
+          detourPenalty + directionPenalty;
+
+        var candidate = {
+          score: score + hierarchyCrosses * 150000,
+          compactScore: score + hierarchyCrosses * 250,
+          points: points,
+          length: routeLen,
+          directDistance: directDist,
+          associationCrosses: associationCrosses,
+          overlap: overlap
+        };
+        if (!best || candidate.score + 0.01 < best.score) best = candidate;
+        if (!bestCompact || candidate.compactScore + 0.01 < bestCompact.compactScore) bestCompact = candidate;
+        // A path already clear of independent associations cannot improve
+        // by searching the same grid with those associations as obstacles.
+        if (!associationTracks ||
+            (!UMLShared.countRouteCrossings(points, associationTracks) &&
+             !UMLShared.routeTrackOverlapLength(points, associationTracks))) break;
       }
     }
 
@@ -12344,6 +16310,719 @@
    * Draw an open arrowhead at position (x,y) pointing along (ux,uy).
    */
 
+  // ─── Compact layout: the class renderer as UMLCompactLayout sees it ──
+  //
+  // The reference drawing uses the normal placement and gaps (so routes and
+  // labels have room) with the compact metric table; UMLCompactLayout then
+  // removes only the space the scene shows to be empty.
+
+  // What the class router needs in a gap, in layout units.
+  function compactClassClearances() {
+    return {
+      lanePitch: 22,                                                  // port spacing of parallel edges
+      boxClearance: Math.round(CFG.fontSize * 0.8),                   // free space beside a box
+      stub: Math.max(CFG.triangleH, CFG.diamondH, CFG.arrowSize) + 8, // marker plus a straight lead
+      labelPad: 10,                                                   // a squeezed gap keeps this beside a label
+      labelEndPad: COMPACT_LABEL_ROOM_PAD,                            // and this between a label and its line's ends
+      // The label placer sets the text of a line running down beside it,
+      // in the corridor that line shares with its neighbour's, the name on
+      // the side its multiplicities leave free.
+      labelsBesideLeads: true,
+      nameLabelsShareStubs: true
+    };
+  }
+
+  // The reference drawing gives a label this much more line on each side,
+  // as the label placer prefers (its endpoint pad); the squeeze then keeps
+  // only the label's padding above.
+  var COMPACT_LABEL_ROOM_PAD = 20;
+
+  function copyOf(record) {
+    var copy = {};
+    for (var key in record) if (Object.prototype.hasOwnProperty.call(record, key)) copy[key] = record[key];
+    return copy;
+  }
+
+  // A placement is the top-left corner of every class, by name.
+  function placementOf(layout) {
+    var positions = {};
+    for (var name in layout.entries) {
+      if (Object.prototype.hasOwnProperty.call(layout.entries, name)) {
+        positions[name] = { x: layout.entries[name].x, y: layout.entries[name].y };
+      }
+    }
+    return { positions: positions };
+  }
+
+  // A fresh layout object with the classes at `placement`; the reference is
+  // never changed (generateSVG and its passes work on this copy).
+  function layoutAt(reference, placement) {
+    var entries = {};
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var name in reference.entries) {
+      if (!Object.prototype.hasOwnProperty.call(reference.entries, name)) continue;
+      var source = reference.entries[name];
+      var at = placement.positions[name] || source;
+      var entry = { cls: source.cls, box: source.box, x: at.x, y: at.y };
+      entry.noteTargets = buildMemberNoteTargets(entry);
+      entries[name] = entry;
+      minX = Math.min(minX, entry.x);
+      minY = Math.min(minY, entry.y);
+      maxX = Math.max(maxX, entry.x + entry.box.width);
+      maxY = Math.max(maxY, entry.y + entry.box.height);
+    }
+    return { entries: entries, width: maxX - minX, height: maxY - minY, offsetX: -minX, offsetY: -minY };
+  }
+
+  // Classes joined by any relationship, as groups in first-declared order.
+  function connectedClassGroups(parsed, entries) {
+    var groupOf = {};
+    var names = parsed.classes.map(function(cls) { return cls.name; }).filter(function(name) { return !!entries[name]; });
+    names.forEach(function(name) { groupOf[name] = name; });
+    function root(name) {
+      while (groupOf[name] !== name) name = groupOf[name];
+      return name;
+    }
+    parsed.relationships.forEach(function(rel) {
+      if (!entries[rel.from] || !entries[rel.to]) return;
+      var a = root(rel.from), b = root(rel.to);
+      if (a !== b) groupOf[b] = a;
+    });
+    var groups = [], indexByRoot = {};
+    names.forEach(function(name) {
+      var r = root(name);
+      if (indexByRoot[r] === undefined) { indexByRoot[r] = groups.length; groups.push([]); }
+      groups[indexByRoot[r]].push(name);
+    });
+    return groups;
+  }
+
+  function boundsOfNames(names, placement, entries) {
+    var b = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    names.forEach(function(name) {
+      var p = placement.positions[name], box = entries[name].box;
+      b.minX = Math.min(b.minX, p.x);
+      b.minY = Math.min(b.minY, p.y);
+      b.maxX = Math.max(b.maxX, p.x + box.width);
+      b.maxY = Math.max(b.maxY, p.y + box.height);
+    });
+    return b;
+  }
+
+  // What a group covers with the text of its associations: the label of two
+  // classes stacked one above the other sits beside their line, to its
+  // right, so it can reach past both boxes. (Between two classes side by
+  // side the text lies in the gap, inside the boxes' extent.)
+  function labelledBounds(names, placement, entries, parsed, clearances) {
+    var b = boundsOfNames(names, placement, entries);
+    var inGroup = {};
+    names.forEach(function(name) { inGroup[name] = true; });
+    parsed.relationships.forEach(function(rel) {
+      if (rel.from === rel.to || !inGroup[rel.from] || !inGroup[rel.to]) return;
+      var width = (rel.label || rel.labelDirection) ? classRelationLabelWidth(rel, CFG.fontSizeStereotype) : 0;
+      if (!width) return;
+      var p = placement.positions[rel.from], q = placement.positions[rel.to];
+      var pb = entries[rel.from].box, qb = entries[rel.to].box;
+      var left = Math.max(p.x, q.x), right = Math.min(p.x + pb.width, q.x + qb.width);
+      var stacked = right > left && (p.y + pb.height <= q.y || q.y + qb.height <= p.y);
+      if (stacked) b.maxX = Math.max(b.maxX, (left + right) / 2 + clearances.labelPad + width);
+    });
+    return b;
+  }
+
+  // The groups, each kept as drawn, in rows of `perRow`. Nothing runs
+  // between unconnected groups, so they sit `groupGap` apart, each with the
+  // text of its associations (labelledBounds).
+  function groupsInRows(groups, placement, entries, perRow, groupGap, parsed, clearances) {
+    var positions = {};
+    var cursorY = 0;
+    for (var start = 0; start < groups.length; start += perRow) {
+      var cursorX = 0, rowHeight = 0;
+      groups.slice(start, start + perRow).forEach(function(names) {
+        var b = labelledBounds(names, placement, entries, parsed, clearances);
+        names.forEach(function(name) {
+          var p = placement.positions[name];
+          positions[name] = { x: cursorX + p.x - b.minX, y: cursorY + p.y - b.minY };
+        });
+        cursorX += b.maxX - b.minX + groupGap;
+        rowHeight = Math.max(rowHeight, b.maxY - b.minY);
+      });
+      cursorY += rowHeight + groupGap;
+    }
+    return { positions: positions };
+  }
+
+  // The estimated size of groups packed by groupsInRows, their text included.
+  function packedSize(groups, placement, entries, parsed, clearances) {
+    var all = groups.map(function(names) { return labelledBounds(names, placement, entries, parsed, clearances); });
+    var width = Math.max.apply(Math, all.map(function(b) { return b.maxX; })) - Math.min.apply(Math, all.map(function(b) { return b.minX; }));
+    var height = Math.max.apply(Math, all.map(function(b) { return b.maxY; })) - Math.min.apply(Math, all.map(function(b) { return b.minY; }));
+    return { width: width + CFG.svgPad * 2, height: height + CFG.svgPad * 2 };
+  }
+
+  function estimatedSize(placement, entries) {
+    var b = boundsOfNames(Object.keys(placement.positions), placement, entries);
+    return { width: b.maxX - b.minX + CFG.svgPad * 2, height: b.maxY - b.minY + CFG.svgPad * 2 };
+  }
+
+  // How far apart the roomy candidate sets the classes, relative to normal:
+  // at least this, more where a label needs it, never more than the cap.
+  var COMPACT_ROOMY_SPREAD = 1.35;
+  var COMPACT_ROOMY_SPREAD_CAP = 6;
+
+  // The text an association carries along its line, and the multiplicities
+  // at its two ends, as the width its gap must hold.
+  function relationTextWidth(rel) {
+    var label = (rel.label || rel.labelDirection) ? classRelationLabelWidth(rel, CFG.fontSizeStereotype) + 2 * COMPACT_LABEL_ROOM_PAD : 0;
+    var ends = (rel.fromMult ? UMLShared.textWidth(rel.fromMult, false, CFG.fontSizeStereotype) : 0) +
+      (rel.toMult ? UMLShared.textWidth(rel.toMult, false, CFG.fontSizeStereotype) : 0);
+    return Math.max(label, ends ? ends + 2 * COMPACT_LABEL_ROOM_PAD : 0);
+  }
+
+  // The same text beside a line running down: one line of it each, so the
+  // length it takes along the line is its height, not its width.
+  function relationTextHeight(rel) {
+    var line = CFG.fontSizeStereotype + 6;
+    var label = (rel.label || rel.labelDirection) ? line + 2 * COMPACT_LABEL_ROOM_PAD : 0;
+    var ends = (rel.fromMult ? line : 0) + (rel.toMult ? line : 0);
+    return Math.max(label, ends ? ends + 2 * COMPACT_LABEL_ROOM_PAD : 0);
+  }
+
+  // Per axis, the spread that gives every labelled association between two
+  // boxes side by side (text along the line) or one above the other (text
+  // beside it) room for its text.
+  function roomySpread(normal, entries, parsed, clearances, atLeast) {
+    var spread = { x: atLeast, y: atLeast };
+    parsed.relationships.forEach(function(rel) {
+      if (rel.from === rel.to || !entries[rel.from] || !entries[rel.to]) return;
+      var need = { x: relationTextWidth(rel), y: relationTextHeight(rel) };
+      if (!need.x) return;
+      var a = { p: normal.positions[rel.from], box: entries[rel.from].box };
+      var b = { p: normal.positions[rel.to], box: entries[rel.to].box };
+      [['x', 'width', 'y', 'height'], ['y', 'height', 'x', 'width']].forEach(function(axis) {
+        var k = axis[0], size = axis[1], other = axis[2], otherSize = axis[3];
+        var facing = Math.min(a.p[other] + a.box[otherSize], b.p[other] + b.box[otherSize]) - Math.max(a.p[other], b.p[other]) > 0;
+        var centres = Math.abs((a.p[k] + a.box[size] / 2) - (b.p[k] + b.box[size] / 2));
+        if (!facing || centres <= 0) return;
+        var required = (need[k] + 2 * clearances.stub + (a.box[size] + b.box[size]) / 2) / centres;
+        spread[k] = Math.max(spread[k], Math.min(COMPACT_ROOMY_SPREAD_CAP, required));
+      });
+    });
+    return spread;
+  }
+
+  // The normal placement with its gaps opened up: column centres and row
+  // tops are scaled, so centred stacks stay straight and rows stay rows.
+  // The router and the label placer get room; the squeeze takes back what
+  // stays empty.
+  function roomyPlacement(normal, entries, spread) {
+    var positions = {};
+    Object.keys(normal.positions).forEach(function(name) {
+      var p = normal.positions[name], box = entries[name].box;
+      positions[name] = {
+        x: Math.round((p.x + box.width / 2) * spread.x - box.width / 2),
+        y: Math.round(p.y * spread.y)
+      };
+    });
+    return { positions: positions };
+  }
+
+  // Subclasses of one parent that share a row get equal gaps, the smallest
+  // the squeeze left between them, centred under the parent: a squeeze can
+  // close one sibling gap and keep another.
+  function evenSiblingRows(positions, entries, families) {
+    Object.keys(families).forEach(function(parent) {
+      var row = families[parent].filter(function(name) {
+        return positions[name] && Math.abs(positions[name].y - positions[families[parent][0]].y) < 0.5;
+      });
+      if (row.length < 2 || row.length !== families[parent].length || !positions[parent]) return;
+      // A sibling with subclasses of its own would pull its fan apart.
+      if (row.some(function(name) { return !!families[name]; })) return;
+      row.sort(function(a, b) { return positions[a].x - positions[b].x; });
+      var gap = Infinity, span = 0;
+      row.forEach(function(name, i) {
+        span += entries[name].box.width;
+        if (i > 0) {
+          var prev = row[i - 1];
+          gap = Math.min(gap, positions[name].x - positions[prev].x - entries[prev].box.width);
+        }
+      });
+      if (!(gap >= 0)) return;
+      span += gap * (row.length - 1);
+      var parentCx = positions[parent].x + entries[parent].box.width / 2;
+      var x = Math.round(parentCx - span / 2);
+      // A subclass straight below the parent stays there, so its edge stays straight.
+      row.forEach(function(name, i) {
+        if (Math.abs(positions[name].x + entries[name].box.width / 2 - parentCx) >= 0.5) return;
+        var before = row.slice(0, i).reduce(function(sum, n) { return sum + entries[n].box.width + gap; }, 0);
+        x = positions[name].x - before;
+      });
+      var evened = {};
+      row.forEach(function(name) {
+        evened[name] = { x: x, y: positions[name].y };
+        x += entries[name].box.width + gap;
+      });
+      // Only where the evened row lands on nothing else (keeping the gap).
+      var blocked = row.some(function(name) {
+        return Object.keys(positions).some(function(other) {
+          if (evened[other]) return false;
+          return boxesWithin(evened[name], entries[name].box, positions[other], entries[other].box, gap);
+        });
+      });
+      if (!blocked) row.forEach(function(name) { positions[name] = evened[name]; });
+    });
+    return positions;
+  }
+
+  // True when two boxes come closer than `margin` on both axes.
+  function boxesWithin(p, box, q, otherBox, margin) {
+    return p.x < q.x + otherBox.width + margin && q.x < p.x + box.width + margin &&
+      p.y < q.y + otherBox.height + margin && q.y < p.y + box.height + margin;
+  }
+
+  // An engine placement, opened up only where a label lacks room.
+  function withLabelRoom(placement, entries, parsed, clearances) {
+    return roomyPlacement(placement, entries, roomySpread(placement, entries, parsed, clearances, 1));
+  }
+
+  // Whether the package frames drawn around a placement's boxes would hold
+  // a class that is not in them, or lie on each other.
+  function placementCollides(placement, entries, parsed) {
+    if (!parsed.packages || !parsed.packages.length) return false;
+    var boxes = {};
+    Object.keys(placement.positions).forEach(function(name) {
+      var p = placement.positions[name], box = entries[name].box;
+      boxes[name] = { x: p.x, y: p.y, width: box.width, height: box.height };
+    });
+    return UMLShared.packagesCollide(parsed.packages, boxes, classPackageStyle());
+  }
+
+  // When the engine's placement of a layout would draw packages over
+  // classes they do not hold, or over each other: the same engine input
+  // placed with each package as one block (UMLShared.packageBlockPlacements).
+  // None otherwise.
+  function packagedPlacements(layout, parsed) {
+    if (!layout.engineInput || !placementCollides(placementOf(layout), layout.entries, parsed)) return [];
+    return UMLShared.packageBlockPlacements(layout.engineInput, layout.layoutResult && layout.layoutResult.direction, parsed.packages, function(name) {
+      var entry = layout.entries[name];
+      return entry && entry.cls ? entry.cls.package : null;
+    }, classPackageStyle()).map(function(positions) { return { positions: positions }; });
+  }
+
+  // The candidates that draw every package around its own classes only;
+  // all of them when none does.
+  function keepingPackages(placements, entries, parsed) {
+    var kept = placements.filter(function(placement) { return !placementCollides(placement, entries, parsed); });
+    return kept.length ? kept : placements;
+  }
+
+  // The default layout keeps packages together as well. When the engine's
+  // placement would draw a package over a class it does not hold, or over
+  // another package, the diagram takes the first placement laid out package
+  // by package that draws every package around its own contents only.
+  // Nesting needs no special case, at any depth: a package inside a package
+  // is one block of its level.
+  function computeClassLayout(parsed) {
+    var layout = computeLayout(parsed);
+    var kept = packagedPlacements(layout, parsed).filter(function(placement) {
+      return !placementCollides(placement, layout.entries, parsed);
+    });
+    return kept.length ? layoutAt(layout, kept[0]) : layout;
+  }
+
+  // Equal up to a translation of the whole drawing.
+  function samePlacement(a, b) {
+    var names = Object.keys(a.positions);
+    if (!names.length) return true;
+    var dx = b.positions[names[0]].x - a.positions[names[0]].x;
+    var dy = b.positions[names[0]].y - a.positions[names[0]].y;
+    return names.every(function(name) {
+      return Math.abs(b.positions[name].x - a.positions[name].x - dx) < 0.5 &&
+        Math.abs(b.positions[name].y - a.positions[name].y - dy) < 0.5;
+    });
+  }
+
+  /**
+   * Placements to try (spec 6.6): the normal one; the engine's placements
+   * for the pane's shape and for the other direction (`shaped`); the
+   * unconnected groups re-packed into rows for the pane; and the normal one
+   * with extra room to route and label. Inheritance stays vertical: groups
+   * move whole, never rotate. With packages, an engine placement that
+   * would draw a package over a class it does not hold (or over another
+   * package) is also placed package by package; when the normal one would,
+   * the candidates start from its best such placement. A candidate that
+   * still would is dropped (unless every one would).
+   */
+  function compactClassCandidates(reference, shaped, parsed, pane, clearances) {
+    var plain = classCandidates(placementOf(reference), shaped.map(placementOf), reference, parsed, pane, clearances);
+    var blocks = packageBlockCandidates(reference, shaped, parsed, pane);
+    if (!blocks.length) return plain;
+    // When the normal placement would draw a package over what it does not
+    // hold, the candidates start from its best placement package by
+    // package; the others follow.
+    var ordered = placementCollides(placementOf(reference), reference.entries, parsed)
+      ? classCandidates(blocks[0], blocks.slice(1), reference, parsed, pane, clearances).concat(plain)
+      : plain.concat(blocks.map(function(placement) { return withLabelRoom(placement, reference.entries, parsed, clearances); }));
+    var distinct = [];
+    ordered.forEach(function(placement) {
+      if (!distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
+    });
+    return keepingPackages(distinct, reference.entries, parsed);
+  }
+
+  // The engine placements (normal first, then `shaped`) that would draw a
+  // package over what it does not hold, placed package by package instead;
+  // the normal one's best for the pane first. None without such a placement.
+  function packageBlockCandidates(reference, shaped, parsed, pane) {
+    var normal = packagedPlacements(reference, parsed).map(function(placement, i) {
+      var size = estimatedSize(placement, reference.entries);
+      return { placement: placement, i: i, scale: Math.min(pane.width / size.width, pane.height / size.height) };
+    }).sort(function(a, b) { return b.scale - a.scale || a.i - b.i; }).map(function(ranked) { return ranked.placement; });
+    return shaped.reduce(function(blocks, layout) { return blocks.concat(packagedPlacements(layout, parsed)); }, normal);
+  }
+
+  // The candidates around the engine placement `base`, with the other
+  // engine placements `others`, for the classes of `reference`.
+  function classCandidates(base, others, reference, parsed, pane, clearances) {
+    var normal = withLabelRoom(base, reference.entries, parsed, clearances);
+    var roomy = roomyPlacement(normal, reference.entries, roomySpread(normal, reference.entries, parsed, clearances, COMPACT_ROOMY_SPREAD));
+    var distinct = [normal];
+    var drawnOtherwise = [];
+    others.forEach(function(other) {
+      var placement = withLabelRoom(other, reference.entries, parsed, clearances);
+      if (!distinct.some(function(q) { return samePlacement(placement, q); })) {
+        distinct.push(placement);
+        drawnOtherwise.push(placement);
+      }
+    });
+    var groups = connectedClassGroups(parsed, reference.entries);
+    // Reading order of the groups as the normal layout drew them.
+    groups.sort(function(a, b) {
+      var ba = boundsOfNames(a, normal, reference.entries), bb = boundsOfNames(b, normal, reference.entries);
+      return ba.minY - bb.minY || ba.minX - bb.minX;
+    });
+    function addDistinct(placement) {
+      if (placement && !distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
+    }
+    starCandidates(groups, normal, reference.entries, parsed, pane, clearances).forEach(addDistinct);
+    addDistinct(satellitesBeside(normal, reference.entries, parsed, clearances));
+    if (groups.length < 2) return parsed.relationships.length ? distinct.concat([roomy]) : distinct;
+    // The groups packed into rows as the normal placement draws them, the
+    // two that best fit the pane. A packing into the rows the normal layout
+    // already uses would only repeat it.
+    var normalRows = groupRows(groups, normal, reference.entries);
+    var packed = packings(groups, normal, reference.entries, parsed, pane, clearances).filter(function(p) {
+      return groupRows(groups, p.placement, reference.entries) !== normalRows;
+    }).slice(0, 2);
+    // Also the groups as another engine placement draws them (the other
+    // direction), where that packing promises more than every other
+    // candidate, labels counted (packedSize): two classes side by side carry
+    // their label along their line, which can suit a narrow pane better than
+    // the same two stacked with the label beside them.
+    var otherwise = drawnOtherwise.reduce(function(best, drawn) {
+      var top = packings(groups, drawn, reference.entries, parsed, pane, clearances)[0];
+      return top && (!best || top.scale > best.scale) ? top : best;
+    }, null);
+    var promised = distinct.concat(packed.map(function(p) { return p.placement; })).map(function(placement) {
+      var size = packedSize(groups, placement, reference.entries, parsed, clearances);
+      return Math.min(pane.width / size.width, pane.height / size.height);
+    });
+    if (otherwise && promised.every(function(scale) { return otherwise.scale > scale; })) packed.push(otherwise);
+    return distinct.concat(packed.map(function(p) { return p.placement; }), [roomy]);
+  }
+
+  // Every packing of the groups of `drawn` into rows (1 to all per row), as
+  // {placement, scale, perRow}, the best estimated fit for the pane first.
+  function packings(groups, drawn, entries, parsed, pane, clearances) {
+    var all = [];
+    for (var perRow = 1; perRow <= groups.length; perRow++) {
+      var placement = groupsInRows(groups, drawn, entries, perRow, 2 * clearances.lanePitch, parsed, clearances);
+      var size = packedSize(groups, placement, entries, parsed, clearances);
+      all.push({ placement: placement, scale: Math.min(pane.width / size.width, pane.height / size.height), perRow: perRow });
+    }
+    return all.sort(function(a, b) { return b.scale - a.scale || a.perRow - b.perRow; });
+  }
+
+  // ─── Satellites ──────────────────────────────────────────────────────
+
+  /**
+   * The normal placement with every satellite (a class whose one
+   * relationship is an association to a class with others) moved beside
+   * its partner, level with it, so their edge runs straight across with its
+   * text along it: left of the partner, else right, wherever that lands on
+   * no other class. Null when no satellite can move. Another row of the
+   * drawing may empty out, which the squeeze then closes.
+   */
+  function satellitesBeside(normal, entries, parsed, clearances) {
+    var degree = {};
+    var counted = parsed.relationships.filter(function(rel) {
+      return rel.from !== rel.to && entries[rel.from] && entries[rel.to];
+    });
+    counted.forEach(function(rel) {
+      degree[rel.from] = (degree[rel.from] || 0) + 1;
+      degree[rel.to] = (degree[rel.to] || 0) + 1;
+    });
+    var positions = {};
+    Object.keys(normal.positions).forEach(function(name) { positions[name] = normal.positions[name]; });
+    var moved = false;
+    counted.forEach(function(rel) {
+      if (rel.type === 'generalization' || rel.type === 'realization') return;
+      [[rel.from, rel.to], [rel.to, rel.from]].forEach(function(pair) {
+        var name = pair[0], partner = pair[1];
+        if (degree[name] !== 1 || degree[partner] < 2) return;
+        var box = entries[name].box, at = positions[partner], partnerBox = entries[partner].box;
+        var gap = relationTextWidth(rel) + 2 * clearances.stub;
+        var y = Math.round(at.y + (partnerBox.height - box.height) / 2);
+        var spots = [{ x: at.x - gap - box.width, y: y }, { x: at.x + partnerBox.width + gap, y: y }];
+        var free = spots.filter(function(spot) {
+          return Object.keys(positions).every(function(other) {
+            return other === name || !boxesWithin(spot, box, positions[other], entries[other].box, clearances.boxClearance);
+          });
+        })[0];
+        if (!free) return;
+        positions[name] = free;
+        moved = true;
+      });
+    });
+    return moved ? { positions: positions } : null;
+  }
+
+  // ─── Star groups ─────────────────────────────────────────────────────
+
+  // The hub of a group in which every relationship joins one class (the
+  // hub) to a different other class (a leaf), with at least three leaves
+  // (two are a chain the normal layout already draws straight), no
+  // inheritance, and text on some edge (the corridor that star layout opens
+  // is for edge text); null for any other group.
+  function starHub(names, parsed) {
+    var inGroup = {};
+    names.forEach(function(name) { inGroup[name] = true; });
+    var rels = parsed.relationships.filter(function(rel) { return inGroup[rel.from] && inGroup[rel.to]; });
+    if (names.length < 4 || rels.length !== names.length - 1) return null;
+    if (rels.some(function(rel) { return rel.from === rel.to || rel.type === 'generalization' || rel.type === 'realization'; })) return null;
+    if (!rels.some(function(rel) { return relationTextWidth(rel) > 0; })) return null;
+    var degree = {};
+    rels.forEach(function(rel) {
+      degree[rel.from] = (degree[rel.from] || 0) + 1;
+      degree[rel.to] = (degree[rel.to] || 0) + 1;
+    });
+    var hubs = names.filter(function(name) { return degree[name] === rels.length; });
+    return hubs.length === 1 ? hubs[0] : null;
+  }
+
+  /**
+   * A star drawn as a column of leaves on each of `sides` sides of its hub
+   * (1: all left; 2: alternately left and right), one leaf per row and in
+   * declaration order, so every edge leaves its leaf sideways and carries
+   * its text above it in the corridor between column and hub. The hub sits
+   * level with the middle of the taller column. Positions are relative to
+   * the group.
+   */
+  function starPlacement(hub, leaves, entries, parsed, clearances, sides) {
+    var rowGap = CFG.fontSizeStereotype + 10 + 2 * clearances.labelPad;
+    var corridor = 0;
+    parsed.relationships.forEach(function(rel) {
+      if (rel.from === hub || rel.to === hub) corridor = Math.max(corridor, relationTextWidth(rel));
+    });
+    corridor += 2 * clearances.stub;
+    var columns = sides === 2 ? [[], []] : [[]];
+    leaves.forEach(function(name, i) { columns[i % columns.length].push(name); });
+    function columnHeight(column) {
+      return column.reduce(function(sum, name, i) { return sum + entries[name].box.height + (i ? rowGap : 0); }, 0);
+    }
+    var leftWidth = Math.max.apply(Math, columns[0].map(function(name) { return entries[name].box.width; }));
+    var height = Math.max.apply(Math, columns.map(columnHeight));
+    var hubBox = entries[hub].box;
+    var hubX = leftWidth + corridor;
+    var positions = {};
+    positions[hub] = { x: hubX, y: Math.round((height - hubBox.height) / 2) };
+    columns.forEach(function(column, c) {
+      var y = Math.round((height - columnHeight(column)) / 2);
+      column.forEach(function(name) {
+        var box = entries[name].box;
+        positions[name] = { x: c === 0 ? leftWidth - box.width : hubX + hubBox.width + corridor, y: y };
+        y += box.height + rowGap;
+      });
+    });
+    return positions;
+  }
+
+  /**
+   * When some group is a star: every star drawn by starPlacement, once with
+   * its leaves on one side and once on two, the other groups as normal, and
+   * the groups packed into the number of rows that best fits the pane.
+   */
+  function starCandidates(groups, normal, entries, parsed, pane, clearances) {
+    var hubs = groups.map(function(names) { return starHub(names, parsed); });
+    if (!hubs.some(Boolean)) return [];
+    return [1, 2].map(function(sides) {
+      var drawn = { positions: {} };
+      groups.forEach(function(names, g) {
+        var own = hubs[g]
+          ? starPlacement(hubs[g], names.filter(function(name) { return name !== hubs[g]; }), entries, parsed, clearances, sides)
+          : normal.positions;
+        names.forEach(function(name) { drawn.positions[name] = own[name]; });
+      });
+      var best = null;
+      for (var perRow = 1; perRow <= groups.length; perRow++) {
+        var placement = groupsInRows(groups, drawn, entries, perRow, 2 * clearances.lanePitch, parsed, clearances);
+        var size = packedSize(groups, placement, entries, parsed, clearances);
+        var scale = Math.min(pane.width / size.width, pane.height / size.height);
+        if (!best || scale > best.scale) best = { placement: placement, scale: scale };
+      }
+      return best.placement;
+    });
+  }
+
+  // Which groups share a row (their extents overlap vertically), as a key.
+  function groupRows(groups, placement, entries) {
+    var bounds = groups.map(function(names, i) { return { i: i, b: boundsOfNames(names, placement, entries) }; });
+    bounds.sort(function(p, q) { return p.b.minY - q.b.minY || p.i - q.i; });
+    var rowOf = [], row = -1, rowBottom = -Infinity;
+    bounds.forEach(function(g) {
+      if (g.b.minY >= rowBottom) { row++; rowBottom = g.b.maxY; } else { rowBottom = Math.max(rowBottom, g.b.maxY); }
+      rowOf[g.i] = row;
+    });
+    return rowOf.join(',');
+  }
+
+  // Inheritance fans whose subclasses have that one parent: {parent: [child]}.
+  function inheritanceFamilies(parsed, entries) {
+    var parentsOf = {}, children = {};
+    parsed.relationships.forEach(function(rel) {
+      if (rel.type !== 'generalization' && rel.type !== 'realization') return;
+      if (!entries[rel.from] || !entries[rel.to]) return;
+      (parentsOf[rel.from] = parentsOf[rel.from] || []).push(rel.to);
+      (children[rel.to] = children[rel.to] || []).push(rel.from);
+    });
+    var families = {};
+    Object.keys(children).forEach(function(parent) {
+      var own = children[parent].filter(function(child) { return parentsOf[child].length === 1; });
+      if (own.length >= 2 && own.length === children[parent].length) families[parent] = own;
+    });
+    return families;
+  }
+
+  function createCompactClassAdapter(reference, shaped, parsed, colors, pane, limits) {
+    var families = inheritanceFamilies(parsed, reference.entries);
+    // Routed as without a layout line: the routing rules of the older
+    // compact path (a dependency out of a subclass leaves from its bottom)
+    // bend edges the default layout draws straight; the judge compares.
+    var routed = copyOf(parsed);
+    routed.layoutPreference = null;
+    var alignTop = {};
+    Object.keys(families).forEach(function(parent) {
+      families[parent].forEach(function(child) { alignTop[child] = parent; });
+    });
+    var clearances = compactClassClearances();
+    return {
+      clearances: clearances,
+      // The squeeze keeps room for the package frames between two classes.
+      separation: UMLShared.packageSeparation(parsed.packages, function(name) {
+        var entry = reference.entries[name];
+        return entry && entry.cls ? entry.cls.package : null;
+      }, { lineHeight: CFG.lineHeight }),
+      limits: limits,
+      size: { boxes: parsed.classes.length + (parsed.notes || []).length, edges: parsed.relationships.length },
+      candidates: function() { return compactClassCandidates(reference, shaped, parsed, pane, clearances); },
+      bodies: function(placement) {
+        return Object.keys(reference.entries).map(function(name) {
+          var box = reference.entries[name].box;
+          var p = placement.positions[name];
+          // Authored positions never reach this path (hasAuthoredLayout), so
+          // no class is pinned here.
+          return { id: name, x: p.x, y: p.y, width: box.width, height: box.height, pinned: false, alignTop: alignTop[name] || null };
+        });
+      },
+      withPositions: function(placement, positions) {
+        var next = {};
+        for (var name in placement.positions) {
+          if (!Object.prototype.hasOwnProperty.call(placement.positions, name)) continue;
+          var p = positions[name] || placement.positions[name];
+          next[name] = { x: p.x, y: p.y };
+        }
+        return { positions: evenSiblingRows(next, reference.entries, families) };
+      },
+      estimate: function(placement) { return estimatedSize(placement, reference.entries); },
+      // One routing pass, without the teaching callouts (annotate adds
+      // them, only to drawings the search could still keep).
+      realize: function(placement) {
+        var scene = window.UMLLayoutQuality.createScene();
+        var svg = generateSVG(layoutAt(reference, placement), routed, colors, { scene: scene, searchesAlongRoute: true, routesCheapestFirst: true });
+        return { svg: svg, scene: scene };
+      },
+      // The teaching callouts at the compact base size (CFG holds the
+      // compact metrics while the search runs).
+      annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
+      })
+    };
+  }
+
+  function markLayoutIssues(svg, issues) {
+    return svg.replace('<svg ', '<svg data-uml-layout-issues="' + issues + '" ');
+  }
+
+  // The engine's placements for the pane's aspect and, where neither the
+  // spec nor an inheritance hierarchy fixes it, for each direction. No
+  // routing happens here; boxes have the reference's sizes.
+  function shapedLayouts(normalParsed, pane) {
+    var forPane = copyOf(normalParsed);
+    forPane._containerAspect = pane.width / pane.height;
+    var layouts = [computeLayout(forPane)];
+    var hierarchy = normalParsed.relationships.some(function(rel) {
+      return rel.type === 'generalization' || rel.type === 'realization';
+    });
+    if (!normalParsed.directionLocked && !hierarchy) {
+      ['TB', 'LR'].forEach(function(direction) {
+        var directed = copyOf(forPane);
+        directed.direction = direction;
+        directed.directionLocked = true;
+        layouts.push(computeLayout(directed));
+      });
+    }
+    return layouts;
+  }
+
+  // The crossings and bends of the drawing the spec gets without a layout
+  // line, which compact should not exceed (one extra routing of the spec).
+  function defaultDrawingCounts(normalParsed, colors) {
+    return withAdaptiveClassTypography(normalParsed, function() {
+      var scene = window.UMLLayoutQuality.createScene();
+      generateSVG(computeLayout(normalParsed), normalParsed, colors, { scene: scene });
+      var metrics = window.UMLLayoutQuality.evaluate(scene, { width: 1, height: 1 });
+      return { crossings: metrics.crossings, bends: metrics.bends };
+    });
+  }
+
+  /**
+   * The compact drawing chosen by UMLCompactLayout for the pane, as markup
+   * (marked when it keeps overlaps), remembered for the same inputs. Every
+   * candidate is laid out and generated inside one typography wrapper.
+   */
+  function renderOptimizedCompact(parsed, colors, pane) {
+    var key = window.UMLCompactMemo.keyOf('class', { parsed: parsed, colors: colors, pane: pane });
+    return window.UMLCompactMemo.remember(key, function() { return searchCompact(parsed, colors, pane); });
+  }
+
+  // The search itself; it warns once per search, not for a remembered drawing.
+  function searchCompact(parsed, colors, pane) {
+    var normalParsed = copyOf(parsed);
+    normalParsed.layoutPreference = null;
+    // Laid out for the pane, not for the element it is staged in.
+    normalParsed._containerAspect = pane.width / pane.height;
+    var limits = defaultDrawingCounts(normalParsed, colors);
+    return withAdaptiveClassTypography(parsed, function() {
+      var reference = computeLayout(normalParsed);
+      var result = window.UMLCompactLayout.optimize(createCompactClassAdapter(reference, shapedLayouts(normalParsed, pane), parsed, colors, pane, limits), pane);
+      if (!result.issues) return result.svg;
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('UMLClassDiagram: compact layout left ' + result.issues + ' overlap(s) it could not repair.');
+      }
+      return markLayoutIssues(result.svg, result.issues);
+    });
+  }
+
   // ─── Public API ───────────────────────────────────────────────────
 
   /**
@@ -12383,15 +17062,21 @@
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
 
-    var rendered = withAdaptiveClassTypography(parsed, function() {
-      var layout = computeLayout(parsed);
-      UMLShared.applyLayoutPositions(layout, parsed.layout);
-      return generateSVG(layout, parsed, colors);
-    });
+    // An optimized compact drawing already carries its callouts. Its
+    // placements rebuild member note targets themselves (layoutAt).
+    var optimizedCompact = usesOptimizedCompactLayout(parsed);
+    var rendered = optimizedCompact
+      ? renderOptimizedCompact(parsed, colors, window.UMLLayoutCore.resolvePane(container, parsed.pane))
+      : withAdaptiveClassTypography(parsed, function() {
+        var layout = computeClassLayout(parsed);
+        UMLShared.applyLayoutPositions(layout, parsed.layout);
+        refreshMemberNoteTargets(layout.entries);
+        return generateSVG(layout, parsed, colors);
+      });
     var svgStr = rendered;
     container.innerHTML = svgStr;
     UMLShared.applyLayoutRoutes(container, parsed.layout);
-    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
+    if (!optimizedCompact) UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -12497,6 +17182,45 @@
     boxHeaderPadY: 6,     // lane-header margin above and below its name
     boxHeadGap: 12,       // space between the lane headers and the lifeline heads
     boxClearance: 10,     // space between a lane edge and an unboxed head
+  };
+
+  // Sizes for `layout compact` without an authored layout (design spec 6.5).
+  // A sequence diagram is a fixed grid, so compact means exact spacing: every
+  // gap and row holds what is drawn in it plus a clearance, and no text is
+  // smaller than the message font. A message label sits `labelOffset` above
+  // its line and reaches `labelAscent` higher.
+  var COMPACT = {
+    fontSizeFragment: 13,   // frame keywords and guards at the message font
+    participantPadX: 8,     // about 0.6 em beside a head's name
+    headPadY: 4,            // above and below a head's name
+    actorNameGap: 13,       // stick figure foot to the actor name's baseline
+    actorNameDescent: 6,    // below the actor name (underline and descenders)
+    headGap: 10,            // between neighboring heads
+    labelOffset: 6,         // message line to its label's baseline
+    labelAscent: 13,        // label baseline to the top of its glyphs
+    labelPad: 8,            // label to a lifeline, activation bar, or loop
+    arrowPad: 12,           // label to the end that carries the arrowhead
+    clearance: 2,           // between a label and the line above it
+    rowPitch: 22,           // message line to the next message line
+    arrowHalf: 5,           // half the arrowhead's height
+    selfW: 30,              // self-call loop width beside the bar
+    selfH: 16,              // self-call loop height
+    selfLabelGap: 6,        // loop to its label
+    tabH: 20,               // frame keyword tab
+    tabTextInset: 6,        // tab bottom to the keyword's baseline
+    guardGap: 6,            // tab to the guard beside it
+    guardRowH: 18,          // tab or divider to the bottom of a guard under it
+    guardInset: 8,          // frame edge to a guard under the tab or a divider
+    guardDescent: 3,        // a guard's baseline above the bottom of its row
+    frameMargin: 10,        // frame edge beyond its outermost heads
+    frameInset: 6,          // per nesting level, and around a nested frame
+    framePad: 6,            // last drawn row to the frame's bottom edge
+    frameTop: 14,           // frame top above the next row's line
+    rowGap: 4,              // between a drawn row and a frame or divider
+    noteGap: 10,            // lifeline or bar to a side note
+    noteClear: 8,           // note to the next row (note placement pads 6)
+    lifelineTail: 12,       // lifeline beyond the last drawn row
+    margin: 10,             // outer margin, applied once on each side
   };
 
   // ─── Parser ───────────────────────────────────────────────────────
@@ -12858,9 +17582,10 @@
     return message.label ? wrapLines(message.label, wrapWidth, false, CFG.fontSize) : [];
   }
 
-  // Width of a message label as drawn: its widest line and any direction cue.
+  // Width of a message label as drawn: its widest wrapped line (or the whole
+  // label when `lines` is absent or one line) and any direction cue.
   function messageLabelWidth(message, lines) {
-    if (lines.length <= 1) return UMLShared.labelDirectionTextWidth(message.label, message.labelDirection, CFG.fontSize);
+    if (!lines || lines.length <= 1) return UMLShared.labelDirectionTextWidth(message.label, message.labelDirection, CFG.fontSize);
     return widestLine(lines, false, CFG.fontSize) + (message.labelDirection ? 18 : 0);
   }
 
@@ -12968,6 +17693,16 @@
   // A label centered on a message between neighboring lanes straddles their
   // dividing line. A backdrop in the label halo's color keeps the line out
   // of the words; labels inside one lane keep the plain halo.
+  // A rectangle in the diagram's fill behind a one-line label of `width` that
+  // starts at `left` with its baseline at `y`, so that lines drawn before it
+  // do not run through the text. Below full opacity they still show faintly.
+  // `attrs` adds attributes such as a marker for a later refit.
+  function labelBackdropMarkup(left, width, y, fontSize, fill, opacity, attrs) {
+    return '<rect data-layout-route-decorative="true"' + (attrs || '') + ' x="' + (left - 3) + '" y="' + (y - fontSize) +
+      '" width="' + (width + 6) + '" height="' + (fontSize + 4) + '" rx="2" fill="' + fill + '"' +
+      (opacity < 1 ? ' fill-opacity="' + opacity + '"' : '') + '/>';
+  }
+
   function pushLaneLabelBackdrop(svg, lanes, text, x, y, anchor, colors) {
     if (!text || !lanes.length) return;
     var w = UMLShared.textWidth(text, false, CFG.fontSize);
@@ -12978,8 +17713,37 @@
       crosses = (lanes[i].left > left && lanes[i].left < right) || (lanes[i].right > left && lanes[i].right < right);
     }
     if (!crosses) return;
-    svg.push('<rect data-layout-route-decorative="true" x="' + (left - 3) + '" y="' + (y - CFG.fontSize) +
-      '" width="' + (w + 6) + '" height="' + (CFG.fontSize + 4) + '" rx="2" fill="' + colors.fill + '" fill-opacity="0.85"/>');
+    svg.push(labelBackdropMarkup(left, w, y, CFG.fontSize, colors.fill, 0.85));
+  }
+
+  // A combined fragment's guard, `[condition]`, starting at `x` with its
+  // baseline at `y`, in `fontSize` (the fragment font of the drawing). It
+  // covers the lifelines and activation bars it crosses (UML 2.5.1,
+  // 17.6.4), so an opaque backdrop lies under the text.
+  function pushFragmentGuard(out, attrs, x, y, condition, colors, fontSize) {
+    var text = '[' + condition + ']';
+    out.push(labelBackdropMarkup(x, UMLShared.textWidth(text, false, fontSize), y,
+      fontSize, colors.fill, 1, ' data-uml-guard-backdrop="true"'));
+    out.push('<text' + attrs + ' x="' + x + '" y="' + y +
+      '" font-size="' + fontSize + '" fill="' + colors.text +
+      '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">' +
+      UMLShared.escapeXml(text) + '</text>');
+  }
+
+  // The canvas measures a guard slightly narrower than the browser draws it
+  // at the diagram's scale, so once the SVG is in the page each backdrop
+  // takes the width of its drawn text. A drawing that cannot be measured yet
+  // (a hidden container) keeps the measured estimate.
+  function refitFragmentGuardBackdrops(container) {
+    var backdrops = container.querySelectorAll('svg rect[data-uml-guard-backdrop]');
+    for (var i = 0; i < backdrops.length; i++) {
+      var text = backdrops[i].nextElementSibling;
+      var box = null;
+      try { box = text && text.getBBox(); } catch (e) { /* not measurable */ }
+      if (!box || !box.width) continue;
+      backdrops[i].setAttribute('x', box.x - 3);
+      backdrops[i].setAttribute('width', box.width + 6);
+    }
   }
 
   function computeSequenceSpacing(participants) {
@@ -13032,12 +17796,238 @@
       ' data-layout-target="' + UMLShared.escapeXml(targetId || sourceId || '') + '"';
   }
 
+  // ─── Compact grid ─────────────────────────────────────────────────
+
+  // An authored layout was arranged against today's sizes, so such a spec
+  // keeps today's path (design spec 6.11).
+  function hasAuthoredLayout(text, layout) {
+    if (/^\s*@layout\b/im.test(text)) return true;
+    if (!layout) return false;
+    return Object.keys(layout.positions || {}).length > 0 || Object.keys(layout.routes || {}).length > 0;
+  }
+
+  function participantIndex(participants, id) {
+    for (var i = 0; i < participants.length; i++) {
+      if (participants[i].id === id) return i;
+    }
+    return -1;
+  }
+
+  // Head boxes relative to the top of the head row. Without compact every
+  // head is as tall as the tallest; in compact each head is as tall as its
+  // own content and the names share one baseline.
+  function uniformHeadGeometry(participants, partH) {
+    var top = [], height = [];
+    for (var i = 0; i < participants.length; i++) { top.push(0); height.push(partH); }
+    return { top: top, height: height, bandH: partH, createdH: partH,
+      actorNameDy: UMLShared.ACTOR_H + CFG.fontSizeBold + 2 };
+  }
+
+  // `extraHeadH`: the room the further lines of the longest wrapped name take.
+  function compactHeadGeometry(participants, extraHeadH) {
+    extraHeadH = extraHeadH || 0;
+    var rectH = COMPACT.headPadY * 2 + CFG.lineHeight + extraHeadH;
+    var rectBaseline = rectH / 2 + CFG.fontSize * 0.35;
+    var actorBaseline = UMLShared.ACTOR_H + COMPACT.actorNameGap;
+    var baseline = 0;
+    for (var i = 0; i < participants.length; i++) {
+      baseline = Math.max(baseline, participants[i].isActor ? actorBaseline : rectBaseline);
+    }
+    var top = [], height = [], bandH = 0;
+    for (var j = 0; j < participants.length; j++) {
+      var isActor = participants[j].isActor;
+      top.push(baseline - (isActor ? actorBaseline : rectBaseline));
+      height.push(isActor ? actorBaseline + COMPACT.actorNameDescent + extraHeadH : rectH);
+      bandH = Math.max(bandH, top[j] + height[j]);
+    }
+    return { top: top, height: height, bandH: bandH, createdH: rectH, actorNameDy: actorBaseline };
+  }
+
+  // How far drawn activation bars reach left and right of each lifeline,
+  // at their deepest nesting, so labels and notes can keep clear of them.
+  function barAllowances(participants, messages) {
+    var left = [], right = [], open = [], maxDepth = [];
+    for (var i = 0; i < participants.length; i++) { open.push(0); maxDepth.push(-1); }
+    for (var m = 0; m < messages.length; m++) {
+      var idx = (messages[m].type === 'activate' || messages[m].type === 'deactivate')
+        ? participantIndex(participants, messages[m].target) : -1;
+      if (idx < 0) continue;
+      if (messages[m].type === 'activate') {
+        maxDepth[idx] = Math.max(maxDepth[idx], open[idx]);
+        open[idx]++;
+      } else if (open[idx] > 0) {
+        open[idx]--;
+      }
+    }
+    var lifelineHalf = CFG.lifelineStrokeWidth / 2;
+    for (var p = 0; p < participants.length; p++) {
+      var hasBar = maxDepth[p] >= 0;
+      left.push(hasBar ? CFG.activationW / 2 + 0.5 : lifelineHalf);
+      right.push(hasBar ? CFG.activationW / 2 + maxDepth[p] * CFG.activationOffset + 0.5 : lifelineHalf);
+    }
+    return { left: left, right: right };
+  }
+
+  // Index of each message that creates its target's head (the first message
+  // to a participant after its `create`).
+  function creationMessages(messages) {
+    var pending = Object.create(null), creating = Object.create(null);
+    for (var i = 0; i < messages.length; i++) {
+      var m = messages[i];
+      if (m.type === 'create') pending[m.target] = true;
+      else if (m.type === 'message' && pending[m.to]) { creating[i] = true; delete pending[m.to]; }
+    }
+    return creating;
+  }
+
+  // Where a message label may sit in the gap after lifeline `gap`: how far it
+  // keeps from the left and right lifelines. The end with the arrowhead needs
+  // more room, and a creation arrow stops at the created head's edge.
+  function labelSlot(gap, fromIdx, toIdx, creates, partWidths, allowance) {
+    var leftInset = allowance.right[gap] + COMPACT.labelPad;
+    var rightInset = allowance.left[gap + 1] + COMPACT.labelPad;
+    if (toIdx === gap + 1) rightInset = (creates ? partWidths[toIdx] / 2 : allowance.left[toIdx]) + COMPACT.arrowPad;
+    if (toIdx === gap) leftInset = (creates ? partWidths[toIdx] / 2 : allowance.right[toIdx]) + COMPACT.arrowPad;
+    return { leftInset: leftInset, rightInset: rightInset };
+  }
+
+  function noteRect(m) {
+    return UMLShared.measureNote(m.lines || [m.text || '']);
+  }
+
+  // Everything a lifeline gap must hold, as distances between neighboring
+  // lifelines. A need lists the gaps that could hold it (`options`, nearest
+  // the sender first); `label` names the message whose label it places.
+  // `inner` is the room needed between the bars on both sides of the gap.
+  function compactGapNeeds(participants, messages, partWidths, allowance) {
+    var creates = creationMessages(messages);
+    var count = participants.length;
+    function oneGap(gap, order, inner) {
+      if (gap < 0 || gap + 1 >= count) return [];
+      return [{ span: 1, order: order, label: null,
+        options: [{ gap: gap, distance: allowance.right[gap] + inner + allowance.left[gap + 1] }] }];
+    }
+    function labelNeed(m, i) {
+      var a = participantIndex(participants, m.from), b = participantIndex(participants, m.to);
+      if (a < 0 || b < 0) return [];
+      var lo = Math.min(a, b), hi = Math.max(a, b);
+      var options = [];
+      for (var k = 0; k < hi - lo; k++) {
+        var g = a < b ? lo + k : hi - 1 - k;
+        var slot = labelSlot(g, a, b, !!creates[i], partWidths, allowance);
+        options.push({ gap: g, distance: slot.leftInset + messageLabelWidth(m) + slot.rightInset });
+      }
+      return [{ span: hi - lo, order: i, label: i, options: options }];
+    }
+    function selfCallNeed(m, i) {
+      var s = participantIndex(participants, m.from);
+      var label = (m.label || m.labelDirection) ? COMPACT.selfLabelGap + messageLabelWidth(m) : 0;
+      return oneGap(s, i, COMPACT.selfW + label + COMPACT.labelPad);
+    }
+    function noteNeeds(m, i) {
+      var n = participantIndex(participants, m.target);
+      if (n < 0) return [];
+      var noteW = noteRect(m).width;
+      var beside = 1 + COMPACT.noteGap + noteW + COMPACT.labelPad;
+      if (m.position === 'right') return oneGap(n, i, beside);
+      if (m.position === 'left') return oneGap(n - 1, i, beside);
+      return oneGap(n - 1, i, COMPACT.labelPad + noteW / 2 - allowance.left[n])
+        .concat(oneGap(n, i, noteW / 2 + COMPACT.labelPad - allowance.right[n]));
+    }
+    function lostFoundNeed(m, i) {
+      var reach = lostFoundReach(m) + CFG.lostFoundRadius + COMPACT.labelPad;
+      return m.type === 'lost'
+        ? oneGap(participantIndex(participants, m.from), i, reach)
+        : oneGap(participantIndex(participants, m.to) - 1, i, reach);
+    }
+    var needs = [];
+    for (var i = 0; i < messages.length; i++) {
+      var m = messages[i];
+      if (m.type === 'message' && m.from !== m.to && (m.label || m.labelDirection)) needs = needs.concat(labelNeed(m, i));
+      else if (m.type === 'message' && m.from === m.to) needs = needs.concat(selfCallNeed(m, i));
+      else if (m.type === 'note') needs = needs.concat(noteNeeds(m, i));
+      else if (m.type === 'lost' || m.type === 'found') needs = needs.concat(lostFoundNeed(m, i));
+    }
+    return needs;
+  }
+
+  function lostFoundReach(m) {
+    var w = (m.label || m.labelDirection) ? messageLabelWidth(m) : 0;
+    return Math.max(CFG.lostFoundGap, w + 20);
+  }
+
+  // The smallest gaps that meet every need. Gaps start at the head clearance
+  // and are raised only where a need is unmet, shortest spans first, so a
+  // long message rarely widens a gap that short messages have not already
+  // widened. A spanning label takes the gap needing the least raise.
+  function solveCompactGaps(needs, partWidths) {
+    var gaps = [];
+    for (var i = 0; i + 1 < partWidths.length; i++) gaps.push(COMPACT.headGap);
+    function distance(g) { return partWidths[g] / 2 + gaps[g] + partWidths[g + 1] / 2; }
+    var ordered = needs.slice().sort(function (a, b) { return a.span - b.span || a.order - b.order; });
+    var labelGap = Object.create(null);
+    for (var n = 0; n < ordered.length; n++) {
+      var best = null;
+      for (var o = 0; o < ordered[n].options.length; o++) {
+        var option = ordered[n].options[o];
+        var deficit = Math.max(0, option.distance - distance(option.gap));
+        if (!best || deficit < best.deficit) best = { gap: option.gap, deficit: deficit };
+      }
+      if (!best) continue;
+      gaps[best.gap] += Math.ceil(best.deficit);
+      if (ordered[n].label !== null) labelGap[ordered[n].label] = best.gap;
+    }
+    return { gaps: gaps, labelGap: labelGap };
+  }
+
+  // The lowest point drawn so far in each column of the grid. Column c lies
+  // between lifelines c - 1 and c (column 0 left of the first lifeline,
+  // column n right of the last), so a row only waits for what was drawn in
+  // the columns it occupies.
+  function createSkyline(columnCount, startY) {
+    var bottoms = [];
+    for (var i = 0; i < columnCount; i++) bottoms.push(startY);
+    function clamp(c) { return Math.max(0, Math.min(columnCount - 1, c)); }
+    return {
+      over: function (c0, c1) {
+        var y = -Infinity;
+        for (var c = clamp(c0); c <= clamp(c1); c++) y = Math.max(y, bottoms[c]);
+        return y;
+      },
+      raise: function (c0, c1, y) {
+        for (var c = clamp(c0); c <= clamp(c1); c++) bottoms[c] = Math.max(bottoms[c], y);
+      },
+      all: function () { return Math.max.apply(Math, bottoms); },
+      raiseAll: function (y) { for (var c = 0; c < columnCount; c++) bottoms[c] = Math.max(bottoms[c], y); },
+    };
+  }
+
   // ─── Layout & Render ──────────────────────────────────────────────
 
-  function render(container, text, options) {
+  function parseForLayout(text) {
     var layoutExtract = UMLShared.extractLayoutMetadata(text);
     var parsed = parse(layoutExtract.text);
     parsed.layout = layoutExtract.layout;
+    parsed.compactLayout = parsed.layoutPreference === 'compact' && !hasAuthoredLayout(text, parsed.layout);
+    return parsed;
+  }
+
+  // The compact drawing as {svg, issues}, remembered for the same inputs.
+  // It warns once per drawing made, not for a remembered one.
+  function compactDrawing(parsed, colors) {
+    var key = window.UMLCompactMemo.keyOf('sequence', { parsed: parsed, colors: colors });
+    return window.UMLCompactMemo.remember(key, function () {
+      var drawing = generateSequenceSVG(parsed, colors);
+      var verdict = UMLLayoutQuality.evaluate(drawing.scene, null);
+      if (!verdict.valid && typeof console !== 'undefined' && console.warn) {
+        console.warn('ArchUML: compact sequence diagram has ' + verdict.violations.length + ' layout issue(s)', verdict.violations);
+      }
+      return { svg: drawing.svg, issues: verdict.valid ? 0 : verdict.violations.length };
+    });
+  }
+
+  function render(container, text, options) {
+    var parsed = parseForLayout(text);
     if (!parsed.participants || parsed.participants.length === 0) {
       container.innerHTML = '<div class="uml-empty-msg">No participants to display.</div>';
       return;
@@ -13045,28 +18035,40 @@
     UMLShared.prepareDiagramContainer(container, 'sequence');
 
     var colors = UMLShared.getThemeColors(container);
-    var svg = generateSequenceSVG(parsed, colors);
-    container.innerHTML = svg;
+    var drawing = parsed.compactLayout ? compactDrawing(parsed, colors) : { svg: generateSequenceSVG(parsed, colors).svg, issues: 0 };
+    container.innerHTML = drawing.svg;
+    // A compact drawing the judge finds overlaps in says so on its root.
+    UMLShared.markLayoutIssues(container, drawing.issues);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
-    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
+    refitFragmentGuardBackdrops(container);
+    // A compact drawing already carries its callouts.
+    if (!parsed.compactLayout) UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
+  // Returns { svg, scene }; the scene is recorded only in compact.
   function generateSequenceSVG(parsed, colors) {
     var participants = parsed.participants;
     var messages = parsed.messages;
+    var compact = !!parsed.compactLayout;
+    var scene = compact ? UMLLayoutQuality.createScene() : null;
+    var labelClear = COMPACT.labelOffset + COMPACT.labelAscent + COMPACT.clearance;
+    var fragmentFont = compact ? COMPACT.fontSizeFragment : CFG.fontSizeFragment;
     var spacing = computeSequenceSpacing(participants);
 
     // Compact-mode sizing adjustments (shrinks participant boxes only; the
     // per-gap constraint below handles spacing in a label-aware way).
-    if (parsed.layoutPreference === 'compact') {
+    if (compact) {
+      spacing.participantPadX = COMPACT.participantPadX;
+      spacing.participantMinW = 0;
+    } else if (parsed.layoutPreference === 'compact') {
       spacing.participantPadX = Math.max(8, Math.round(spacing.participantPadX * 0.55));
       spacing.participantMinW = Math.max(60, Math.round(spacing.participantMinW * 0.6));
     }
-    var messageGapY = parsed.layoutPreference === 'compact'
+    var messageGapY = compact ? COMPACT.rowPitch : parsed.layoutPreference === 'compact'
       ? Math.max(18, Math.round(CFG.messageGapY * 0.5))
       : CFG.messageGapY;
-    var firstMessageGapY = parsed.layoutPreference === 'compact'
+    var firstMessageGapY = compact ? labelClear : parsed.layoutPreference === 'compact'
       ? Math.max(20, Math.round(CFG.firstMessageGapY * 0.8))
       : CFG.firstMessageGapY;
 
@@ -13101,6 +18103,10 @@
     function extraLabelH(index) {
       return Math.max(0, messageTexts[index].length - 1) * MESSAGE_LINE_STEP;
     }
+    var heads = compact ? compactHeadGeometry(participants, extraHeadH) : uniformHeadGeometry(participants, partH);
+    partH = heads.bandH;
+    var createdHeadH = heads.createdH;
+    var allowance = compact ? barAllowances(participants, messages) : null;
 
     // ── Per-gap spacing constraint ──
     // For every message with a label, the horizontal distance between its
@@ -13129,7 +18135,17 @@
       return -1;
     }
 
-    for (var mli = 0; mli < messages.length; mli++) {
+    // Compact replaces the floor and the equal shares with the smallest gaps
+    // that hold every label, self-call, and side note, and records which gap
+    // holds each message label.
+    var labelGapOf = null;
+    if (compact) {
+      var solvedGaps = solveCompactGaps(compactGapNeeds(participants, messages, partWidths, allowance), partWidths);
+      gapMin = solvedGaps.gaps;
+      labelGapOf = solvedGaps.labelGap;
+    }
+
+    for (var mli = 0; mli < messages.length && !compact; mli++) {
       var mm = messages[mli];
       if (!mm || mm.type !== 'message' || (!mm.label && !mm.labelDirection) || mm.from === mm.to) continue;
       var aIdx = findPIdxByIdName(mm.from);
@@ -13153,7 +18169,8 @@
     var lanes = sequenceLanes(parsed.boxes || [], participants);
     reserveLaneSpace(lanes, participants, partWidths, gapMin);
     var laneHeaderH = laneHeaderHeight(lanes);
-    var headTop = CFG.svgPad + (lanes.length ? laneHeaderH + CFG.boxHeadGap : 0);
+    var topPad = compact ? COMPACT.margin : CFG.svgPad;
+    var headTop = topPad + (lanes.length ? laneHeaderH + CFG.boxHeadGap : 0);
 
     // ── Compute participant X positions ──
     var partX = []; // center X of each participant
@@ -13202,11 +18219,51 @@
     var lastMsgY = curY; // tracks the Y of the most recent message, for activate anchoring
     var lastEventY = curY; // tracks the latest occurrence-like vertical position
     var prevLayoutType = null;
-    var selfMessageH = 20;
+    var selfMessageH = compact ? COMPACT.selfH : 20;
     // The next row starts activationEndGap below a bar's end; a self-call's nested bar
     // runs at least minSelfActivationH below the call's return.
     var activationEndGap = Math.max(3, Math.round(messageGapY * 0.12));
     var minSelfActivationH = Math.min(8, Math.max(6, Math.round(messageGapY * 0.18)));
+    // Compact rows: what each grid column holds so far, how far down the
+    // notes on each lifeline reach (a later occurrence on that lifeline
+    // follows them), the lowest bar end, and the innermost frame around each
+    // element.
+    var sky = createSkyline(participants.length + 1, headTop + partH);
+    var lifelineFree = participants.map(function () { return -Infinity; });
+    var barBottom = headTop + partH;
+    var lineClear = COMPACT.arrowHalf + COMPACT.clearance;
+    var frameOf = [];
+    function openFrameId() {
+      var top = fragmentStack[fragmentStack.length - 1];
+      return top ? 'frag:' + top.sourceIndex : null;
+    }
+    // The lifelines a row touches.
+    function rowLifelines(row) {
+      if (row.type === 'message') return [participantIndex(participants, row.from), participantIndex(participants, row.to)];
+      if (row.type === 'lost') return [participantIndex(participants, row.from)];
+      return [participantIndex(participants, row.to || row.target)];
+    }
+    // The columns a row occupies, as [first, last].
+    function rowColumns(row) {
+      var ends = rowLifelines(row);
+      if (row.type === 'message' && ends[0] !== ends[1]) return [Math.min(ends[0], ends[1]) + 1, Math.max(ends[0], ends[1])];
+      if (row.type === 'message' || row.type === 'lost' || (row.type === 'note' && row.position === 'right')) return [ends[0] + 1, ends[0] + 1];
+      if (row.type === 'found' || (row.type === 'note' && row.position === 'left')) return [ends[0], ends[0]];
+      return [ends[0], ends[0] + 1];
+    }
+    // A row's line keeps clear of what its columns hold, its label of what
+    // its label's column holds, and its ends of the notes on their lifelines.
+    function compactRowY(row, rowIndex) {
+      var cols = rowColumns(row);
+      var y = Math.max(curY, sky.over(cols[0], cols[1]) + lineClear);
+      var ends = rowLifelines(row);
+      for (var e = 0; e < ends.length; e++) if (ends[e] >= 0) y = Math.max(y, lifelineFree[ends[e]] + lineClear);
+      if (row.label || row.labelDirection) {
+        var labelColumn = labelGapOf && labelGapOf[rowIndex] !== undefined ? labelGapOf[rowIndex] + 1 : cols[0];
+        y = Math.max(y, sky.over(labelColumn, labelColumn) + labelClear);
+      }
+      return y;
+    }
 
     function previousMessageBefore(index) {
       for (var pmi = index - 1; pmi >= 0; pmi--) {
@@ -13225,23 +18282,38 @@
 
     for (var mi = 0; mi < messages.length; mi++) {
       var msg = messages[mi];
+      frameOf.push(openFrameId());
 
       if (msg.type === 'message') {
+        if (compact) curY = compactRowY(msg, mi);
         if (msg.from !== msg.to) curY += extraLabelH(mi);
         lastMsgY = curY;
         lastEventY = curY;
         msgYs.push(curY);
         curY += messageGapY + (msg.from === msg.to ? extraLabelH(mi) : 0);
-        if (Object.prototype.hasOwnProperty.call(createYs, msg.to) && lastMsgY <= createYs[msg.to] + partH) {
+        var createsHead = Object.prototype.hasOwnProperty.call(createYs, msg.to) && lastMsgY <= createYs[msg.to] + createdHeadH;
+        if (createsHead) {
           // The creation arrow enters the header center. The following
           // message label needs clearance below the entire header, including
           // taller actor headers and compact-mode message spacing.
-          curY = Math.max(curY, createYs[msg.to] + partH + CFG.fontSize + 10);
+          curY = Math.max(curY, createYs[msg.to] + createdHeadH + CFG.fontSize + 10);
         }
-        if (msg.from === msg.to) {
+        if (msg.from === msg.to && !compact) {
           // Compact rows are shorter than a self-call's loop. Start the next row below its
           // return, as after a nested bar, so the two arrows and their labels stay apart.
           curY = Math.max(curY, messageReceiveY(msg, lastMsgY) + minSelfActivationH + activationEndGap);
+        }
+        if (compact) {
+          // A straight line occupies its stroke; a self-call its loop and the
+          // arrowhead at its return; a created head both columns beside it.
+          var rowCols = rowColumns(msg);
+          sky.raise(rowCols[0], rowCols[1], msg.from === msg.to
+            ? messageReceiveY(msg, lastMsgY) + COMPACT.arrowHalf
+            : lastMsgY + CFG.strokeWidth / 2);
+          if (createsHead) {
+            var createdIdx = participantIndex(participants, msg.to);
+            sky.raise(createdIdx, createdIdx + 1, createYs[msg.to] + createdHeadH);
+          }
         }
         // Track which participants are involved in ALL open fragments (not just innermost)
         if (fragmentStack.length > 0) {
@@ -13255,33 +18327,59 @@
           }
         }
       } else if (msg.type === 'fragment_start') {
-        var fragmentStartY = curY - 15;
-        fragmentStack.push({ startY: fragmentStartY, fragType: msg.fragType, condition: msg.condition, elseYs: [], minPIdx: Infinity, maxPIdx: -Infinity, depth: fragmentStack.length, lastMsgY: curY, sourceIndex: msg.sourceIndex, selfMessages: [], children: [] });
-        // Reserve the tab, guard descent, and the first message label's
-        // ascent plus its six-pixel offset above the message stroke.
-        var fragmentHeaderBottom = fragmentStartY + CFG.fragmentLabelH + (msg.condition ? 18 : 0);
-        curY = fragmentHeaderBottom + CFG.fragmentPadY + CFG.fontSize + 10;
+        // A frame reaches 15px up into the row above, which a message leaves
+        // free. A note fills its row to within 16px of the end, so a frame
+        // after a note starts at the row's end and stays clear of it. Compact
+        // starts a frame just above the skyline, which notes raise too.
+        var fragmentStartY = compact
+          ? Math.max(curY - COMPACT.frameTop, sky.all() + COMPACT.rowGap)
+          : curY - (prevLayoutType === 'note' ? 0 : 15);
+        fragmentStack.push({ startY: fragmentStartY, fragType: msg.fragType, condition: msg.condition, elseYs: [], minPIdx: Infinity, maxPIdx: -Infinity, depth: fragmentStack.length, lastMsgY: curY, sourceIndex: msg.sourceIndex, selfMessages: [], notes: [], children: [] });
+        if (compact) {
+          // The guard heads the frame: beside the tab where it fits, else in
+          // its own row under the tab. The first row follows the header.
+          var openedFrame = fragmentStack[fragmentStack.length - 1];
+          openedFrame.guardUnder = !!msg.condition && !guardFitsBesideTab(openedFrame, frameSpan(mi));
+          var frameHeaderH = COMPACT.tabH + (openedFrame.guardUnder ? COMPACT.guardRowH : 0);
+          sky.raiseAll(fragmentStartY + frameHeaderH);
+          curY = fragmentStartY + frameHeaderH + labelClear;
+        } else {
+          // Reserve the tab, guard descent, and the first message label's
+          // ascent plus its six-pixel offset above the message stroke.
+          var fragmentHeaderBottom = fragmentStartY + CFG.fragmentLabelH + (msg.condition ? 18 : 0);
+          curY = fragmentHeaderBottom + CFG.fragmentPadY + CFG.fontSize + 10;
+        }
         lastEventY = curY;
         msgYs.push(curY);
       } else if (msg.type === 'fragment_else') {
+        var elseY = compact ? Math.max(curY - COMPACT.frameTop, sky.all() + COMPACT.rowGap) : curY;
         if (fragmentStack.length > 0) {
-          fragmentStack[fragmentStack.length - 1].elseYs.push({ y: curY, condition: msg.condition, sourceIndex: msg.sourceIndex });
+          fragmentStack[fragmentStack.length - 1].elseYs.push({ y: elseY, condition: msg.condition, sourceIndex: msg.sourceIndex });
         }
-        lastEventY = curY;
-        // Branch guards sit 16px below the divider and have a descender;
-        // their first message needs the same text clearance as the header.
-        curY += (msg.condition ? 20 : 0) + CFG.fragmentPadY + CFG.fontSize + 10;
+        lastEventY = elseY;
+        if (compact) {
+          sky.raiseAll(elseY + (msg.condition ? COMPACT.guardRowH : 0));
+          curY = elseY + (msg.condition ? COMPACT.guardRowH : 0) + labelClear;
+        } else {
+          // Branch guards sit 16px below the divider and have a descender;
+          // their first message needs the same text clearance as the header.
+          curY += (msg.condition ? 20 : 0) + CFG.fragmentPadY + CFG.fontSize + 10;
+        }
         msgYs.push(curY);
       } else if (msg.type === 'fragment_end') {
         var fragmentEndEventY = curY;
         if (fragmentStack.length > 0) {
           var frag = fragmentStack.pop();
-          frag.endY = frag.lastMsgY + 20;
+          frag.parentId = openFrameId();
+          // Compact closes a frame just below the last row it holds (nested
+          // frames included, as they raised the skyline).
+          frag.endY = compact ? sky.all() + COMPACT.framePad : frag.lastMsgY + 20;
           for (var childIndex = 0; childIndex < frag.children.length; childIndex++) {
-            frag.endY = Math.max(frag.endY, frag.children[childIndex].endY + 8);
+            frag.endY = Math.max(frag.endY, frag.children[childIndex].endY + (compact ? COMPACT.framePad : 8));
           }
           fragmentEndEventY = frag.endY;
           fragments.push(frag);
+          if (compact) sky.raiseAll(frag.endY);
           // Propagate participant coverage to parent fragment
           if (fragmentStack.length > 0) {
             var parentFrag = fragmentStack[fragmentStack.length - 1];
@@ -13294,12 +18392,18 @@
             }
           }
         }
-        curY = frag ? frag.endY + messageGapY / 2 : curY + 20;
+        if (compact) curY = frag ? frag.endY + labelClear : curY;
+        else curY = frag ? frag.endY + messageGapY / 2 : curY + 20;
         lastEventY = fragmentEndEventY;
         msgYs.push(curY);
       } else if (msg.type === 'lost' || msg.type === 'found') {
+        if (compact) curY = compactRowY(msg, mi);
         lastEventY = curY;
         msgYs.push(curY);
+        if (compact) {
+          var lostFoundCols = rowColumns(msg);
+          sky.raise(lostFoundCols[0], lostFoundCols[1], curY + CFG.lostFoundRadius);
+        }
         curY += messageGapY;
         if (fragmentStack.length > 0) {
           var lfIdx = findPIdxByName(msg.from || msg.to);
@@ -13332,26 +18436,49 @@
           deactivateY = Math.max(lastEventY, curY - activationEndGap);
         }
         if (prevMsg && prevMsg.msgType !== 'response' && prevMsg.from === prevMsg.to && prevMsg.to === msg.target) {
-          deactivateY = Math.max(deactivateY, prevOccurrenceY + minSelfActivationH);
+          // Compact ends a self-call's nested bar just below its return.
+          deactivateY = compact
+            ? prevOccurrenceY + minSelfActivationH
+            : Math.max(deactivateY, prevOccurrenceY + minSelfActivationH);
         }
         curY = Math.max(curY, deactivateY + (nextIsFragmentStart ? 20 : activationEndGap));
         lastEventY = deactivateY;
+        barBottom = Math.max(barBottom, deactivateY);
         msgYs.push(deactivateY); // bar ends at the preceding occurrence or fragment boundary
       } else if (msg.type === 'destroy') {
         lastEventY = curY;
         msgYs.push(curY);
+        if (compact) {
+          var destroyed = participantIndex(participants, msg.target);
+          sky.raise(destroyed, destroyed + 1, curY + CFG.destroySize);
+        }
         curY += messageGapY;
       } else if (msg.type === 'note') {
+        // A note's top edge sits 6 above its row (see placeNoteRect).
+        var noteCols = compact ? rowColumns(msg) : null;
+        if (compact) curY = Math.max(curY, sky.over(noteCols[0], noteCols[1]) + 6 + COMPACT.rowGap);
         lastEventY = curY;
         msgYs.push(curY);
         var noteH = UMLShared.measureNote(msg.lines || [msg.text || '']).height;
-        curY += Math.max(noteH + 10, messageGapY);
+        if (compact) {
+          for (var nsi = 0; nsi < fragmentStack.length; nsi++) fragmentStack[nsi].notes.push(mi);
+          // Later rows in the note's columns keep clear of it, and later
+          // occurrences on its lifeline follow it.
+          curY = curY - 6 + noteH;
+          sky.raise(noteCols[0], noteCols[1], curY + COMPACT.noteClear);
+          var notedLifeline = participantIndex(participants, msg.target);
+          if (notedLifeline >= 0) lifelineFree[notedLifeline] = Math.max(lifelineFree[notedLifeline], curY);
+        } else {
+          curY += Math.max(noteH + 10, messageGapY);
+        }
       } else if (msg.type === 'create') {
+        // The creation message runs to the head's middle; its label clears the row above.
+        if (compact) curY = Math.max(curY, sky.all() + labelClear - createdHeadH / 2);
         createYs[msg.target] = curY;
         lastEventY = curY;
         msgYs.push(curY);
         // Advance only to box center — the following <<create>> message aligns here
-        curY += partH / 2;
+        curY += createdHeadH / 2;
       } else {
         lastEventY = curY;
         msgYs.push(curY);
@@ -13365,11 +18492,14 @@
     for (var fhi = 0; fhi < fragments.length; fhi++) {
       if (fragments[fhi].endY > maxFragEnd) maxFragEnd = fragments[fhi].endY;
     }
-    var totalH = Math.max(curY, maxFragEnd) + 30; // Bottom padding
+    // Compact: the lifelines run a short tail below the lowest drawn row.
+    var totalH = compact
+      ? Math.max(sky.all(), barBottom, maxFragEnd, Math.max.apply(Math, lifelineFree)) + COMPACT.lifelineTail + COMPACT.margin
+      : Math.max(curY, maxFragEnd) + 30; // Bottom padding
 
     // Add extra horizontal padding when fragments exist so their borders
     // are not clipped at the SVG edge (fragments extend beyond participants)
-    if (fragments.length > 0) {
+    if (fragments.length > 0 && !compact) {
       var extraPad = 25;
       for (var si = 0; si < partX.length; si++) {
         partX[si] += extraPad;
@@ -13378,9 +18508,10 @@
     }
 
     // Expand SVG width if self-message labels extend beyond the right edge
-    var selfW = 40;
+    // (compact measures the whole drawing once, after the frames).
+    var selfW = compact ? COMPACT.selfW : 40;
     var halfAct = CFG.activationW / 2;
-    for (var smi = 0; smi < messages.length; smi++) {
+    for (var smi = 0; smi < messages.length && !compact; smi++) {
       var sm = messages[smi];
       if (sm.type === 'message' && sm.from === sm.to && (sm.label || sm.labelDirection)) {
         var smIdx = findPIdxByName(sm.from);
@@ -13394,7 +18525,7 @@
 
     // Expand SVG for lost messages (extend right) and found messages (extend left)
     var maxFoundGap = 0;
-    for (var lfmi = 0; lfmi < messages.length; lfmi++) {
+    for (var lfmi = 0; lfmi < messages.length && !compact; lfmi++) {
       var lfm = messages[lfmi];
       if (lfm.type === 'lost' || lfm.type === 'found') {
         var ltw = (lfm.label || lfm.labelDirection) ? UMLShared.labelDirectionTextWidth(lfm.label, lfm.labelDirection, CFG.fontSize) : 0;
@@ -13530,10 +18661,10 @@
 
     for (var pbi = 0; pbi < participants.length; pbi++) {
       if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[pbi].id)) continue;
-      pushSequenceRectObstacle(partX[pbi] - partWidths[pbi] / 2, headTop, partWidths[pbi], partH);
+      pushSequenceRectObstacle(partX[pbi] - partWidths[pbi] / 2, headTop + heads.top[pbi], partWidths[pbi], heads.height[pbi]);
     }
     for (var lhi = 0; lhi < lanes.length; lhi++) {
-      if (laneHeaderH) pushSequenceRectObstacle(lanes[lhi].left, CFG.svgPad, lanes[lhi].right - lanes[lhi].left, laneHeaderH);
+      if (laneHeaderH) pushSequenceRectObstacle(lanes[lhi].left, topPad, lanes[lhi].right - lanes[lhi].left, laneHeaderH);
     }
     for (var abo = 0; abo < activationBars.length; abo++) {
       var obstacleBar = activationBars[abo];
@@ -13550,41 +18681,168 @@
     // both the enclosing frame and the viewport.
     for (var fbi = 0; fbi < fragments.length; fbi++) {
       var boundedFrag = fragments[fbi];
-      var inset = (boundedFrag.depth || 0) * 8;
+      var inset = (boundedFrag.depth || 0) * (compact ? COMPACT.frameInset : 8);
+      var frameMargin = compact ? COMPACT.frameMargin : 20;
       var left = boundedFrag.minPIdx <= boundedFrag.maxPIdx
-        ? partX[boundedFrag.minPIdx] - partWidths[boundedFrag.minPIdx] / 2 - 20 + inset
+        ? partX[boundedFrag.minPIdx] - partWidths[boundedFrag.minPIdx] / 2 - frameMargin + inset
         : CFG.svgPad - 5 + inset;
       var right = boundedFrag.minPIdx <= boundedFrag.maxPIdx
-        ? partX[boundedFrag.maxPIdx] + partWidths[boundedFrag.maxPIdx] / 2 + 20 - inset
+        ? partX[boundedFrag.maxPIdx] + partWidths[boundedFrag.maxPIdx] / 2 + frameMargin - inset
         : totalW - CFG.svgPad + 5 - inset;
-      var headingWidth = UMLShared.textWidth(boundedFrag.fragType.toUpperCase(), true, CFG.fontSizeFragment) + 16;
-      var guards = [boundedFrag.condition].concat(boundedFrag.elseYs.map(function(branch) { return branch.condition; }));
-      for (var gbi = 0; gbi < guards.length; gbi++) {
-        if (guards[gbi]) headingWidth = Math.max(headingWidth,
-          UMLShared.textWidth('[' + guards[gbi] + ']', false, CFG.fontSizeFragment) + 20);
+      if (compact) {
+        for (var fni = 0; fni < boundedFrag.notes.length; fni++) {
+          var frameNote = compactNoteExtent(boundedFrag.notes[fni]);
+          left = Math.min(left, frameNote.left - COMPACT.labelPad);
+          right = Math.max(right, frameNote.right + COMPACT.labelPad);
+        }
+      } else {
+        var headingWidth = UMLShared.textWidth(boundedFrag.fragType.toUpperCase(), true, CFG.fontSizeFragment) + 16;
+        var guards = [boundedFrag.condition].concat(boundedFrag.elseYs.map(function(branch) { return branch.condition; }));
+        for (var gbi = 0; gbi < guards.length; gbi++) {
+          if (guards[gbi]) headingWidth = Math.max(headingWidth,
+            UMLShared.textWidth('[' + guards[gbi] + ']', false, CFG.fontSizeFragment) + 20);
+        }
+        right = Math.max(right, left + headingWidth + 20);
       }
-      right = Math.max(right, left + headingWidth + 20);
       for (var sfi = 0; sfi < boundedFrag.selfMessages.length; sfi++) {
-        var messageIndex = boundedFrag.selfMessages[sfi];
-        var selfMessage = messages[messageIndex];
-        var selfIndex = findPIdx(selfMessage.from);
-        var selfY = msgYs[messageIndex];
-        var loopRight = Math.max(
-          getEdgeX(selfIndex, selfY, 'right', 'source', selfMessage.msgType),
-          getEdgeX(selfIndex, selfY + selfMessageH, 'right', 'target', selfMessage.msgType)
-        ) + selfW;
-        var labelRight = loopRight + ((selfMessage.label || selfMessage.labelDirection)
-          ? 6 + messageLabelWidth(selfMessage, messageTexts[messageIndex])
-          : 0);
-        right = Math.max(right, labelRight + CFG.fragmentPadX);
+        right = Math.max(right, selfCallRight(boundedFrag.selfMessages[sfi]) + (compact ? COMPACT.labelPad : CFG.fragmentPadX));
       }
+      var childPad = compact ? COMPACT.frameInset : 8;
       for (var cfi = 0; cfi < boundedFrag.children.length; cfi++) {
         var childBounds = boundedFrag.children[cfi].bounds;
-        left = Math.min(left, childBounds.left - 8);
-        right = Math.max(right, childBounds.right + 8);
+        left = Math.min(left, childBounds.left - childPad);
+        right = Math.max(right, childBounds.right + childPad);
       }
+      if (compact) right = Math.max(right, placeFrameGuards(boundedFrag, left));
       boundedFrag.bounds = { left: left, right: right };
       totalW = Math.max(totalW, right + CFG.svgPad);
+    }
+
+    // Compact: a guard heads the operand it guards, so it never leaves the
+    // frame's left end. The operator's guard sits beside the tab (when the
+    // rows were laid out, `guardFitsBesideTab` found room there) or in its
+    // own row under the tab; an `else` guard starts its divider's row.
+    // Records each guard's offset from the frame's top-left corner and
+    // returns the right edge the frame needs to hold them.
+    function placeFrameGuards(frame, left) {
+      var tabW = frameTabWidth(frame);
+      var needRight = left + tabW + COMPACT.labelPad;
+      function place(dx, condition) {
+        needRight = Math.max(needRight, left + dx + guardWidth(condition) + COMPACT.labelPad);
+        return dx;
+      }
+      if (frame.condition) {
+        frame.guardDx = place(frame.guardUnder ? COMPACT.guardInset : tabW + COMPACT.guardGap, frame.condition);
+        frame.guardDy = frame.guardUnder
+          ? COMPACT.tabH + COMPACT.guardRowH - COMPACT.guardDescent
+          : COMPACT.tabH - COMPACT.tabTextInset;
+      }
+      for (var b = 0; b < frame.elseYs.length; b++) {
+        if (frame.elseYs[b].condition) frame.elseYs[b].guardDx = place(COMPACT.guardInset, frame.elseYs[b].condition);
+      }
+      return needRight;
+    }
+
+    // Compact: whether a frame's guard fits beside its tab, inside the frame
+    // its own messages need and clear of every lifeline and bar.
+    function guardFitsBesideTab(frame, span) {
+      if (!(span.min <= span.max)) return false;
+      var inset = frame.depth * COMPACT.frameInset;
+      var left = partX[span.min] - partWidths[span.min] / 2 - COMPACT.frameMargin + inset;
+      var right = partX[span.max] + partWidths[span.max] / 2 + COMPACT.frameMargin - inset;
+      var x = left + frameTabWidth(frame) + COMPACT.guardGap;
+      var width = guardWidth(frame.condition);
+      if (x + width + COMPACT.labelPad > right) return false;
+      for (var i = 0; i < partX.length; i++) {
+        var bandLeft = partX[i] - allowance.left[i] - COMPACT.clearance;
+        var bandRight = partX[i] + allowance.right[i] + COMPACT.clearance;
+        if (x < bandRight && x + width > bandLeft) return false;
+      }
+      return true;
+    }
+
+    // The lifelines the messages of the frame opened at `startIndex` reach.
+    function frameSpan(startIndex) {
+      var span = { min: Infinity, max: -Infinity };
+      for (var i = startIndex + 1, depth = 0; i < messages.length && depth >= 0; i++) {
+        var row = messages[i];
+        if (row.type === 'fragment_start') depth++;
+        else if (row.type === 'fragment_end') depth--;
+        else if (row.type === 'message') {
+          var ends = [participantIndex(participants, row.from), participantIndex(participants, row.to)];
+          for (var e = 0; e < ends.length; e++) {
+            if (ends[e] < 0) continue;
+            span.min = Math.min(span.min, ends[e]);
+            span.max = Math.max(span.max, ends[e]);
+          }
+        }
+      }
+      return span;
+    }
+
+    function frameTabWidth(frame) {
+      return UMLShared.textWidth(frame.fragType.toUpperCase(), true, fragmentFont) + 16;
+    }
+
+    function guardWidth(condition) {
+      return UMLShared.textWidth('[' + condition + ']', false, fragmentFont);
+    }
+
+    // The right end of a self-call's loop, or of its label.
+    function selfCallRight(messageIndex) {
+      var selfMessage = messages[messageIndex];
+      var selfIndex = findPIdx(selfMessage.from);
+      var selfY = msgYs[messageIndex];
+      var loopRight = Math.max(
+        getEdgeX(selfIndex, selfY, 'right', 'source', selfMessage.msgType),
+        getEdgeX(selfIndex, selfY + selfMessageH, 'right', 'target', selfMessage.msgType)
+      ) + selfW;
+      return loopRight + ((selfMessage.label || selfMessage.labelDirection)
+        ? 6 + messageLabelWidth(selfMessage, messageTexts[messageIndex])
+        : 0);
+    }
+
+    // Where a note lands beside or over its lifeline when nothing pushes it
+    // (the first candidate of placeNoteRect).
+    function compactNoteExtent(messageIndex) {
+      var noteMessage = messages[messageIndex];
+      var idx = findPIdx(noteMessage.target);
+      var noteW = noteRect(noteMessage).width;
+      var y = msgYs[messageIndex];
+      if (noteMessage.position === 'right') {
+        var rightX = getEdgeX(idx, y, 'right') + 1 + COMPACT.noteGap;
+        return { left: rightX, right: rightX + noteW };
+      }
+      if (noteMessage.position === 'left') {
+        var leftX = getEdgeX(idx, y, 'left') - 1 - COMPACT.noteGap - noteW;
+        return { left: leftX, right: leftX + noteW };
+      }
+      return { left: partX[idx] - noteW / 2, right: partX[idx] + noteW / 2 };
+    }
+
+    // ── Compact: measure the whole drawing once and keep one outer margin ──
+    if (compact) {
+      var extent = { left: Infinity, right: -Infinity };
+      var reach = function (l, r) { extent.left = Math.min(extent.left, l); extent.right = Math.max(extent.right, r); };
+      for (var hxi = 0; hxi < participants.length; hxi++) reach(partX[hxi] - partWidths[hxi] / 2, partX[hxi] + partWidths[hxi] / 2);
+      for (var fxi = 0; fxi < fragments.length; fxi++) reach(fragments[fxi].bounds.left, fragments[fxi].bounds.right);
+      for (var mxi = 0; mxi < messages.length; mxi++) {
+        var mx = messages[mxi];
+        if (mx.type === 'message' && mx.from === mx.to) reach(Infinity, selfCallRight(mxi));
+        else if (mx.type === 'note') { var ne = compactNoteExtent(mxi); reach(ne.left, ne.right); }
+        else if (mx.type === 'lost') reach(Infinity, getEdgeX(findPIdx(mx.from), msgYs[mxi], 'right') + lostFoundReach(mx) + CFG.lostFoundRadius);
+        else if (mx.type === 'found') reach(getEdgeX(findPIdx(mx.to), msgYs[mxi], 'left') - lostFoundReach(mx) - CFG.lostFoundRadius, -Infinity);
+      }
+      if (lanes.length) { var le = placeLanes(lanes, participants, partX, partWidths); reach(le.left, le.right); }
+      var compactShift = COMPACT.margin - extent.left;
+      for (var cxi = 0; cxi < partX.length; cxi++) partX[cxi] += compactShift;
+      for (var cfx = 0; cfx < fragments.length; cfx++) {
+        fragments[cfx].bounds.left += compactShift;
+        fragments[cfx].bounds.right += compactShift;
+      }
+      for (var cox = 0; cox < sequenceNoteObstacles.length; cox++) sequenceNoteObstacles[cox].x += compactShift;
+      if (lanes.length) placeLanes(lanes, participants, partX, partWidths);
+      totalW = extent.right + compactShift + COMPACT.margin;
     }
 
     // ── Build SVG ──
@@ -13599,14 +18857,14 @@
     }
 
     // ── Draw organization lanes behind everything else ──
-    drawLanes(svg, lanes, CFG.svgPad, totalH - 4, laneHeaderH, colors);
+    drawLanes(svg, lanes, topPad, totalH - 4, laneHeaderH, colors);
 
     // ── Draw lifelines (dashed vertical lines, adjusted for create/destroy) ──
-    var lifelineTop = headTop + partH;
-    var lifelineBot = totalH - 10;
+    var lifelineBot = totalH - (compact ? COMPACT.margin : 10);
     for (var li = 0; li < participants.length; li++) {
       var pid = participants[li].id;
-      var llTop = Object.prototype.hasOwnProperty.call(createYs, pid) ? createYs[pid] + partH : lifelineTop;
+      var lifelineTop = headTop + heads.top[li] + heads.height[li];
+      var llTop = Object.prototype.hasOwnProperty.call(createYs, pid) ? createYs[pid] + createdHeadH : lifelineTop;
       var llBot = Object.prototype.hasOwnProperty.call(destroyYs, pid) ? destroyYs[pid] : lifelineBot;
       svg.push('<line class="uml-sequence-lifeline" x1="' + partX[li] + '" y1="' + llTop + '" x2="' + partX[li] + '" y2="' + llBot +
         '" stroke="' + colors.secondaryLine + '" stroke-width="' + CFG.lifelineStrokeWidth + '" stroke-dasharray="' + CFG.lifelineDash + '" stroke-linecap="round"/>');
@@ -13657,10 +18915,12 @@
         '" fill="none" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
 
       // Fragment label — pentagon/tab shape with folded corner
-      var labelW = UMLShared.textWidth(frag.fragType.toUpperCase(), true, CFG.fontSizeFragment) + 16;
-      var lh = CFG.fragmentLabelH;
+      var labelW = UMLShared.textWidth(frag.fragType.toUpperCase(), true, fragmentFont) + 16;
+      var lh = compact ? COMPACT.tabH : CFG.fragmentLabelH;
+      var tabBaseline = compact ? COMPACT.tabTextInset : 7;
       var foldSize = 6;
       var lx = fragL, ly = frag.startY;
+      if (scene) recordFrame(frag, fragLayoutId, labelW, lh, tabBaseline);
       // Pentagon: top-left, top-right, fold point, bottom-right, bottom-left
       svg.push('<polygon' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '"' : '') + ' points="' +
         lx + ',' + ly + ' ' +
@@ -13669,18 +18929,20 @@
         (lx + labelW - foldSize) + ',' + (ly + lh) + ' ' +
         lx + ',' + (ly + lh) +
         '" fill="' + colors.secondaryFill + '" stroke="' + colors.secondaryLine + '" stroke-width="1"/>');
-      svg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '"' : '') + ' x="' + (lx + 8) + '" y="' + (ly + lh - 7) +
-        '" font-size="' + CFG.fontSizeFragment + '" font-weight="bold" fill="' + colors.text + '">' +
+      svg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '"' : '') + ' x="' + (lx + 8) + '" y="' + (ly + lh - tabBaseline) +
+        '" font-size="' + fragmentFont + '" font-weight="bold" fill="' + colors.text + '">' +
         UMLShared.escapeXml(frag.fragType.toUpperCase()) + '</text>');
 
       // Condition text — deferred to render on top of everything. Tag with the
-      // fragment id so the editor can recognize it for inline editing.
+      // fragment id so the editor can recognize it for inline editing. Compact
+      // puts it beside the tab, on the keyword's baseline, or under the tab.
       if (frag.condition) {
-        guardSvg.push('<text' + (fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-fragment-role="condition"' : '') +
-          ' x="' + (fragL + 10) + '" y="' + (ly + lh + 14) +
-          '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
-          '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
-          UMLShared.escapeXml(frag.condition) + ']</text>');
+        var guardPos = compact
+          ? { x: fragL + frag.guardDx, y: ly + frag.guardDy }
+          : { x: fragL + 10, y: ly + lh + 14 };
+        pushFragmentGuard(guardSvg,
+          fragLayoutId ? ' data-layout-fragment-id="' + UMLShared.escapeXml(fragLayoutId) + '" data-layout-fragment-role="condition"' : '',
+          guardPos.x, guardPos.y, frag.condition, colors, fragmentFont);
       }
 
       // Else divider lines
@@ -13693,11 +18955,11 @@
         svg.push('<line' + elseLineAttrs + ' x1="' + fragL + '" y1="' + ey + '" x2="' + fragR + '" y2="' + ey +
           '" stroke="' + colors.secondaryLine + '" stroke-width="1" stroke-dasharray="6,4"/>');
         if (frag.elseYs[ei].condition) {
-          guardSvg.push('<text' + (elseLineAttrs ? elseLineAttrs + ' data-layout-fragment-role="branch"' : '') +
-            ' x="' + (fragL + 10) + '" y="' + (ey + 16) +
-            '" font-size="' + CFG.fontSizeFragment + '" fill="' + colors.text +
-            '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke">[' +
-            UMLShared.escapeXml(frag.elseYs[ei].condition) + ']</text>');
+          var branchBaseline = ey + (compact ? COMPACT.guardRowH - COMPACT.guardDescent : 16);
+          var branchX = fragL + (compact ? frag.elseYs[ei].guardDx : 10);
+          if (scene) recordFrameText(fragLayoutId, frag.elseYs[ei].sourceIndex, '[' + frag.elseYs[ei].condition + ']', branchX, branchBaseline, false);
+          pushFragmentGuard(guardSvg, elseLineAttrs ? elseLineAttrs + ' data-layout-fragment-role="branch"' : '',
+            branchX, branchBaseline, frag.elseYs[ei].condition, colors, fragmentFont);
         }
       }
     }
@@ -13718,7 +18980,8 @@
         var x1 = getEdgeX(fromIdx, my, isLeft ? 'left' : 'right', 'source', m.msgType);
         var x2;
         // Create messages: arrow points to the participant box edge (UML 2.0 G179)
-        if (Object.prototype.hasOwnProperty.call(createYs, m.to) && my <= createYs[m.to] + partH) {
+        var createsTarget = Object.prototype.hasOwnProperty.call(createYs, m.to) && my <= createYs[m.to] + createdHeadH;
+        if (createsTarget) {
           x2 = isLeft
             ? partX[toIdx] + partWidths[toIdx] / 2   // right edge of box
             : partX[toIdx] - partWidths[toIdx] / 2;  // left edge of box
@@ -13729,10 +18992,18 @@
         // Self-message
         if (fromIdx === toIdx) {
           var selfRouteAttrs = sequenceMessageRouteAttrs(m, m.from, m.to);
-          var selfW = 40;
           var selfSendX = getEdgeX(fromIdx, my, 'right', 'source', m.msgType);
           var selfReceiveX = getEdgeX(fromIdx, my + selfMessageH, 'right', 'target', m.msgType);
           var selfLoopX = Math.max(selfSendX, selfReceiveX) + selfW;
+          if (scene) {
+            recordMessage(mi2, [
+              { x: selfSendX, y: my }, { x: selfLoopX, y: my },
+              { x: selfLoopX, y: my + selfMessageH }, { x: selfReceiveX, y: my + selfMessageH }
+            ]);
+            recordLabel(sequenceMessageRouteId(m), messageTexts[mi2].length > 1 ? messageTexts[mi2]
+              : UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
+              selfLoopX + 6, my + 4, 'start', m.labelDirection);
+          }
           svg.push('<polyline points="' + selfSendX + ',' + my + ' ' + selfLoopX + ',' + my + ' ' +
             selfLoopX + ',' + (my + selfMessageH) + ' ' + selfReceiveX + ',' + (my + selfMessageH) +
             '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth +
@@ -13787,13 +19058,19 @@
           // create message enters the left or right edge of the target box,
           // so a label centered on the midpoint of the arrow stays in the
           // open space between the source lifeline and the target box edge.
+          if (scene) recordMessage(mi2, [{ x: x1, y: my }, { x: x2, y: my }]);
           if (m.label || m.labelDirection) {
-            var labelX = (x1 + x2) / 2;
+            var labelX = compact ? compactLabelX(mi2, fromIdx, toIdx, createsTarget) : (x1 + x2) / 2;
             var labelY = my - 6;
             var labelLines = messageTexts[mi2];
             var placementLines = labelLines.length ? labelLines : [UMLShared.labelDirectionPlacementText(m.label, m.labelDirection)];
             // The last line sits just above the arrow; earlier lines stack upward.
             var firstLabelY = labelY - (placementLines.length - 1) * MESSAGE_LINE_STEP;
+            if (scene) {
+              recordLabel(sequenceMessageRouteId(m), labelLines.length > 1 ? labelLines
+                : UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
+                labelX, firstLabelY, 'middle', m.labelDirection);
+            }
             for (var pli = 0; pli < placementLines.length; pli++) {
               pushLaneLabelBackdrop(svg, lanes, placementLines[pli], labelX, firstLabelY + pli * MESSAGE_LINE_STEP, 'middle', colors);
             }
@@ -13826,16 +19103,17 @@
         var cpart = participants[cIdx];
         // A created head keeps its participant's highlight and texture, like a head drawn at the top.
         var cFills = UMLShared.highlightFills(colors, cpart.highlight, cpart.texture);
-        svg.push('<rect filter="url(#uml-node-shadow)" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
+        svg.push('<rect filter="url(#uml-node-shadow)" x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + createdHeadH +
           '" fill="' + cFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
         if (cFills.textureUrl) {
-          svg.push('<rect x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + partH +
+          svg.push('<rect x="' + cpx + '" y="' + my + '" width="' + partWidths[cIdx] + '" height="' + createdHeadH +
             '" fill="' + cFills.textureUrl + '" stroke="none"/>');
         }
-        pushSequenceRectObstacle(cpx, my, partWidths[cIdx], partH);
+        pushSequenceRectObstacle(cpx, my, partWidths[cIdx], createdHeadH);
+        if (scene) scene.addNode({ id: 'head:' + cpart.id, x: cpx, y: my, width: partWidths[cIdx], height: createdHeadH, kind: 'head', parent: frameOf[mi2] });
         var cDisp = participantDisplay(cpart);
         var cLines = headTexts[cIdx];
-        var cTextY = my + partH / 2 - (cLines.length - 1) * CFG.lineHeight / 2 + CFG.fontSize * 0.35;
+        var cTextY = my + createdHeadH / 2 - (cLines.length - 1) * CFG.lineHeight / 2 + CFG.fontSize * 0.35;
         svg.push(textLinesSvg(cLines, partX[cIdx], cTextY, CFG.lineHeight,
           ' text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
           (cDisp.isInstance ? ' text-decoration="underline"' : '')));
@@ -13865,9 +19143,11 @@
         drawMsgArrow(svg, lx2 - lr, my, -1, 'sync', colors);
         svg.push('<circle cx="' + lx2 + '" cy="' + my + '" r="' + lr +
           '" fill="' + colors.line + '" stroke="' + colors.line + '"/>');
+        if (scene) recordMessage(mi2, [{ x: lx1, y: my }, { x: lx2 - lr, y: my }]);
         if (m.label || m.labelDirection) {
           var llabelX = (lx1 + lx2) / 2;
           var lostLabelY = my - 6;
+          if (scene) recordLabel(sequenceMessageRouteId(m), UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), llabelX, lostLabelY, 'middle', m.labelDirection);
           pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), llabelX, lostLabelY, 'middle', colors);
           if (m.label) {
             svg.push('<text x="' + llabelX + '" y="' + lostLabelY +
@@ -13900,9 +19180,11 @@
         svg.push('<line x1="' + (fx1 + fr) + '" y1="' + my + '" x2="' + fx2 + '" y2="' + my +
           '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + foundRouteAttrs + '/>');
         drawMsgArrow(svg, fx2, my, -1, 'sync', colors);
+        if (scene) recordMessage(mi2, [{ x: fx1 + fr, y: my }, { x: fx2, y: my }]);
         if (m.label || m.labelDirection) {
           var flabelX = (fx1 + fx2) / 2;
           var foundLabelY = my - 6;
+          if (scene) recordLabel(sequenceMessageRouteId(m), UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), flabelX, foundLabelY, 'middle', m.labelDirection);
           pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), flabelX, foundLabelY, 'middle', colors);
           if (m.label) {
             svg.push('<text x="' + flabelX + '" y="' + foundLabelY +
@@ -13939,12 +19221,16 @@
           targetY: my,
           targetRect: targetRect,
           lines: noteLines,
-          size: noteSize
+          size: noteSize,
+          frame: frameOf[mi2]
         });
       }
     }
 
     var placedSequenceNotes = [];
+    var noteOptions = compact
+      ? { slideStep: 16, maxSlides: 10, distanceLevels: 6, gap: COMPACT.noteGap }
+      : { slideStep: 16, maxSlides: 10, distanceLevels: 6 };
     for (var sni = 0; sni < deferredSequenceNotes.length; sni++) {
       var sequenceNote = deferredSequenceNotes[sni];
       var notePlacement = UMLShared.placeNoteRect(
@@ -13953,8 +19239,12 @@
         sequenceNote.position,
         sequenceNoteObstacles,
         placedSequenceNotes,
-        { slideStep: 16, maxSlides: 10, distanceLevels: 6 }
+        noteOptions
       );
+      if (scene) {
+        scene.addNode({ id: 'note:' + sni, x: notePlacement.x, y: notePlacement.y, width: sequenceNote.size.width,
+          height: sequenceNote.size.height, kind: 'note', parent: sequenceNote.frame });
+      }
       var connector = null;
       if (sequenceNote.position === 'left') {
         connector = {
@@ -13991,14 +19281,110 @@
       sequenceNoteObstacles.push(placedNoteRect);
     }
 
+    // A compact note pushed past the measured edge widens the canvas.
+    if (compact) {
+      var noteRight = 0, noteBottom = 0;
+      for (var pni = 0; pni < placedSequenceNotes.length; pni++) {
+        noteRight = Math.max(noteRight, placedSequenceNotes[pni].x + placedSequenceNotes[pni].w);
+        noteBottom = Math.max(noteBottom, placedSequenceNotes[pni].y + placedSequenceNotes[pni].h);
+      }
+      if (noteRight + COMPACT.margin > totalW || noteBottom + COMPACT.margin > totalH) {
+        totalW = Math.max(totalW, noteRight + COMPACT.margin);
+        totalH = Math.max(totalH, noteBottom + COMPACT.margin);
+        svg[0] = UMLShared.svgOpen(totalW, totalH, 0, 0, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false });
+      }
+    }
+
     // ── Draw participant boxes (top, skip created participants) ──
-    drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, partH, headTop, colors, createYs);
+    drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, heads, headTop, colors, createYs);
+    if (scene) recordHeads();
 
     // ── Guard conditions on top of everything ──
     for (var gi = 0; gi < guardSvg.length; gi++) svg.push(guardSvg[gi]);
 
     svg.push(UMLShared.svgClose());
-    return svg.join('\n');
+    if (!scene) return { svg: svg.join('\n'), scene: scene };
+    scene.setSize(totalW, totalH);
+    // The compact drawing carries its callouts, judged with the rest.
+    var drawnSvg = UMLCallouts.drawCompact(svg.join('\n'), scene, parsed.layout && parsed.layout.callouts,
+      { fontSize: CFG.fontSize, margin: COMPACT.margin });
+    return { svg: drawnSvg, scene: scene };
+
+    // ── Compact label placement and scene recording ──
+
+    // A message label centered in the gap the solver gave it.
+    function compactLabelX(messageIndex, fromIdx, toIdx, createsHead) {
+      var gap = labelGapOf[messageIndex];
+      if (gap === undefined) gap = Math.min(fromIdx, toIdx);
+      var slot = labelSlot(gap, fromIdx, toIdx, createsHead, partWidths, allowance);
+      return (partX[gap] + slot.leftInset + partX[gap + 1] - slot.rightInset) / 2;
+    }
+
+    // A message is a route between two occurrences. The occurrences belong
+    // to the innermost frame around the message, so the judge lets the
+    // route pass through that frame and the frames around it.
+    function recordMessage(messageIndex, points) {
+      var routeId = sequenceMessageRouteId(messages[messageIndex]) || 'seqmsg@' + messageIndex;
+      var frameId = frameOf[messageIndex];
+      var ends = [points[0], points[points.length - 1]];
+      var endIds = ['send', 'receive'].map(function (role, i) {
+        var id = 'occ:' + routeId + ':' + role;
+        scene.addNode({ id: id, x: ends[i].x, y: ends[i].y, width: 0, height: 0, kind: 'occurrence', parent: frameId });
+        return id;
+      });
+      scene.addRoute({ id: routeId, points: points, source: endIds[0], target: endIds[1] });
+    }
+
+    function textRect(text, x, baseline, anchor, fontSize, bold, extraWidth) {
+      var w = UMLShared.textWidth(text, bold, fontSize) + (extraWidth || 0);
+      var left = anchor === 'middle' ? x - w / 2 : (anchor === 'end' ? x - w : x);
+      return { x: left, y: baseline - fontSize * 0.95, width: w, height: fontSize * 1.2 };
+    }
+
+    // `text` is one line, or the lines of a wrapped label whose first line
+    // sits at `baseline` and the rest MESSAGE_LINE_STEP apart below it.
+    function recordLabel(owner, text, x, baseline, anchor, hasDirection) {
+      var lines = Array.isArray(text) ? text.filter(Boolean) : (text ? [text] : []);
+      if (!lines.length) return;
+      var rect = null;
+      for (var li = 0; li < lines.length; li++) {
+        var lineRect = textRect(lines[li], x, baseline + li * MESSAGE_LINE_STEP, anchor, CFG.fontSize, false, hasDirection ? 18 : 0);
+        rect = rect ? {
+          x: Math.min(rect.x, lineRect.x), y: Math.min(rect.y, lineRect.y),
+          width: Math.max(rect.x + rect.width, lineRect.x + lineRect.width) - Math.min(rect.x, lineRect.x),
+          height: Math.max(rect.y + rect.height, lineRect.y + lineRect.height) - Math.min(rect.y, lineRect.y)
+        } : lineRect;
+      }
+      scene.addLabel({ id: 'label:' + owner, owner: owner, kind: 'message', x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      scene.noteFont(CFG.fontSize);
+    }
+
+    function recordFrame(frame, frameId, tabW, tabH, tabBaseline) {
+      scene.addNode({ id: frameId, x: frame.bounds.left, y: frame.startY, width: frame.bounds.right - frame.bounds.left,
+        height: frame.endY - frame.startY, kind: 'frame', container: true, parent: frame.parentId });
+      recordFrameText(frameId, 'tab', frame.fragType.toUpperCase(), frame.bounds.left + 8, frame.startY + tabH - tabBaseline, true);
+      if (frame.condition) {
+        recordFrameText(frameId, 'guard', '[' + frame.condition + ']', frame.bounds.left + frame.guardDx,
+          frame.startY + frame.guardDy, false);
+      }
+    }
+
+    function recordFrameText(frameId, part, text, x, baseline, bold) {
+      var rect = textRect(text, x, baseline, 'start', fragmentFont, bold);
+      scene.addLabel({ id: frameId + ':' + part, owner: frameId, kind: 'frame-text', x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      scene.noteFont(fragmentFont);
+    }
+
+    function recordHeads() {
+      for (var i = 0; i < participants.length; i++) {
+        if (Object.prototype.hasOwnProperty.call(createYs, participants[i].id)) continue;
+        scene.addNode({ id: 'head:' + participants[i].id, x: partX[i] - partWidths[i] / 2, y: headTop + heads.top[i],
+          width: partWidths[i], height: heads.height[i], kind: 'head' });
+      }
+      scene.noteFont(CFG.fontSizeBold);
+      // Note text uses the message font (the shared note style).
+      if (placedSequenceNotes.length) scene.noteFont(CFG.fontSize);
+    }
   }
 
   // A colored box fills its lane with the color and its header with a darker
@@ -14039,11 +19425,16 @@
     }
   }
 
-  function drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, partH, y, colors, createYs) {
+  // `heads` gives each head's offset from the head row's top `headTop` and
+  // its height (see uniformHeadGeometry / compactHeadGeometry); `headTexts`
+  // gives each head's name as wrapped lines.
+  function drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, heads, headTop, colors, createYs) {
     for (var i = 0; i < participants.length; i++) {
       // Skip participants that are created mid-diagram (drawn inline)
       if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[i].id)) continue;
       var px = partX[i] - partWidths[i] / 2;
+      var y = headTop + heads.top[i];
+      var partH = heads.height[i];
       var part = participants[i];
       var lines = headTexts[i];
       var isInstance = participantDisplay(part).isInstance;
@@ -14054,7 +19445,7 @@
       if (part.isActor) {
         // Stick figure actor
         UMLShared.drawActorStickFigure(svg, partX[i], y + 2, colors, CFG.strokeWidth, part.highlight);
-        var actorTextY = y + UMLShared.ACTOR_H + CFG.fontSizeBold + 2;
+        var actorTextY = y + heads.actorNameDy;
         svg.push(textLinesSvg(lines, partX[i], actorTextY, CFG.lineHeight, textAttrs));
       } else {
         // Rectangle participant
@@ -14096,9 +19487,22 @@
 
   // ─── Export ────────────────────────────────────────────────────────
 
+  // Colors only tint the SVG text; the scene does not depend on them.
+  var SCENE_COLORS = { stroke: '#000', text: '#000', fill: '#fff', headerFill: '#fff', line: '#000',
+    secondaryLine: '#000', secondaryFill: '#fff', labelBg: '#fff', labelStroke: '#000' };
+
+  // The scene a compact drawing records (null without compact). DOM-free, so
+  // it serves the benchmark and tests as well as the renderer.
+  function layoutScene(text) {
+    var parsed = parseForLayout(text);
+    if (!parsed.participants || parsed.participants.length === 0) return null;
+    return generateSequenceSVG(parsed, SCENE_COLORS).scene;
+  }
+
   window.UMLSequenceDiagram = {
     render: render,
     parse: parse,
+    layoutScene: layoutScene,
   };
 
 })();
@@ -14149,6 +19553,108 @@
     selfLoopH: 30,
     labelBgPad: 4,
   };
+
+  // ─── Pseudostates ─────────────────────────────────────────────────
+  //
+  // `state Name <<kind>>` declares a pseudostate (UML 2.5.1, 14.2.3.7). Its
+  // name identifies it in transitions; the diagram shows only its symbol.
+  // Keys are the accepted spellings in lower case; values are state types.
+  // No prototype: any other stereotype, `<<constructor>>` included, is a miss.
+  var PSEUDOSTATE_KINDS = Object.assign(Object.create(null), {
+    'choice': 'choice',
+    'junction': 'junction',
+    'history': 'history',
+    'shallowhistory': 'history',
+    'deephistory': 'deepHistory',
+    'history*': 'deepHistory',
+    'fork': 'fork',
+    'join': 'join',
+    'terminate': 'terminate'
+  });
+  var PSEUDOSTATE_SIZE = {
+    choice: { width: 30, height: 30 },
+    junction: { width: 16, height: 16 },
+    history: { width: 30, height: 30 },
+    deepHistory: { width: 30, height: 30 },
+    terminate: { width: 22, height: 22 }
+  };
+  var FORK_BAR = { length: 80, thickness: 8 };
+
+  function isPseudostate(state) {
+    return state.type !== 'state';
+  }
+
+  // A fork or join bar lies across the direction the transitions flow in.
+  function pseudostateSize(state, direction) {
+    if (state.type === 'fork' || state.type === 'join') {
+      return direction === 'LR'
+        ? { width: FORK_BAR.thickness, height: FORK_BAR.length }
+        : { width: FORK_BAR.length, height: FORK_BAR.thickness };
+    }
+    return PSEUDOSTATE_SIZE[state.type];
+  }
+
+  // The layout engine may rotate a diagram to suit its container, so a bar
+  // measured for the authored direction can end up lying along the flow.
+  // Turn each one about its centre to lie across the direction the layout
+  // actually chose.
+  function orientForkBars(layoutResult, entries, authoredDirection) {
+    var direction = layoutResult.direction || authoredDirection;
+    for (var id in layoutResult.nodes) {
+      var entry = entries[id];
+      if (!entry || (entry.state.type !== 'fork' && entry.state.type !== 'join')) continue;
+      var size = pseudostateSize(entry.state, direction);
+      if (size.width === entry.box.width) continue;
+      var node = layoutResult.nodes[id];
+      node.x += (entry.box.width - size.width) / 2;
+      node.y += (entry.box.height - size.height) / 2;
+      node.width = size.width;
+      node.height = size.height;
+      entry.box = size;
+    }
+  }
+
+  // The «stereotype» line a state shows above its name, and the room it takes.
+  function stateStereotypeText(state) {
+    return state.stereotype ? '\u00ab' + state.stereotype + '\u00bb' : '';
+  }
+  function stateStereotypeHeight(state) {
+    return state.stereotype ? CFG.lineHeight : 0;
+  }
+
+  // The symbol for a pseudostate declared with `<<kind>>`, centred on (cx, cy).
+  function drawPseudostate(svg, entry, id, cx, cy, colors) {
+    var state = entry.state;
+    var attrs = stateLayoutAttrs(id);
+    var fills = UMLShared.highlightFills(colors, state.highlight, state.texture);
+    var half = entry.box.width / 2;
+    if (state.type === 'choice') {
+      var points = cx + ',' + (cy - half) + ' ' + (cx + half) + ',' + cy + ' ' +
+        cx + ',' + (cy + half) + ' ' + (cx - half) + ',' + cy;
+      svg.push('<polygon' + attrs + ' filter="url(#uml-node-shadow)" points="' + points +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke +
+        '" stroke-width="' + CFG.strokeWidth + '"/>');
+      if (fills.textureUrl) svg.push('<polygon points="' + points + '" fill="' + fills.textureUrl + '" stroke="none"/>');
+    } else if (state.type === 'junction') {
+      svg.push('<circle' + attrs + ' cx="' + cx + '" cy="' + cy + '" r="' + half +
+        '" fill="' + colors.line + '" stroke="none"/>');
+    } else if (state.type === 'history' || state.type === 'deepHistory') {
+      svg.push('<circle' + attrs + ' filter="url(#uml-node-shadow)" cx="' + cx + '" cy="' + cy + '" r="' + half +
+        '" fill="' + fills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      svg.push('<text' + attrs + ' x="' + cx + '" y="' + (cy + CFG.fontSizeBold * 0.35) +
+        '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
+        (state.type === 'deepHistory' ? 'H*' : 'H') + '</text>');
+    } else if (state.type === 'fork' || state.type === 'join') {
+      svg.push('<rect' + attrs + ' data-layout-route-decorative="true" x="' + entry.x + '" y="' + entry.y +
+        '" width="' + entry.box.width + '" height="' + entry.box.height + '" rx="2" ry="2" fill="' + colors.line + '" stroke="none"/>');
+    } else if (state.type === 'terminate') {
+      // The strokes are artwork: editors must not offer them as transitions.
+      var cross = '" stroke="' + colors.line + '" stroke-width="' + (CFG.strokeWidth * 1.5) +
+        '" stroke-linecap="round" data-layout-route-decorative="true"/>';
+      svg.push('<line' + attrs + ' x1="' + (cx - half) + '" y1="' + (cy - half) + '" x2="' + (cx + half) + '" y2="' + (cy + half) + cross);
+      svg.push('<line' + attrs + ' x1="' + (cx - half) + '" y1="' + (cy + half) + '" x2="' + (cx + half) + '" y2="' + (cy - half) + cross);
+    }
+  }
 
   // ─── Parser ───────────────────────────────────────────────────────
 
@@ -14222,7 +19728,9 @@
     var transitions = [];
     var notes = [];
     var direction = 'TB';
+    var directionAuthored = false;
     var layoutPreference = null;
+    var pane = null;
     var shadowEnabled = true;
 
     function ensureState(name, parent, explicit) {
@@ -14263,9 +19771,12 @@
           shadowEnabled = layoutDirective.shadowEnabled;
         } else if (layoutDirective.direction) {
           direction = layoutDirective.direction;
+          directionAuthored = true;
           layoutPreference = null;
+          pane = null;
         } else {
           layoutPreference = layoutDirective.layoutPreference;
+          pane = layoutDirective.pane;
         }
         continue;
       }
@@ -14300,19 +19811,23 @@
       // A texture keyword may itself be a state identifier.
       const hasStateHighlight = /^state\s+\S/i.test(stateHl.stripped);
       const declarationText = hasStateHighlight ? stateHl.stripped : line;
-      const declaration = declarationText.match(/^state\s+([^\s{};]+)(?:\s+<<choice>>)?\s*(\{)?\s*$/i);
+      const declaration = declarationText.match(/^state\s+([^\s{};]+)((?:\s*<<[^<>]*>>)*)\s*(\{)?\s*$/i);
       if (declaration) {
+        const stereotypes = (declaration[2].match(/<<[^<>]*>>/g) || []).map(text => text.slice(2, -2).trim()).filter(Boolean);
+        const pseudostateKind = stereotypes.length === 1 ? PSEUDOSTATE_KINDS[stereotypes[0].toLowerCase()] : null;
+        const opensRegion = Boolean(declaration[3]);
         // A top-level highlight of a state already nested in a composite (such
         // as an appended emphasis line) restyles it where it is; it must not
         // move the state out of its composite.
         const existing = states[declaration[1]];
         const restyleOnly = Boolean(existing && existing.parent) && parent === null &&
-          Boolean(stateHl.highlight || stateHl.texture) && !declaration[2];
+          Boolean(stateHl.highlight || stateHl.texture) && !opensRegion;
         const state = restyleOnly ? states[declaration[1]] : ensureState(declaration[1], parent, true);
-        if (/<<choice>>/i.test(declarationText)) state.type = 'choice';
+        if (pseudostateKind) state.type = pseudostateKind;
+        else if (stereotypes.length) state.stereotype = stereotypes.join(', ');
         if (hasStateHighlight && stateHl.highlight) state.highlight = stateHl.highlight;
         if (hasStateHighlight && stateHl.texture) state.texture = stateHl.texture;
-        if (declaration[2]) stateStack.push(state.name);
+        if (opensRegion) stateStack.push(state.name);
         continue;
       }
 
@@ -14402,19 +19917,20 @@
     var stateList = [];
     for (var sn in states) stateList.push(states[sn]);
 
-    return { states: stateList, transitions: transitions, notes: notes, direction: direction, layoutPreference: layoutPreference, shadowEnabled: shadowEnabled };
+    return { states: stateList, transitions: transitions, notes: notes, direction: direction, directionAuthored: directionAuthored, layoutPreference: layoutPreference, pane: pane, shadowEnabled: shadowEnabled };
   }
 
   // ─── Text Measurement (delegated to UMLShared) ────────────────────
 
   // ─── Layout ───────────────────────────────────────────────────────
 
-  function measureState(s) {
+  function measureState(s, direction) {
     if (s.type === 'initial') return { width: CFG.initialR * 2, height: CFG.initialR * 2 };
     if (s.type === 'final') return { width: CFG.finalRingR * 2 + 4, height: CFG.finalRingR * 2 + 4 };
-    if (s.type === 'choice') return { width: 30, height: 30 };
+    if (isPseudostate(s)) return pseudostateSize(s, direction);
 
-    var nameW = UMLShared.textWidth(s.name, true, CFG.fontSizeBold);
+    var nameW = Math.max(UMLShared.textWidth(s.name, true, CFG.fontSizeBold),
+      UMLShared.textWidth(stateStereotypeText(s), false, CFG.fontSize));
     var internals = s.internalTransitions || [];
     var hasActions = s.entryAction || s.exitAction || s.doActivity || internals.length > 0;
     var actionLines = internals.length;
@@ -14431,7 +19947,7 @@
     });
 
     var width = Math.max(CFG.stateMinW, nameW + CFG.padX * 2, actionMaxW + CFG.padX * 2);
-    var height = CFG.padY * 2 + CFG.lineHeight;
+    var height = CFG.padY * 2 + CFG.lineHeight + stateStereotypeHeight(s);
     if (hasActions) height += 4 + actionLines * CFG.actionLineHeight;
 
     return { width: Math.ceil(width), height: Math.ceil(height), hasActions: hasActions, actionLines: actionLines };
@@ -14556,7 +20072,10 @@
     }));
   }
 
-  function computeLayout(parsed, colors) {
+  // `topLevel` (optional) overrides how the top-level region is placed:
+  // {direction, directionLocked, gapX, gapY, layoutPreference,
+  // containerAspect}. Composite insides are laid out as without it.
+  function computeLayout(parsed, colors, topLevel) {
     var stateList = parsed.states;
     var transitions = parsed.transitions;
     if (stateList.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
@@ -14577,7 +20096,7 @@
     // Measure all states (children get measured individually)
     for (var i = 0; i < stateList.length; i++) {
       var s = stateList[i];
-      var box = measureState(s);
+      var box = measureState(s, parsed.direction);
       entries[s.name] = { state: s, box: box, x: 0, y: 0 };
     }
 
@@ -14589,7 +20108,7 @@
     var compositePad = 20;
     for (var parentIndex = 0; parentIndex < compositeNames.length; parentIndex++) {
       var pName = compositeNames[parentIndex];
-      var parentHeader = measureState(entries[pName].state);
+      var parentHeader = measureState(entries[pName].state, parsed.direction);
       var compositeHeaderH = parentHeader.height + 4;
       var kids = compositeChildren[pName];
       var subNodes = [], subEdges = [];
@@ -14639,6 +20158,7 @@
             };
           })
         });
+        orientForkBars(subResult, entries, parsed.direction);
         reserveHorizontalStateLabels(subResult, stateTransitionsInScope(parsed, pName));
         // Compute sub-bounding box
         var sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
@@ -14658,7 +20178,8 @@
           layoutResult: subResult
         }, {
           transitions: stateTransitionsInScope(parsed, pName),
-          direction: parsed.direction
+          direction: parsed.direction,
+          compactDrawing: parsed.compactDrawing
         }, colors);
         // Child nodes alone do not bound a region: return routes, loops,
         // arrowheads, and labels also belong inside its enclosing state.
@@ -14738,7 +20259,7 @@
       });
     }
 
-    var result = computeStateLayout(layoutNodes, layoutEdges, {
+    var topLevelOptions = {
       gapX: stateGapX,
       gapY: stateGapY,
       direction: parsed.direction || 'TB',
@@ -14747,8 +20268,11 @@
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.arrowSize + 4,
       edgeSizes: stateEdgeSizes
-    });
+    };
+    if (topLevel) Object.assign(topLevelOptions, topLevel);
+    var result = computeStateLayout(layoutNodes, layoutEdges, topLevelOptions);
 
+    orientForkBars(result, entries, parsed.direction);
     reserveHorizontalStateLabels(result, stateTransitionsInScope(parsed, null));
 
     // Map coords back for top-level states
@@ -14808,7 +20332,7 @@
   function drawStateActions(svg, entry, colors) {
     if (!entry.box.hasActions) return;
     var attrs = stateLayoutAttrs(entry.state.name);
-    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight;
+    var dividerY = entry.y + CFG.padY * 2 + CFG.lineHeight + stateStereotypeHeight(entry.state);
     svg.push('<line' + attrs + ' x1="' + entry.x + '" y1="' + dividerY + '" x2="' + (entry.x + entry.box.width) + '" y2="' + dividerY +
       '" stroke="' + colors.stroke + '" stroke-width="1"/>');
     var actionY = dividerY + CFG.fontSizeAction;
@@ -14863,6 +20387,10 @@
     // diagrams into detours that weave through other states.
     var actualDirection = (layout.layoutResult && layout.layoutResult.direction) || parsed.direction || 'TB';
     var isTB = actualDirection !== 'LR';
+    // Compact drawings keep every label within one line of its own route and
+    // nearer to it than to any other route, and give each branch of a
+    // fan-out its own crossing lane.
+    var compactDrawing = Boolean(parsed.compactDrawing);
 
     // Pre-compute distributed exit points to avoid overlapping lines from same source
     var customExits = {};  // ti -> {x, y}
@@ -14922,11 +20450,32 @@
         var tea = entries[ta.to], teb = entries[tb.to];
         return (tea ? secCenter(tea) : 0) - (teb ? secCenter(teb) : 0);
       });
+      var targetSeeking = compactDrawing ? targetSeekingExits(fe, dgroup.map(function(ti) {
+        var target = entries[transitions[ti].to];
+        return target ? secCenter(target) : secCenter(fe);
+      })) : null;
       for (var dgi = 0; dgi < dgroup.length; dgi++) {
         var frac = (dgi + 1) / (dgroup.length + 1);
-        var exitSec = secNear(fe) + secSize(fe) * frac;
+        var exitSec = targetSeeking ? targetSeeking[dgi] : secNear(fe) + secSize(fe) * frac;
         customExits[dgroup[dgi]] = mkPt(primFar(fe), exitSec);
       }
+    }
+
+    // Exits of a fan-out on the source's far face, each as near its target
+    // as the face allows, in target order and an arrowhead apart, so that a
+    // target below the face is reached by a straight line. Null when the
+    // face is too narrow to space them.
+    function targetSeekingExits(source, targetCoordinates) {
+      var lo = secNear(source) + CFG.stateRx + CFG.strokeWidth;
+      var hi = secFar(source) - CFG.stateRx - CFG.strokeWidth;
+      var spacing = CFG.arrowSize + CFG.strokeWidth * 2;
+      var count = targetCoordinates.length;
+      if (hi - lo < spacing * (count - 1)) return null;
+      var exits = targetCoordinates.map(function(c) { return Math.max(lo, Math.min(hi, c)); });
+      for (var i = 1; i < count; i++) exits[i] = Math.max(exits[i], exits[i - 1] + spacing);
+      exits[count - 1] = Math.min(exits[count - 1], hi);
+      for (var j = count - 2; j >= 0; j--) exits[j] = Math.min(exits[j], exits[j + 1] - spacing);
+      return exits;
     }
 
     // Back transitions share the secondary-far face with incoming returns.
@@ -15019,7 +20568,7 @@
         var fromEntry = entries[tr.from];
         var toEntry = entries[tr.to];
         if (!fromEntry || !toEntry || tr.from === tr.to) continue;
-        if (toEntry.state.type === 'initial' || toEntry.state.type === 'final' || toEntry.state.type === 'choice') continue;
+        if (isPseudostate(toEntry.state)) continue;
 
         var side = transitionTargetSide(ti);
         if (!side) continue;
@@ -15158,10 +20707,51 @@
       });
     })();
 
+    // Where a fan-out branch crosses between ranks: {span, fraction}, the
+    // crossing line lying `fraction` of the way across the first gap
+    // (`span` long) below the source. Branches leaving to the same side would
+    // share one crossing line at the midpoint; in compact drawings the
+    // farther branch crosses nearer the source, so the lines neither merge
+    // nor cross.
+    var crossingFraction = {};
+    if (compactDrawing) {
+      Object.keys(forwardByFrom).forEach(function(source) {
+        var sides = { before: [], after: [] };
+        var span = Infinity;
+        forwardByFrom[source].forEach(function(ti) {
+          var target = entries[transitions[ti].to];
+          if (customExits[ti] && target) span = Math.min(span, primNear(target) - primFar(entries[source]));
+        });
+        if (!(span > 0 && isFinite(span))) return;
+        forwardByFrom[source].forEach(function(ti) {
+          var exit = customExits[ti], target = entries[transitions[ti].to];
+          if (!exit || !target) return;
+          var from = isTB ? exit.x : exit.y;
+          var entrance = customTransitionTargets[ti];
+          var to = entrance ? (isTB ? entrance.x : entrance.y) : secCenter(target);
+          if (Math.abs(to - from) < 2) return;
+          sides[to > from ? 'after' : 'before'].push({ ti: ti, reach: Math.abs(to - from) });
+        });
+        [sides.before, sides.after].forEach(function(branches) {
+          branches.sort(function(a, b) { return a.reach - b.reach || a.ti - b.ti; });
+          branches.forEach(function(branch, nearness) {
+            crossingFraction[branch.ti] = { span: span, fraction: (branches.length - nearness) / (branches.length + 1) };
+          });
+        });
+      });
+    }
+
     var labelSvg = []; // Transition labels rendered after states so they appear on top
     var placedLabels = [];
     var placedRouteSegments = [];
     var curveBounds = [];
+    // Plain records of what was drawn, for the compact layout's scene.
+    var sceneRoutes = [];
+    var sceneLabels = [];
+    function recordSceneLabel(routeId, rect) {
+      sceneLabels.push({ id: 'label:' + routeId, owner: routeId, kind: 'transition',
+        x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top });
+    }
     var stateRouteInfos = [];
     var selfLoops = [];
     var stateObstacles = [];
@@ -15291,11 +20881,12 @@
       } else if (primaryRoute) {
         // Z-route through mid-primary so the route enters target's
         // primary-near face at 90°.
+        var crossing = crossingFraction[ti];
         if (isTB) {
-          var midY = (y1 + y2) / 2;
+          var midY = crossing ? y1 + crossing.span * crossing.fraction : (y1 + y2) / 2;
           points = [{ x: x1, y: y1 }, { x: x1, y: midY }, { x: x2, y: midY }, { x: x2, y: y2 }];
         } else {
-          var midX = (x1 + x2) / 2;
+          var midX = crossing ? x1 + crossing.span * crossing.fraction : (x1 + x2) / 2;
           points = [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
         }
       } else {
@@ -15437,6 +21028,7 @@
       }
       svg.push('<polyline' + stateRouteAttrs('edge-' + tr.routeIndex, tr.from, tr.to) + ' points="' + pStr +
         '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+      sceneRoutes.push({ id: 'edge-' + tr.routeIndex, points: points, source: tr.from, target: tr.to });
 
       // Arrowhead at target
       var pLast = points[points.length - 1];
@@ -15596,6 +21188,7 @@
           shape.ctrl1.x + ' ' + shape.ctrl1.y + ' ' + shape.ctrl2.x + ' ' + shape.ctrl2.y + ' ' +
           shape.end.x + ' ' + shape.end.y +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
+        sceneRoutes.push({ id: routeId, points: selfLoopPolyline(shape), source: tr.from, target: tr.to });
         UMLShared.drawArrow(routeSvg, shape.tip.x, shape.tip.y, shape.tip.dx, shape.tip.dy,
           colors.line, null, null, stateRouteDecorationAttrs(routeId, 'edge-arrow'));
         if (!labelled) continue;
@@ -15621,6 +21214,7 @@
           }
         );
         placedLabels.push(UMLShared.unionRects(loopLabelRect(spot, labelW), loopDirectionRect));
+        recordSceneLabel(routeId, placedLabels[placedLabels.length - 1]);
       }
     }
 
@@ -15673,12 +21267,25 @@
             { anchor: 'middle', dx: 0, dy: -(CFG.fontSize + 11), penalty: 8 },
             { anchor: 'middle', dx: 0, dy: CFG.fontSize * 2 + 4, penalty: 10 }
           ];
+          if (compactDrawing) {
+            // A label wider than its segment can still sit along it,
+            // starting or ending at a corner.
+            // When the line's own side is taken, the next line up still
+            // reads as its label.
+            labelHorizontalPlacements = labelHorizontalPlacements.concat([
+              { anchor: 'start', dx: 6, dy: -8, penalty: 5 },
+              { anchor: 'end', dx: -6, dy: -8, penalty: 6 },
+              { anchor: 'middle', dx: 0, dy: -(CFG.fontSize + 6), penalty: 7 }
+            ]);
+          }
         }
 
         var labelText = UMLShared.labelDirectionPlacementText(tr.label, tr.labelDirection);
+        var otherRouteSegments = stateOtherRouteSegments(routeInfo.routeIndex);
+        var ownRouteSegments = routeInfo.routeSegments;
         var labelPlacement = UMLShared.placeOrthogonalLabel(labelText, points, stateObstacles, placedLabels, {
           fontSize: CFG.fontSize,
-          otherSegments: stateOtherRouteSegments(routeInfo.routeIndex),
+          otherSegments: otherRouteSegments,
           endpointPad: routeInfo.isBackEdge ? 6 : 14,
           labelPad: 10,
           segmentPad: 4,
@@ -15701,6 +21308,9 @@
               bonus += segment.isH ? 18 : 0;
             }
             if (placement.anchor === 'middle') bonus += 3;
+            if (compactDrawing && !labelStaysWithRoute(rect, ownRouteSegments, otherRouteSegments)) {
+              bonus -= DETACHED_LABEL_PENALTY;
+            }
             return bonus;
           }
         });
@@ -15724,6 +21334,7 @@
           { fontSize: CFG.fontSize, attrs: stateRouteDecorationAttrs(stateRouteId, 'edge-direction') }
         );
         placedLabels.push(UMLShared.unionRects(stateLabelRect, stateDirectionRect));
+        recordSceneLabel(stateRouteId, placedLabels[placedLabels.length - 1]);
       }
     }
 
@@ -15734,22 +21345,70 @@
       labels: labelSvg,
       labelBounds: placedLabels,
       segments: placedRouteSegments,
-      curveBounds: curveBounds
+      curveBounds: curveBounds,
+      sceneRoutes: sceneRoutes,
+      sceneLabels: sceneLabels
     };
   }
 
-  function generateSVG(layout, parsed, colors) {
+  // Outweighs every other preference of the label placement.
+  var DETACHED_LABEL_PENALTY = 5000;
+  // A note leader that avoids every transition may be this many times as
+  // costly as one that crosses one; beyond that, crossing reads better.
+  var LEADER_DETOUR_LIMIT = 1.6;
+
+  function rectToOrthogonalSegmentDistance(rect, segment) {
+    var x1 = segment.isH ? segment.x1 : segment.x, x2 = segment.isH ? segment.x2 : segment.x;
+    var y1 = segment.isH ? segment.y : segment.y1, y2 = segment.isH ? segment.y : segment.y2;
+    var dx = Math.max(Math.min(x1, x2) - rect.right, rect.left - Math.max(x1, x2), 0);
+    var dy = Math.max(Math.min(y1, y2) - rect.bottom, rect.top - Math.max(y1, y2), 0);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function rectToSegmentsDistance(rect, segments) {
+    return segments.reduce(function(best, segment) {
+      return Math.min(best, rectToOrthogonalSegmentDistance(rect, segment));
+    }, Infinity);
+  }
+
+  // The judge's rule (UMLLayoutQuality): a label lies within one line of its
+  // own route and is not nearer to another route.
+  function labelStaysWithRoute(rect, ownSegments, otherSegments) {
+    var own = rectToSegmentsDistance(rect, ownSegments);
+    return own <= CFG.fontSize + 5 && own <= rectToSegmentsDistance(rect, otherSegments);
+  }
+
+  // A self-transition's cubic curve as a polyline, for the compact scene.
+  var SELF_LOOP_SAMPLES = 8;
+  function selfLoopPolyline(shape) {
+    var points = [];
+    for (var i = 0; i <= SELF_LOOP_SAMPLES; i++) {
+      var t = i / SELF_LOOP_SAMPLES, u = 1 - t;
+      var a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+      points.push({
+        x: a * shape.start.x + b * shape.ctrl1.x + c * shape.ctrl2.x + d * shape.end.x,
+        y: a * shape.start.y + b * shape.ctrl1.y + c * shape.ctrl2.y + d * shape.end.y
+      });
+    }
+    return points;
+  }
+
+  // `scene` (optional): a UMLLayoutQuality scene that receives what is drawn.
+  function generateSVG(layout, parsed, colors, scene) {
     var entries = layout.entries;
     var drawing = routeStateTransitions(layout, {
       transitions: stateTransitionsInScope(parsed, null),
       direction: parsed.direction,
-      layout: parsed.layout
+      layout: parsed.layout,
+      compactDrawing: parsed.compactDrawing
     }, colors);
     var routeSvg = drawing.routes;
     var labelSvg = drawing.labels;
     var placedLabels = drawing.labelBounds;
     var placedRouteSegments = drawing.segments;
     var curveBounds = drawing.curveBounds;
+    var sceneRoutes = drawing.sceneRoutes;
+    var sceneLabels = drawing.sceneLabels;
     var compositeDrawings = [];
     for (var parentId in entries) {
       var parent = entries[parentId];
@@ -15766,12 +21425,15 @@
       }, {
         transitions: stateTransitionsInScope(parsed, parentId),
         direction: parsed.direction,
-        layout: parsed.layout
+        layout: parsed.layout,
+        compactDrawing: parsed.compactDrawing
       }, colors);
       compositeDrawings.push(compositeDrawing);
       placedLabels = placedLabels.concat(compositeDrawing.labelBounds);
       placedRouteSegments = placedRouteSegments.concat(compositeDrawing.segments);
       curveBounds = curveBounds.concat(compositeDrawing.curveBounds);
+      sceneRoutes = sceneRoutes.concat(compositeDrawing.sceneRoutes);
+      sceneLabels = sceneLabels.concat(compositeDrawing.sceneLabels);
     }
     var svg;
 
@@ -15829,6 +21491,7 @@
       return anchors;
     }
 
+    var compactLeaders = Boolean(parsed.compactDrawing);
     function routeStateNoteLeader(note, obstacles, transitionObstacles) {
       var opposite = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
       var targetRect = { x: note.tx, y: note.ty, w: note.tw, h: note.th };
@@ -15859,8 +21522,7 @@
       // faces avoids crossing that cycle while retaining the note's placement.
       // Route once per face pair; the shared slide optimizer removes endpoint
       // jogs without rebuilding a routing grid for each attachment coordinate.
-      for (var pass = 0; pass < 2; pass++) {
-        var routeObstacles = pass === 0 ? stateNoteObstacles.concat(transitionObstacles) : stateNoteObstacles;
+      function bestLeader(routeObstacles) {
         var best = null;
         sources.forEach(function(source) {
           targets.forEach(function(target) {
@@ -15875,8 +21537,15 @@
             if (!best || score < best.score) best = { points: points, score: score };
           });
         });
-        if (best) return best.points;
+        return best;
       }
+      var clear = bestLeader(stateNoteObstacles.concat(transitionObstacles));
+      if (clear && !compactLeaders) return clear.points;
+      var crossing = bestLeader(stateNoteObstacles);
+      // In compact drawings a leader may cross a transition rather than
+      // circle the drawing to avoid it.
+      if (clear && (!crossing || clear.score <= crossing.score * LEADER_DETOUR_LIMIT)) return clear.points;
+      if (crossing) return crossing.points;
       return [sources[0], targets[0]];
     }
 
@@ -15931,6 +21600,14 @@
     var svgW = layout.width + CFG.svgPad * 2 + stateExtras.left + stateExtras.right;
     var svgH = layout.height + CFG.svgPad * 2 + stateExtras.top + stateExtras.bottom;
 
+    if (scene) {
+      recordStateScene(scene, {
+        entries: entries, routes: sceneRoutes, labels: sceneLabels,
+        notes: notePositions, noteLeaders: noteLeaderRoutes,
+        width: svgW, height: svgH, originX: ox, originY: oy
+      });
+    }
+
     var finalSvg = [];
     finalSvg.push(UMLShared.svgOpen(svgW, svgH, ox, oy, CFG.fontFamily, { shadowEnabled: parsed.shadowEnabled !== false }));
     svg = finalSvg;
@@ -15955,8 +21632,13 @@
           '" rx="' + CFG.stateRx + '" ry="' + CFG.stateRx +
           '" fill="' + cFills.textureUrl + '" stroke="none"/>');
       }
-      // Header with name
-      var chY = ce.y + CFG.padY + CFG.lineHeight * 0.75;
+      // Header: the stereotype, when there is one, above the name
+      if (ce.state.stereotype) {
+        svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + (ce.y + CFG.padY + CFG.lineHeight * 0.75) +
+          '" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
+          UMLShared.escapeXml(stateStereotypeText(ce.state)) + '</text>');
+      }
+      var chY = ce.y + CFG.padY + stateStereotypeHeight(ce.state) + CFG.lineHeight * 0.75;
       svg.push('<text x="' + (ce.x + CFG.padX) + '" y="' + chY +
         '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
         UMLShared.escapeXml(ce.state.name) + '</text>');
@@ -15992,18 +21674,8 @@
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
         svg.push('<circle' + stateLayoutAttrs(en) + ' cx="' + cx + '" cy="' + cy + '" r="' + CFG.finalR +
           '" fill="' + colors.line + '" stroke="none"/>');
-      } else if (s.type === 'choice') {
-        var choiceFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
-        // Diamond (rotated square)
-        var dh = e.box.width / 2;
-        var choicePts = cx + ',' + (cy - dh) + ' ' + (cx + dh) + ',' + cy + ' ' +
-          cx + ',' + (cy + dh) + ' ' + (cx - dh) + ',' + cy;
-        svg.push('<polygon' + stateLayoutAttrs(en) + ' filter="url(#uml-node-shadow)" points="' + choicePts +
-          '" fill="' + choiceFills.headerFill + '" stroke="' + colors.stroke +
-          '" stroke-width="' + CFG.strokeWidth + '"/>');
-        if (choiceFills.textureUrl) {
-          svg.push('<polygon points="' + choicePts + '" fill="' + choiceFills.textureUrl + '" stroke="none"/>');
-        }
+      } else if (isPseudostate(s)) {
+        drawPseudostate(svg, e, en, cx, cy, colors);
       } else {
         var stateFills = UMLShared.highlightFills(colors, s.highlight, s.texture);
         // Regular state: rounded rectangle
@@ -16016,8 +21688,13 @@
             '" fill="' + stateFills.textureUrl + '" stroke="none"/>');
         }
 
-        // State name (centered in top area)
-        var nameY = e.y + CFG.padY + CFG.lineHeight * 0.75;
+        // The stereotype, when there is one, then the name (centered at the top)
+        if (s.stereotype) {
+          svg.push('<text' + stateLayoutAttrs(en) + ' x="' + cx + '" y="' + (e.y + CFG.padY + CFG.lineHeight * 0.75) +
+            '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text + '">' +
+            UMLShared.escapeXml(stateStereotypeText(s)) + '</text>');
+        }
+        var nameY = e.y + CFG.padY + stateStereotypeHeight(s) + CFG.lineHeight * 0.75;
         svg.push('<text' + stateLayoutAttrs(en) + ' x="' + cx + '" y="' + nameY +
           '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '">' +
           UMLShared.escapeXml(s.name) + '</text>');
@@ -16042,6 +21719,293 @@
   }
 
 
+  // ─── Compact layout ───────────────────────────────────────────────
+  //
+  // `layout compact` without an authored `@layout` block: realize the normal
+  // placement (and the other direction, unless the author chose one) with
+  // the normal gaps, let UMLCompactLayout squeeze out the empty space, and
+  // keep the drawing whose smallest label is largest in the pane.
+
+  // Sizes for compact drawings, stated against the state font (20).
+  var COMPACT_STATE_METRICS = Object.freeze({
+    padX: 12,          // ≈ 0.6 em
+    padY: 5,           // ≈ 0.25 em
+    stateMinW: 0,      // a state is as wide as its text needs
+    svgPad: 14         // ≈ 0.7 em
+  });
+
+  // Notes are set at the state font, so no small text scales the drawing.
+  function compactNoteMetrics() {
+    return {
+      fontSize: CFG.fontSize,
+      codeFontSize: CFG.fontSize,
+      lineHeight: CFG.fontSize + 6,
+      padX: 12,
+      padY: 6
+    };
+  }
+
+  // What the router needs around boxes when the squeeze tightens a gap.
+  var COMPACT_STATE_CLEARANCES = Object.freeze({
+    lanePitch: 12,
+    boxClearance: 8,
+    stub: CFG.arrowSize + 4,
+    labelPad: CFG.labelBgPad,
+    // A transition's label sits beside its line, clear of the arrowhead.
+    nameLabelsShareStubs: true
+  });
+
+  function overrideFields(target, values) {
+    var saved = {};
+    Object.keys(values).forEach(function(key) {
+      saved[key] = target[key];
+      target[key] = values[key];
+    });
+    return saved;
+  }
+
+  // Runs fn with the compact metrics in force; restores them afterwards.
+  function withCompactStateMetrics(fn) {
+    var savedState = overrideFields(CFG, COMPACT_STATE_METRICS);
+    var savedNote = overrideFields(UMLShared.NOTE_CFG, compactNoteMetrics());
+    try {
+      return fn();
+    } finally {
+      overrideFields(CFG, savedState);
+      overrideFields(UMLShared.NOTE_CFG, savedNote);
+    }
+  }
+
+  // An authored layout was arranged against today's sizes, so a spec with a
+  // `@layout` block or authored routes keeps today's path (design spec 6.11).
+  // Inline `@pos` positions stay in the compact path, pinned.
+  function hasAuthoredStateLayout(text, layout) {
+    if (/^\s*@layout\b/im.test(text)) return true;
+    return Boolean(layout && layout.routes && Object.keys(layout.routes).length);
+  }
+
+  function noteHasCode(note) {
+    return (note.note.lines || []).some(function(line) { return line.trim().indexOf('```') === 0; });
+  }
+
+  // Transitions that meet at a junction or a join (or leave a junction or a
+  // fork) are drawn into one point of it, sharing their last (or first)
+  // stretch: that is the merge the pseudostate stands for, not an overlap.
+  function convergingBundle(entries, route) {
+    var target = entries[route.target], source = entries[route.source];
+    var into = target && target.state.type;
+    var from = source && source.state.type;
+    if (into === 'junction' || into === 'join') return 'into:' + route.target;
+    if (from === 'junction' || from === 'fork') return 'out-of:' + route.source;
+    return route.bundle != null ? route.bundle : null;
+  }
+
+  // Fills a scene with what generateSVG drew, in layout coordinates.
+  function recordStateScene(scene, drawn) {
+    var entries = drawn.entries;
+    Object.keys(entries).forEach(function(id) {
+      var entry = entries[id], state = entry.state;
+      scene.addNode({ id: id, x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height,
+        kind: state.isComposite ? 'composite' : state.type, container: !!state.isComposite,
+        parent: state.parent || null });
+      if (state.type === 'state' || state.type === 'history' || state.type === 'deepHistory') scene.noteFont(CFG.fontSizeBold);
+      if (state.stereotype) scene.noteFont(CFG.fontSize);
+      if (entry.box.hasActions) scene.noteFont(CFG.fontSizeAction);
+    });
+    drawn.routes.forEach(function(route) {
+      scene.addRoute(Object.assign({}, route, { bundle: convergingBundle(entries, route) }));
+    });
+    drawn.labels.forEach(function(label) {
+      scene.addLabel(label);
+      scene.noteFont(CFG.fontSize);
+    });
+    // A note annotates its state the way a label annotates its route: it is
+    // recorded as a label owned by that state, so the squeeze keeps its room
+    // and the judge keeps it clear of other states, labels and routes.
+    drawn.notes.forEach(function(note, i) {
+      var id = note.note.id;
+      scene.addLabel({ id: id, x: note.x, y: note.y, width: note.w, height: note.h,
+        owner: note.note.target, kind: 'note' });
+      scene.addRoute({ id: 'leader:' + id, points: drawn.noteLeaders[i], source: id, target: note.note.target });
+      scene.noteFont(UMLShared.NOTE_CFG.fontSize);
+      if (noteHasCode(note)) scene.noteFont(UMLShared.NOTE_CFG.codeFontSize);
+    });
+    scene.setSize(drawn.width, drawn.height);
+    scene.setOrigin(drawn.originX, drawn.originY);
+  }
+
+  function isAncestorState(entries, ancestorId, id) {
+    return stateAncestorIds(entries, id).indexOf(ancestorId) >= 0;
+  }
+
+  // A copy whose entries can be moved without touching the original.
+  function copyStateLayout(layout) {
+    var entries = {};
+    Object.keys(layout.entries).forEach(function(id) {
+      entries[id] = Object.assign({}, layout.entries[id]);
+    });
+    return Object.assign({}, layout, { entries: entries });
+  }
+
+  function refreshStateBounds(layout) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    Object.keys(layout.entries).forEach(function(id) {
+      var entry = layout.entries[id];
+      minX = Math.min(minX, entry.x);
+      minY = Math.min(minY, entry.y);
+      maxX = Math.max(maxX, entry.x + entry.box.width);
+      maxY = Math.max(maxY, entry.y + entry.box.height);
+    });
+    if (!isFinite(minX)) return;
+    layout.width = maxX - minX;
+    layout.height = maxY - minY;
+    layout.offsetX = -minX;
+    layout.offsetY = -minY;
+  }
+
+  /**
+   * The state renderer as UMLCompactLayout sees it. A placement is
+   * `{layout, direction}`, the result of computeLayout and the direction it
+   * was laid out in; bodies are the top-level states, and a composite moves
+   * with everything inside it.
+   */
+  function createCompactStateAdapter(parsed, colors, pane, limits) {
+    function topLevelIds(layout) {
+      return Object.keys(layout.entries).filter(function(id) { return !layout.entries[id].state.parent; });
+    }
+
+    function isPinned(layout, id) {
+      return Object.keys(layout.entries).some(function(other) {
+        return (other === id || isAncestorState(layout.entries, id, other)) &&
+          Boolean(UMLShared.findLayoutPosition(parsed.layout, other));
+      });
+    }
+
+    // The normal gaps, so routes and labels have room before the squeeze.
+    function placementFor(direction, directionLocked) {
+      var layout = computeLayout(parsed, colors, {
+        gapX: CFG.gapX,
+        gapY: CFG.gapY,
+        direction: direction,
+        directionLocked: directionLocked,
+        layoutPreference: null,
+        containerAspect: pane.width / pane.height
+      });
+      UMLShared.applyLayoutPositions(layout, parsed.layout);
+      return { layout: layout, direction: direction };
+    }
+
+    // The layered engine puts the states of one rank on one start edge
+    // across the flow: a common top when ranks run down, a common left when
+    // they run across. The squeeze keeps that edge common, so a rank stays a
+    // row (or column) and what sits beside it keeps its room. A pinned state
+    // keeps its own position and joins no rank.
+    function rankKeys(placement, id, pinned) {
+      var entry = placement.layout.entries[id];
+      var keys = { alignTop: null, alignLeft: null };
+      if (pinned) return keys;
+      if (placement.direction === 'LR') keys.alignLeft = 'rank:' + Math.round(entry.x);
+      else keys.alignTop = 'rank:' + Math.round(entry.y);
+      return keys;
+    }
+
+    return {
+      clearances: COMPACT_STATE_CLEARANCES,
+      limits: limits,
+      size: { boxes: parsed.states.length + parsed.notes.length, edges: parsed.transitions.length },
+
+      // The renderer's own direction first (top to bottom unless authored),
+      // then, if the author left it open, the other one.
+      candidates: function() {
+        var direction = parsed.direction || 'TB';
+        var placements = [placementFor(direction, true)];
+        if (!parsed.directionAuthored) placements.push(placementFor(direction === 'LR' ? 'TB' : 'LR', true));
+        return placements;
+      },
+
+      bodies: function(placement) {
+        var layout = placement.layout;
+        return topLevelIds(layout).map(function(id) {
+          var entry = layout.entries[id];
+          var pinned = isPinned(layout, id);
+          var ranks = rankKeys(placement, id, pinned);
+          return { id: id, x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height,
+            pinned: pinned, alignTop: ranks.alignTop, alignLeft: ranks.alignLeft };
+        });
+      },
+
+      withPositions: function(placement, positions) {
+        var layout = copyStateLayout(placement.layout);
+        Object.keys(positions).forEach(function(id) {
+          var body = layout.entries[id];
+          if (!body) return;
+          var dx = positions[id].x - body.x, dy = positions[id].y - body.y;
+          Object.keys(layout.entries).forEach(function(other) {
+            if (other !== id && !isAncestorState(layout.entries, id, other)) return;
+            layout.entries[other].x += dx;
+            layout.entries[other].y += dy;
+          });
+        });
+        refreshStateBounds(layout);
+        return { layout: layout, direction: placement.direction };
+      },
+
+      // One routing pass, without the teaching callouts (annotate adds
+      // them, only to drawings the search could still keep).
+      realize: function(placement) {
+        var scene = UMLLayoutQuality.createScene();
+        var svg = generateSVG(copyStateLayout(placement.layout), parsed, colors, scene);
+        return { svg: svg, scene: scene };
+      },
+
+      // The teaching callouts at the compact base size (CFG holds the
+      // compact metrics while the search runs).
+      annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
+      }),
+
+      estimate: function(placement) {
+        return { width: placement.layout.width + CFG.svgPad * 2, height: placement.layout.height + CFG.svgPad * 2 };
+      }
+    };
+  }
+
+  // The crossings and bends of the drawing the spec gets in the pane without
+  // a layout line, which compact should not exceed (one extra routing).
+  function defaultStateDrawingCounts(parsed, colors, pane) {
+    var normal = Object.assign({}, parsed, { layoutPreference: null, _containerAspect: pane.width / pane.height });
+    var layout = computeLayout(normal, colors);
+    UMLShared.applyLayoutPositions(layout, normal.layout);
+    var scene = UMLLayoutQuality.createScene();
+    generateSVG(layout, normal, colors, scene);
+    var metrics = UMLLayoutQuality.evaluate(scene, { width: 1, height: 1 });
+    return { crossings: metrics.crossings, bends: metrics.bends };
+  }
+
+  // Draws the compact SVG into the container (remembered for the same
+  // inputs); marks what stays overlapping.
+  function renderCompact(container, parsed, colors) {
+    var pane = window.UMLLayoutCore.resolvePane(container, parsed.pane);
+    var key = window.UMLCompactMemo.keyOf('state', { parsed: parsed, colors: colors, pane: pane });
+    var drawing = window.UMLCompactMemo.remember(key, function() { return searchCompact(parsed, colors, pane); });
+    container.innerHTML = drawing.svg;
+    UMLShared.markLayoutIssues(container, drawing.issues);
+  }
+
+  // The search itself, as {svg, issues}; it warns once per search, not for
+  // a remembered drawing.
+  function searchCompact(parsed, colors, pane) {
+    var limits = defaultStateDrawingCounts(parsed, colors, pane);
+    parsed.compactDrawing = true;
+    var result = withCompactStateMetrics(function() {
+      return window.UMLCompactLayout.optimize(createCompactStateAdapter(parsed, colors, pane, limits), pane);
+    });
+    if (result.issues > 0 && typeof console !== 'undefined' && console.warn) {
+      console.warn('ArchUML: compact state diagram has ' + result.issues + ' layout issue(s)', result.metrics.violations);
+    }
+    return { svg: result.svg, issues: result.issues };
+  }
+
   // ─── Public API ───────────────────────────────────────────────────
 
   function render(container, text) {
@@ -16057,11 +22021,17 @@
     if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
-    var layout = computeLayout(parsed, colors);
-    UMLShared.applyLayoutPositions(layout, parsed.layout);
-    container.innerHTML = generateSVG(layout, parsed, colors);
+    // A compact drawing already carries its callouts.
+    var compact = parsed.layoutPreference === 'compact' && !hasAuthoredStateLayout(text, parsed.layout);
+    if (compact) {
+      renderCompact(container, parsed, colors);
+    } else {
+      var layout = computeLayout(parsed, colors);
+      UMLShared.applyLayoutPositions(layout, parsed.layout);
+      container.innerHTML = generateSVG(layout, parsed, colors);
+    }
     UMLShared.applyLayoutRoutes(container, parsed.layout);
-    UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
+    if (!compact) UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     UMLShared.autoFitSVG(container);
   }
 
@@ -16088,10 +22058,13 @@
  *
  * Notation:
  *   component Name               Component box (no ports)
+ *   component Name <<Kind>>      Stereotyped component; <<A, B>> or <<A>> <<B>>
+ *                                show as one «A, B» pair above the name
  *   component Name {             Component with directional ports
  *     portin "name" as alias     Incoming port placed on the left edge
  *     portout "name" as alias    Outgoing port placed on the right edge
  *   }
+ *   package Name { ... }         UML package around the components declared in it
  *   port "name" as alias         Standalone labelled port
  *     provide "name" as alias    Provided interface (lollipop ○)
  *     require "name" as alias    Required interface (socket arc)
@@ -16101,6 +22074,7 @@
  *   provide --> require : label  Joined ball-and-socket assembly (○))
  *   A ..> B : label              Dependency (dashed arrow)
  *   A -- B : label               Plain link
+ *   A -- B : <<kind>> {p = "v"}  Connector stereotype («kind») and property string
  */
 (function () {
   'use strict';
@@ -16109,6 +22083,8 @@
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
     fontSize: 14,
     fontSizeBold: 15,
+    fontSizeStereotype: 13,
+    fontSizePort: 13,   // port and interface names
     lineHeight: 22,
     padX: 24,
     padY: 14,
@@ -16129,8 +22105,8 @@
     ifaceRadius: 9,   // radius of lollipop circle / socket arc
     ifaceSocketRadius: 13,
     ifaceStick: 20,   // length of line from component edge to interface symbol center
+    labelMaxWidth: 180, // a connector label wraps (at spaces and slashes) beyond this
   };
-  var COMPONENT_CONNECTOR_LABEL_MAX_WIDTH = 180;
   // A joined ball and socket sits beside a component interface: no farther
   // from a box than an unjoined symbol on its stick. Penalties added to a
   // candidate spot rank a floating spot below an unlabelled one (its
@@ -16144,38 +22120,45 @@
   var COMPONENT_LABEL_SCAN_FRACTIONS = [0.1, 0.9, 0.06, 0.94, 0.14, 0.86, 0.18, 0.82, 0.28, 0.72, 0.42, 0.58];
   var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
 
+  // A component's header. With a stereotype, UML 2.5.1 (9.2.4) centers the
+  // «keywords» in plain face above the centered bold name; the component
+  // icon stays in the corner (11.6.4). Without one, the header keeps its
+  // single line: a centered name, or a top-left name above the ports.
+  // `height` is where the port rows of a box with ports begin.
+  function componentHeader(comp, label) {
+    var stereotypeText = UMLShared.stereotypeDisplayText(comp.stereotype);
+    var nameWidth = UMLShared.textWidth(label, true, CFG.fontSizeBold);
+    return {
+      stereotypeText: stereotypeText,
+      centered: !!stereotypeText,
+      textWidth: stereotypeText
+        ? Math.max(nameWidth, UMLShared.textWidth(stereotypeText, false, CFG.fontSizeStereotype))
+        : nameWidth,
+      height: CFG.lineHeight + CFG.padY + (stereotypeText ? CFG.lineHeight : 0),
+      minHeight: stereotypeText ? CFG.padY * 2 + CFG.lineHeight * 2 : CFG.compMinH
+    };
+  }
+
+  // Baselines of a stereotyped header's two lines: at the top of a box with
+  // ports, or centered in a box without.
+  function componentStereotypeBaselines(entry) {
+    if (entry.hasPorts) {
+      var first = entry.y + CFG.padY + CFG.fontSizeBold * 0.35 + 2;
+      return { stereotype: first, name: first + CFG.lineHeight };
+    }
+    var middle = entry.y + entry.box.height / 2;
+    return {
+      stereotype: middle - CFG.lineHeight / 2 + CFG.fontSize * 0.35,
+      name: middle + CFG.lineHeight / 2 + CFG.fontSize * 0.35
+    };
+  }
+
   function componentPortBottomInset() {
-    var fontSize = CFG.fontSize - 1;
+    var fontSize = CFG.fontSizePort;
     var label = UMLShared.labelTextRect('', 0, fontSize * 0.35, 'start', fontSize);
     // Port labels share the square's center but extend farther downward.
     // Leave the same four-pixel border clearance for both rendered shapes.
     return Math.max(CFG.portSize / 2, label.bottom) + 4;
-  }
-
-  // ─── Box header: display name and «keyword» ──────────────────────
-
-  function componentDisplayName(parsed, comp) {
-    return parsed.displayNameMap[comp.name] || comp.name;
-  }
-
-  function componentKeywordLine(comp) {
-    return comp.keyword ? '\u00AB' + comp.keyword + '\u00BB' : '';
-  }
-
-  // Width of the widest header line: the bold name or the italic keyword.
-  function componentHeaderWidth(parsed, comp) {
-    var nameW = UMLShared.textWidth(componentDisplayName(parsed, comp), true, CFG.fontSizeBold);
-    var keywordW = comp.keyword ? UMLShared.textWidth(componentKeywordLine(comp), false, CFG.fontSize) : 0;
-    return Math.max(nameW, keywordW);
-  }
-
-  function componentHeaderLineCount(comp) {
-    return comp.keyword ? 2 : 1;
-  }
-
-  // The band above a component's ports that holds its header lines.
-  function componentHeaderHeight(comp) {
-    return componentHeaderLineCount(comp) * CFG.lineHeight + CFG.padY;
   }
 
   // ─── Parser ───────────────────────────────────────────────────────
@@ -16198,6 +22181,34 @@
 
     var stripped = m[1].indexOf('{') !== -1 ? head + ' {' : head;
     return { stripped: stripped.trim(), visualStyle: 'dashed' };
+  }
+
+  var COMPONENT_DECLARATION_START = /^(?:component\s+\S|\[[^\]]+\])/i;
+
+  // Separate a component declaration from its decorations: stereotypes,
+  // `#color [texture]` before or after them, and a final `dashed`, any of
+  // which may precede the `{` of a port block. Returns null for a line that
+  // does not declare a component.
+  function parseComponentDeclarationDecorations(line) {
+    var styleInfo = stripComponentDashedStyle(line);
+    var hl = UMLShared.parseHighlightColor(styleInfo.stripped);
+    if (!COMPONENT_DECLARATION_START.test(hl.stripped)) return null;
+    var declaration = { line: hl.stripped, highlight: hl.highlight, texture: hl.texture, visualStyle: styleInfo.visualStyle, stereotype: null };
+    var brace = hl.stripped.indexOf('{');
+    var head = brace === -1 ? hl.stripped : hl.stripped.slice(0, brace);
+    var stereotypes = UMLShared.extractStereotypes(head);
+    if (!stereotypes.stereotype) return declaration;
+    declaration.stereotype = stereotypes.stereotype;
+    declaration.line = (stereotypes.stripped.trim() + (brace === -1 ? '' : ' ' + hl.stripped.slice(brace))).trim();
+    if (!declaration.highlight && !declaration.texture) {
+      var beforeStereotype = UMLShared.parseHighlightColor(declaration.line);
+      if (COMPONENT_DECLARATION_START.test(beforeStereotype.stripped)) {
+        declaration.line = beforeStereotype.stripped;
+        declaration.highlight = beforeStereotype.highlight;
+        declaration.texture = beforeStereotype.texture;
+      }
+    }
+    return declaration;
   }
 
   // Parse a single port line: (portin|portout|port) ["name"] [as alias]
@@ -16249,13 +22260,20 @@
     var connectors = [];
     var notes = [];
     var portAliasMap = {}; // alias → { comp: componentName, name: displayName }
-    var displayNameMap = {}; // componentName → display label (when different)
+    var displayNameMap = Object.create(null); // componentName → display label (when different)
     var orderConstraints = []; // hidden PlantUML edges used only for layout order
 
     var direction = 'LR'; // Component diagrams default to left-to-right
     var directionLocked = false; // `layout vertical|horizontal` overrides the container's shape
     var layoutPreference = null;
     var portsFacing = false;
+    var packageScope = UMLShared.createPackageScope();
+    // `layout compact` asks for the compact drawing even when a direction
+    // line follows it, because compact may override the direction (see
+    // REFERENCE.md). The direction line still clears layoutPreference,
+    // which the non-compact path reads as before.
+    var compactLayout = false;
+    var pane = null;
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
@@ -16275,10 +22293,24 @@
         layoutPreference = null;
         continue;
       }
-      // Group wrappers: together / package / frame / folder / node / rectangle { ... }
+      // UML packages contain the components declared inside them.
+      var packageOpener = UMLShared.parsePackageOpener(line);
+      if (packageOpener) {
+        packageScope.openPackage(packageOpener);
+        // A one-line block's statements are read as the lines that follow.
+        Array.prototype.splice.apply(lines, [i + 1, 0].concat(packageOpener.inlineLines));
+        continue;
+      }
+      // Other group wrappers: together / frame / folder / node / rectangle { ... }
       // — we don't render the wrapper, but its body IS parsed at top level.
-      if (/^(?:together|package|frame|folder|rectangle|cloud|database|node|artifact|file|group)\b[^{]*\{\s*$/i.test(line)) continue;
-      if (line === '}') continue; // closing brace of a wrapper
+      if (/^(?:together|frame|folder|rectangle|cloud|database|node|artifact|file|group)\b[^{]*\{\s*$/i.test(line)) {
+        packageScope.openWrapper();
+        continue;
+      }
+      if (line === '}') { // closing brace of a wrapper or package
+        packageScope.close();
+        continue;
+      }
       // Hidden/styled edge syntax like  A -[hidden]r- B  (PlantUML spacing hint)
       var hiddenMatch = line.match(/^(?:\[([^\]]+)\]|(\S+))\s+[.=-]*\[[^\]]*hidden[^\]]*\][.=-]*[lrud]?[.=-]\s+(?:\[([^\]]+)\]|(\S+))/i);
       if (hiddenMatch) {
@@ -16312,27 +22344,21 @@
           layoutPreference = null;
         } else {
           layoutPreference = layoutDirective.layoutPreference;
+          compactLayout = layoutPreference === 'compact';
+          pane = layoutDirective.pane || null;
         }
         continue;
       }
 
-      // Strip optional `#color` highlight suffix before other declarations.
-      // Guard: don't swallow bare component/bracket names when they happen
-      // to collide with a texture keyword.
-      var compStyleInfo = stripComponentDashedStyle(line);
-      var compHl = UMLShared.parseHighlightColor(compStyleInfo.stripped);
-      var compLine = line;
-      var compHighlight = null;
-      var compTexture = null;
-      var compVisualStyle = compStyleInfo.visualStyle;
-      var looksLikeComponentDecl = /^(?:component\s+\S|\[[^\]]+\])/i.test(compHl.stripped);
-      if (looksLikeComponentDecl) {
-        compLine = compHl.stripped;
-        compHighlight = compHl.highlight;
-        compTexture = compHl.texture;
-      } else {
-        compVisualStyle = null;
-      }
+      // Strip a declaration's stereotypes and style suffixes before matching
+      // its name. Guard: don't swallow bare component/bracket names when they
+      // happen to collide with a texture keyword.
+      var compDecl = parseComponentDeclarationDecorations(line);
+      var compLine = compDecl ? compDecl.line : line;
+      var compHighlight = compDecl ? compDecl.highlight : null;
+      var compTexture = compDecl ? compDecl.texture : null;
+      var compVisualStyle = compDecl ? compDecl.visualStyle : null;
+      var compStereotype = compDecl ? compDecl.stereotype : null;
 
       // Component declaration with optional port block. Accepts any of:
       //   component Name                      → id=Name,  label=Name
@@ -16341,15 +22367,15 @@
       //   component [BracketName]             → id=BracketName, label=BracketName
       //   component [BracketName] as Alias    → id=Alias, label=BracketName
       //   component "Display" as Alias        → id=Alias, label=Display
-      // Any of the above may be followed by a `<<keyword>>` and then by `{`
-      // to open a port block.
+      // Any of the above may be followed by `{` to open a port block (its
+      // `<<stereotype>>` was stripped above).
       var compMatch = compLine.match(
-        /^component\s+(?:\[([^\]]+)\]|"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?(?:\s+<<([^<>]*)>>)?\s*(\{)?\s*$/
+        /^component\s+(?:\[([^\]]+)\]|"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?\s*(\{)?\s*$/
       );
       if (!compMatch) {
         // Allow trailing content on inline form (inline port block with `}` later).
         compMatch = compLine.match(
-          /^component\s+(?:\[([^\]]+)\]|"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?(?:\s+<<([^<>]*)>>)?\s*(\{)/
+          /^component\s+(?:\[([^\]]+)\]|"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?\s*(\{)/
         );
       }
       if (compMatch) {
@@ -16357,8 +22383,7 @@
         var quotedDisplay = compMatch[2];
         var bareName = compMatch[3];
         var aliasName = compMatch[4];
-        var compKeyword = compMatch[5] ? compMatch[5].trim() : null;
-        var hasOpenBrace = !!compMatch[6] || compLine.indexOf('{') !== -1;
+        var hasOpenBrace = !!compMatch[5] || compLine.indexOf('{') !== -1;
 
         var label = bracketDisplay || quotedDisplay || bareName;
         var cName = aliasName || label;
@@ -16406,15 +22431,16 @@
 
         if (!Object.prototype.hasOwnProperty.call(componentMap, cName)) {
           componentMap[cName] = components.length;
-          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle, keyword: compKeyword });
+          components.push({ name: cName, ports: ports, highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle, stereotype: compStereotype });
         } else {
           var existing = components[componentMap[cName]];
           if (compHighlight) existing.highlight = compHighlight;
           if (compTexture) existing.texture = compTexture;
           if (compVisualStyle) existing.visualStyle = compVisualStyle;
-          if (compKeyword) existing.keyword = compKeyword;
+          if (compStereotype) existing.stereotype = compStereotype;
           mergePortsInto(existing, ports, portAliasMap);
         }
+        packageScope.declare(components[componentMap[cName]], cName);
         continue;
       }
 
@@ -16427,12 +22453,14 @@
         if (bLabel !== bName) displayNameMap[bName] = bLabel;
         if (!Object.prototype.hasOwnProperty.call(componentMap, bName)) {
           componentMap[bName] = components.length;
-          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle });
+          components.push({ name: bName, ports: [], highlight: compHighlight, texture: compTexture, visualStyle: compVisualStyle, stereotype: compStereotype });
         } else {
           if (compHighlight) components[componentMap[bName]].highlight = compHighlight;
           if (compTexture) components[componentMap[bName]].texture = compTexture;
           if (compVisualStyle) components[componentMap[bName]].visualStyle = compVisualStyle;
+          if (compStereotype) components[componentMap[bName]].stereotype = compStereotype;
         }
+        packageScope.declare(components[componentMap[bName]], bName);
         continue;
       }
 
@@ -16462,6 +22490,7 @@
           if (standalonePort.visualStyle) spExisting.visualStyle = standalonePort.visualStyle;
           mergePortsInto(spExisting, [standalonePort], portAliasMap);
         }
+        packageScope.declare(components[componentMap[spName]], spName);
         continue;
       }
 
@@ -16482,7 +22511,9 @@
         var rawLabel = (connMatch[7] || '').trim();
         // Strip surrounding quotes on connector labels (`"get /users"` → `get /users`).
         var connLabelInfo = UMLShared.parseLabelDirectionCue(rawLabel.replace(/^"([^"]*)"$/, '$1'));
-        var label = connLabelInfo.text;
+        // A connector may carry stereotypes and a property string, such as
+        // `<<subscribe>> {binding = "trip.*"}` (UML 2.5.1 11.2.4).
+        var label = UMLShared.formatStereotypeLabels(connLabelInfo.text);
 
         // Resolve from: alias map → dot notation → bare component
         var from, fromPort = null;
@@ -16533,14 +22564,21 @@
       }
     }
 
+    for (var pci = 0; pci < components.length; pci++) {
+      if (!components[pci].package) components[pci].package = null;
+    }
+
     return {
       components: components,
       connectors: connectors,
       notes: notes,
+      packages: packageScope.packages,
       direction: direction,
       directionLocked: directionLocked,
       layoutPreference: layoutPreference,
       portsFacing: portsFacing,
+      compactLayout: compactLayout,
+      pane: pane,
       displayNameMap: displayNameMap,
       orderConstraints: orderConstraints
     };
@@ -16624,10 +22662,24 @@
   // a component, the drawing is the automatic layout. With both, a second pass
   // keeps every box where the first pass and the saved positions put it, sizes
   // the boxes again, and places the ports on the sides facingPortPlan gives.
-  function computeLayout(parsed) {
-    var automatic = layoutComponents(parsed, null);
+  //
+  // Options (compact only): `positions` ({name: {x, y}}) places the
+  // components there instead of where the layered placement puts them, and
+  // ports and back-edge lanes follow those positions; `containerAspect`
+  // replaces the container's aspect the layered placement shapes for (null:
+  // keep the authored direction).
+  function computeLayout(parsed, options) {
+    var automatic = layoutComponents(parsed, null, options);
     var plan = facingPortPlan(parsed, automatic);
-    return plan ? layoutComponents(parsed, plan) : automatic;
+    return plan ? layoutComponents(parsed, plan, options) : automatic;
+  }
+
+  function placeAtGivenPositions(entries, positions) {
+    Object.keys(positions).forEach(function(name) {
+      if (!entries[name]) return;
+      entries[name].x = positions[name].x;
+      entries[name].y = positions[name].y;
+    });
   }
 
   var COMPONENT_PORT_SIDES = ['left', 'right', 'top', 'bottom'];
@@ -16704,10 +22756,12 @@
   }
 
   // One layout pass. `pins` is null for the automatic layout, or the plan of
-  // `layout ports facing` for its second pass (facingPortPlan).
-  function layoutComponents(parsed, pins) {
+  // `layout ports facing` for its second pass (facingPortPlan); `options` as
+  // computeLayout's.
+  function layoutComponents(parsed, pins, options) {
     var components = parsed.components;
     var connectors = parsed.connectors;
+    var givenPositions = options && options.positions;
     if (components.length === 0) return { entries: {}, width: 0, height: 0, offsetX: 0, offsetY: 0 };
 
     var portSides = {};
@@ -16753,13 +22807,14 @@
         }
       }
 
-      var nameW = componentHeaderWidth(parsed, c);
-      var headerHeight = componentHeaderHeight(c);
+      var displayName = parsed.displayNameMap[c.name] || c.name;
+      var header = componentHeader(c, displayName);
+      var nameW = header.textWidth;
       var hasPorts = leftPorts.length > 0 || rightPorts.length > 0;
       var maxSidePorts = Math.max(leftPorts.length, rightPorts.length);
 
       // Measure port label widths for internal placement
-      var portLblFs = CFG.fontSize - 1;
+      var portLblFs = CFG.fontSizePort;
       var maxLeftLblW = 0, maxRightLblW = 0;
       var portLabelByAlias0 = {};
       for (var pli = 0; pli < c.ports.length; pli++) {
@@ -16785,20 +22840,26 @@
         h = Math.max(standaloneSymbolH + 8, portLblFs + 12);
         hasPorts = false;
       } else if (hasPorts) {
-        // Width: must fit name+icon row OR left-labels + gap + right-labels row
-        var nameRowW = nameW + CFG.padX + CFG.iconW + 16;
+        // Width: must fit the header row(s) OR left-labels + gap + right-labels row.
+        // A top-left name needs one padding; centered header lines need two.
+        var nameRowW = header.centered
+          ? nameW + CFG.padX * 2 + CFG.iconW
+          : nameW + CFG.padX + CFG.iconW + 16;
         var portRowW = maxLeftLblW + maxRightLblW + CFG.portSize * 2 + 50;
         w = Math.max(CFG.compMinW, nameRowW, portRowW);
-        // Height: header lines at top + port rows below
-        h = headerHeight + maxSidePorts * CFG.portPad + CFG.padY;
+        // Height: header at top + port rows below
+        h = header.height + maxSidePorts * CFG.portPad + CFG.padY;
         h = Math.max(h, CFG.compMinH);
       } else {
         w = Math.max(CFG.compMinW, nameW + CFG.padX * 2 + CFG.iconW);
-        h = Math.max(CFG.compMinH, headerHeight + CFG.padY);
+        h = header.minHeight;
       }
 
       entries[c.name] = {
         comp: c,
+        label: displayName,
+        stereotypeText: header.stereotypeText,
+        headerHeight: header.height,
         box: { width: Math.ceil(w), height: h },
         x: 0, y: 0,
         leftPorts: leftPorts,
@@ -16808,7 +22869,6 @@
         portOrderIndex: portOrderIndex,
         portPositions: {},
         hasPorts: hasPorts,
-        headerHeight: headerHeight,
         standalonePort: !!c.standalonePort,
       };
       layoutNodes.push({ id: c.name, width: Math.ceil(w), height: h, data: c });
@@ -16874,7 +22934,7 @@
       if (displayLabel) {
         maxLabelW = Math.max(
           maxLabelW,
-          componentLabelMetrics(displayLabel, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH).width
+          componentLabelMetrics(displayLabel, CFG.fontSize, CFG.labelMaxWidth).width
         );
       }
     }
@@ -16920,7 +22980,7 @@
     // the interface name of the ball and socket.
     function stackedLabelHeight(conn) {
       var height = conn.label
-        ? componentLabelMetrics(conn.label, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH).lines.length * compLineHeight
+        ? componentLabelMetrics(conn.label, CFG.fontSize, CFG.labelMaxWidth).lines.length * compLineHeight
         : 0;
       return height + (joinedInterfaceName(conn) ? compLineHeight : 0);
     }
@@ -16930,7 +22990,7 @@
       if (!crel || crel.from === crel.to) continue;
       var crelLabel = componentConnectorDisplayLabel(crel);
       var lw = crelLabel
-        ? componentLabelMetrics(crelLabel, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH).width
+        ? componentLabelMetrics(crelLabel, CFG.fontSize, CFG.labelMaxWidth).width
         : 0;
       var crelEnds = componentRankEnds(parsed, crel.from, crel.to);
       compEdgeSizes.push({
@@ -16948,11 +23008,12 @@
       direction: parsed.direction || 'LR',
       directionLocked: !!parsed.directionLocked,
       layoutPreference: parsed.layoutPreference === 'compact' ? null : (parsed.layoutPreference || null),
-      containerAspect: parsed._containerAspect,
+      containerAspect: options && 'containerAspect' in options ? options.containerAspect : parsed._containerAspect,
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius + 4,
       edgeSizes: compEdgeSizes
     };
+    if (options && options.directionLocked) layoutOptions.directionLocked = true;
     var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, layoutOptions);
 
     // Reserve parallel label lanes against the actual neighbor positions:
@@ -16971,11 +23032,13 @@
       node.height = entry.box.height = height;
       resizedForLabels = true;
     }
+    var engineOptions = layoutOptions;
     if (resizedForLabels) {
-      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, Object.assign({}, layoutOptions, {
+      engineOptions = Object.assign({}, layoutOptions, {
         direction: result.direction || layoutOptions.direction,
         directionLocked: true
-      }));
+      });
+      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, engineOptions);
     }
     var actualDirection = result.direction || parsed.direction || 'LR';
 
@@ -17144,7 +23207,7 @@
             var spanCols = Math.max(1, hi - lo);
             var gcLabel = componentConnectorDisplayLabel(gc);
             var labelW = gcLabel
-              ? componentLabelMetrics(gcLabel, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH).width
+              ? componentLabelMetrics(gcLabel, CFG.fontSize, CFG.labelMaxWidth).width
               : 0;
             var labelNeed = labelW > 0
               ? Math.max(baseGap, (spanCols === 1 ? labelW + 64 : labelW / spanCols + 48))
@@ -17270,7 +23333,7 @@
         var span = Math.max(1, hi - lo);
         var hiddenLabel = componentConnectorDisplayLabel(gc);
         var labelW = hiddenLabel
-          ? componentLabelMetrics(hiddenLabel, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH).width
+          ? componentLabelMetrics(hiddenLabel, CFG.fontSize, CFG.labelMaxWidth).width
           : 0;
         var needed = baseGap;
         if (labelW > 0) {
@@ -17300,6 +23363,7 @@
     }
 
     applyHiddenOrderRankLayout();
+    if (givenPositions) placeAtGivenPositions(entries, givenPositions);
 
     // The second pass of `layout ports facing` sizes the boxes for their turned
     // ports, then puts every box back where the first pass and the saved
@@ -18185,13 +24249,11 @@
               upper = nextEntry[moveAxis] - currentEntry.box[sizeKey] - minGap - currentEntry[moveAxis];
             }
 
-            var candidateDeltas = collectShiftCandidates(currentName);
+            var candidateDeltas = UMLShared.distinctNudgeDeltas(collectShiftCandidates(currentName), maxShift, lower, upper);
             var bestDelta = 0;
             var bestScore = currentScore;
             for (var cdi = 0; cdi < candidateDeltas.length; cdi++) {
-              var candidateDelta = Math.max(-maxShift, Math.min(maxShift, candidateDeltas[cdi]));
-              candidateDelta = Math.max(lower, Math.min(upper, candidateDelta));
-              if (!isFinite(candidateDelta) || Math.abs(candidateDelta) < 1) continue;
+              var candidateDelta = candidateDeltas[cdi];
 
               var candidateScore = componentRouteScore(currentName, candidateDelta);
               if (candidateScore + 6 < bestScore) {
@@ -18211,12 +24273,12 @@
     }
 
     // The second pass of `layout ports facing` keeps every box where the plan
-    // puts it, so it nudges none.
-    if (!pins) nudgeComponentEntriesPreservingPortOrder(actualDirection);
+    // puts it, and compact's given positions stay as given, so neither nudges.
+    if (!pins && !givenPositions) nudgeComponentEntriesPreservingPortOrder(actualDirection);
     alignFacingStackPorts();
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    var portLabelFs = CFG.fontSize - 1;
+    var portLabelFs = CFG.fontSizePort;
     for (var en2 in entries) {
       var e2 = entries[en2];
       minX = Math.min(minX, e2.x);
@@ -18354,7 +24416,7 @@
         var clm = componentLabelMetrics(
           UMLShared.labelDirectionPlacementText(connectors[cli].label, connectors[cli].labelDirection),
           CFG.fontSize,
-          COMPONENT_CONNECTOR_LABEL_MAX_WIDTH
+          CFG.labelMaxWidth
         );
         maxLabelWHalf = Math.max(maxLabelWHalf, (clm.width + (connectors[cli].labelDirection ? 18 : 0)) / 2 + 10);
         maxLabelH = Math.max(maxLabelH, clm.height + 34);
@@ -18373,7 +24435,10 @@
       offsetY: -minY,
       layoutResult: result,
       direction: actualDirection,
-      backEdgeLanes: backEdgeLanes
+      backEdgeLanes: backEdgeLanes,
+      // What the layered engine was given, so compact layout can place the
+      // same input again with packages kept together.
+      engineInput: { nodes: layoutNodes, edges: layoutEdges, options: engineOptions }
     };
   }
 
@@ -18714,7 +24779,7 @@
       const group = groups.get(peer) || { count: 0, width: 0, height: 0 };
       group.count++;
       if (connector.label) {
-        const metrics = componentLabelMetrics(connector.label, CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+        const metrics = componentLabelMetrics(connector.label, CFG.fontSize, CFG.labelMaxWidth);
         group.width = Math.max(group.width, metrics.width);
         group.height = Math.max(group.height, metrics.height);
       }
@@ -18767,8 +24832,15 @@
     return tokens;
   }
 
+  // A label that holds a path ("get /clubs/{clubId}") may wrap narrower at
+  // its slashes where CFG sets `pathLabelMaxWidth` (compact does).
+  function isPathLabel(label) {
+    return /\S\/|\/\S/.test(String(label || ''));
+  }
+
   function componentLabelMetrics(label, fontSize, maxWidth) {
-    var targetWidth = maxWidth || COMPONENT_CONNECTOR_LABEL_MAX_WIDTH;
+    var targetWidth = maxWidth || CFG.labelMaxWidth;
+    if (CFG.pathLabelMaxWidth && isPathLabel(label)) targetWidth = Math.min(targetWidth, CFG.pathLabelMaxWidth);
     if (UMLShared.textWidth(label, false, fontSize) <= targetWidth) {
       return {
         lines: [label],
@@ -18817,6 +24889,13 @@
       top: y - metrics.fontSize - 4,
       bottom: y + (metrics.lines.length - 1) * metrics.lineHeight + 5
     };
+  }
+
+  // The box the glyphs of a label take, inside the rectangle the placer
+  // reserves for it (makeComponentLabelRect keeps 4 units above the font box
+  // and 2 below the descent), so the judge measures what the reader sees.
+  function componentLabelGlyphRect(rect) {
+    return { left: rect.left, right: rect.right, top: rect.top + 4, bottom: rect.bottom - 2 };
   }
 
   function pushComponentLabelText(svgParts, labelPlacement, colors, cfg) {
@@ -18988,12 +25067,24 @@
     return segments;
   }
 
+  // A label stays with its route when the route passes within one line
+  // height of it and no other route passes nearer.
+  function labelStaysWithRoute(rect, routeSegments, routeIndex, lineHeight) {
+    var own = Infinity, other = Infinity;
+    for (var i = 0; i < routeSegments.length; i++) {
+      var d = componentSegmentDistanceToRect(routeSegments[i], rect);
+      if (routeSegments[i].routeIndex === routeIndex) own = Math.min(own, d);
+      else other = Math.min(other, d);
+    }
+    return own <= lineHeight && own < other;
+  }
+
   function placeComponentConnectorLabel(label, hasDirection, points, routeIndex, obstacles, placedLabels, routeSegments, cfg, options) {
     var opts = options || {};
     var metrics = componentLabelMetrics(
       UMLShared.labelDirectionPlacementText(label, hasDirection),
       cfg.fontSize,
-      opts.maxLabelWidth || COMPONENT_CONNECTOR_LABEL_MAX_WIDTH
+      opts.maxLabelWidth || CFG.labelMaxWidth
     );
     if (hasDirection) metrics.width += 18;
     var labelW = metrics.width;
@@ -19056,6 +25147,9 @@
             var rect = makeComponentLabelRect(lx, ly, metrics, placement.anchor);
             if (labelRectHitsObstacles(rect, obstacles, 6)) continue;
             if (labelRectHitsPlacedLabels(rect, placedLabels, 8)) continue;
+            // Within the label's font size of the route: the judge allows one
+            // line height (font + 6) from the glyphs, which sit inside `rect`.
+            if (opts.keepNearOwnRoute && !labelStaysWithRoute(rect, routeSegments, routeIndex, cfg.fontSize)) continue;
             var hitsSegments = labelRectHitsSegments(rect, routeSegments, routeIndex, segment.segmentIndex, 3);
 
             var clearance = minLabelClearance(rect, obstacles, placedLabels, routeSegments, routeIndex, segment.segmentIndex);
@@ -19084,7 +25178,9 @@
       }
     }
 
-    searchAlongSegments(COMPONENT_LABEL_FRACTIONS);
+    // Compact keeps a label by its own route, so it looks along more of it
+    // from the start.
+    searchAlongSegments(opts.keepNearOwnRoute ? COMPONENT_LABEL_FRACTIONS.concat([0.1, 0.9]) : COMPONENT_LABEL_FRACTIONS);
     // A crowded lane may leave room only near a segment's ends; look there
     // before giving up on a spot beside the route.
     if (!best) searchAlongSegments(COMPONENT_LABEL_SCAN_FRACTIONS);
@@ -19148,7 +25244,7 @@
   }
 
   function standaloneSquareLabelPlacement(pos, label, vertical) {
-    var fontSize = CFG.fontSize - 1;
+    var fontSize = CFG.fontSizePort;
     var placement = vertical
       ? { x: pos.cx + CFG.portSize / 2 + 8, y: pos.cy - CFG.portSize / 2 - 8, anchor: 'start' }
       : { x: pos.cx, y: pos.cy + CFG.portSize / 2 + fontSize + 8, anchor: 'middle' };
@@ -19234,17 +25330,123 @@
 
   // ─── SVG Renderer ─────────────────────────────────────────────────
 
-  function generateSVG(layout, parsed, colors) {
+  // Port aliases joined by an assembly between a provided and a required
+  // interface. Their ball and socket are drawn on the connector instead of
+  // beside the component.
+  function joinedInterfacePorts(parsed) {
+    var portKindMap = {};
+    for (var pki = 0; pki < parsed.components.length; pki++) {
+      var pkComp = parsed.components[pki];
+      for (var pkpi = 0; pkpi < pkComp.ports.length; pkpi++) {
+        if (pkComp.ports[pkpi].kind)
+          portKindMap[pkComp.ports[pkpi].alias] = pkComp.ports[pkpi].kind;
+      }
+    }
+
+    var joinedPorts = {};
+    for (var jci = 0; jci < parsed.connectors.length; jci++) {
+      var jc = parsed.connectors[jci];
+      if (jc.type !== 'assembly') continue;
+      var jfk = jc.fromPort ? portKindMap[jc.fromPort] : null;
+      var jtk = jc.toPort ? portKindMap[jc.toPort] : null;
+      if ((jfk === 'provide' && jtk === 'require') || (jfk === 'require' && jtk === 'provide')) {
+        if (jc.fromPort) joinedPorts[jc.fromPort] = true;
+        if (jc.toPort) joinedPorts[jc.toPort] = true;
+      }
+    }
+    return joinedPorts;
+  }
+
+  function interfaceSymbolCenter(pos) {
+    if (!pos || (pos.kind !== 'provide' && pos.kind !== 'require')) return null;
+    var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
+    if (pos.standalone) {
+      return { x: pos.cx, y: pos.cy, r: radius };
+    }
+    if (pos.side === 'top') {
+      return { x: pos.cx, y: pos.cy - CFG.ifaceStick - radius, r: radius };
+    }
+    if (pos.side === 'bottom') {
+      return { x: pos.cx, y: pos.cy + CFG.ifaceStick + radius, r: radius };
+    }
+    return {
+      x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
+      y: pos.cy,
+      r: radius
+    };
+  }
+
+  // The area a component occupies: its box, the port squares on its border,
+  // and the interface symbols drawn beside it, with their names.
+  // `decorations` lists further rectangles drawn at the component, such as
+  // the joined ball and socket of an assembly and that interface's name.
+  function componentDrawnExtent(entry, joinedPorts, decorations) {
+    var minX = entry.x, minY = entry.y;
+    var maxX = entry.x + entry.box.width, maxY = entry.y + entry.box.height;
+    function include(x1, y1, x2, y2) {
+      minX = Math.min(minX, x1); minY = Math.min(minY, y1);
+      maxX = Math.max(maxX, x2); maxY = Math.max(maxY, y2);
+    }
+    (decorations || []).forEach(function(rect) {
+      include(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+    });
+    for (var alias in entry.portPositions) {
+      if (!Object.prototype.hasOwnProperty.call(entry.portPositions, alias)) continue;
+      var pos = entry.portPositions[alias];
+      if (pos.standalone) continue;
+      var symbol = joinedPorts[alias] ? null : interfaceSymbolCenter(pos);
+      if (!symbol) {
+        include(pos.x, pos.y, pos.x + CFG.portSize, pos.y + CFG.portSize);
+        continue;
+      }
+      var fontSize = CFG.fontSizePort;
+      var halfLabel = UMLShared.textWidth(pos.label !== undefined ? pos.label : alias, false, fontSize) / 2;
+      var baseline = pos.side === 'top' ? symbol.y - symbol.r - 4 : symbol.y + symbol.r + fontSize + 2;
+      include(symbol.x - symbol.r, symbol.y - symbol.r, symbol.x + symbol.r, symbol.y + symbol.r);
+      include(symbol.x - halfLabel, baseline - fontSize, symbol.x + halfLabel, baseline + 4);
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  // `decorations` maps a component name to the rectangles drawn at it once
+  // connectors are routed (see componentDrawnExtent).
+  function layoutComponentPackages(parsed, entries, joinedPorts, decorations) {
+    if (!parsed.packages || !parsed.packages.length) return [];
+    return UMLShared.layoutPackageFrames(parsed.packages, function(id) {
+      return entries[id] ? componentDrawnExtent(entries[id], joinedPorts, decorations && decorations[id]) : null;
+    }, Object.keys(entries), componentPackageStyle());
+  }
+
+  // The typography of package tabs, from the current metrics.
+  function componentPackageStyle() {
+    return { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight };
+  }
+
+  // With a scene (compact), also records what it draws there and frames the
+  // drawing tightly around it.
+  function generateSVG(layout, parsed, colors, scene) {
     var entries = layout.entries;
     var connectors = parsed.connectors;
+    var recorder = scene ? createComponentSceneRecorder(scene, entries) : null;
+    var joinedPorts = joinedInterfacePorts(parsed);
+    // Packages enclose their members as placed, manual positions included.
+    // Notes and connector labels keep clear of their name tabs.
+    var packageFrames = layoutComponentPackages(parsed, entries, joinedPorts);
+    var packageTabs = packageFrames.map(function(frame) { return frame.tab; });
+    // The joined ball and socket drawn at a component, and that interface's
+    // name: in compact, its package encloses them (see componentDrawnExtent).
+    var joinedInterfaceRects = {};
 
     // Resolve note target — supports dotted paths to sub-elements
 
     // Pre-compute note positions for SVG bounds expansion
-    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, null, { layout: parsed.layout });
+    var notePositions = UMLShared.computeAnchoredNotes(parsed.notes, entries, packageTabs, { layout: parsed.layout });
     var noteExtraL = 0, noteExtraR = 0, noteExtraT = 0, noteExtraB = 0;
-    for (var nbi = 0; nbi < notePositions.length; nbi++) {
-      var npb = notePositions[nbi];
+    var extraBoundsRects = notePositions.concat(packageFrames.map(function(frame) {
+      return { x: frame.outer.x, y: frame.outer.y, w: frame.outer.width, h: frame.outer.height };
+    }));
+    for (var nbi = 0; nbi < extraBoundsRects.length; nbi++) {
+      var npb = extraBoundsRects[nbi];
       if (npb.x < -layout.offsetX) noteExtraL = Math.max(noteExtraL, -layout.offsetX - npb.x + CFG.svgPad);
       var nr = npb.x + npb.w - (layout.width - layout.offsetX);
       if (nr > 0) noteExtraR = Math.max(noteExtraR, nr + CFG.svgPad);
@@ -19299,52 +25501,11 @@
       return attrs;
     }
 
-    // Build port kind map for interface detection
-    var portKindMap = {};
-    for (var pki = 0; pki < parsed.components.length; pki++) {
-      var pkComp = parsed.components[pki];
-      for (var pkpi = 0; pkpi < pkComp.ports.length; pkpi++) {
-        if (pkComp.ports[pkpi].kind)
-          portKindMap[pkComp.ports[pkpi].alias] = pkComp.ports[pkpi].kind;
-      }
-    }
-
-    // Identify joined ports (assembly connectors between provide/require)
-    var joinedPorts = {};
-    for (var jci = 0; jci < connectors.length; jci++) {
-      var jc = connectors[jci];
-      if (jc.type !== 'assembly') continue;
-      var jfk = jc.fromPort ? portKindMap[jc.fromPort] : null;
-      var jtk = jc.toPort ? portKindMap[jc.toPort] : null;
-      if ((jfk === 'provide' && jtk === 'require') || (jfk === 'require' && jtk === 'provide')) {
-        if (jc.fromPort) joinedPorts[jc.fromPort] = true;
-        if (jc.toPort) joinedPorts[jc.toPort] = true;
-      }
-    }
     var sharedInterfaceConnectorLabels = {};
     var suppressInterfacePortLabel = {};
 
     function interfacePortLabel(pos, alias) {
       return pos && pos.label !== undefined ? pos.label : alias;
-    }
-
-    function interfaceSymbolCenter(pos) {
-      if (!pos || (pos.kind !== 'provide' && pos.kind !== 'require')) return null;
-      var radius = pos.kind === 'require' ? CFG.ifaceSocketRadius : CFG.ifaceRadius;
-      if (pos.standalone) {
-        return { x: pos.cx, y: pos.cy, r: radius };
-      }
-      if (pos.side === 'top') {
-        return { x: pos.cx, y: pos.cy - CFG.ifaceStick - radius, r: radius };
-      }
-      if (pos.side === 'bottom') {
-        return { x: pos.cx, y: pos.cy + CFG.ifaceStick + radius, r: radius };
-      }
-      return {
-        x: pos.side === 'right' ? pos.cx + CFG.ifaceStick + radius : pos.cx - CFG.ifaceStick - radius,
-        y: pos.cy,
-        r: radius
-      };
     }
 
     function componentPortObstacleRects(conn) {
@@ -19431,7 +25592,13 @@
     // Collect component bounding boxes as obstacles (with interface extensions)
     var obstaclePad = 18;
     var obstacles = [];
-    var labelObstacles = [];
+    var packageTabObstacles = packageTabs.map(function(tab, index) {
+      return { x1: tab.x, y1: tab.y, x2: tab.x + tab.width, y2: tab.y + tab.height, name: '__package_' + packageFrames[index].id };
+    });
+    var labelObstacles = packageTabObstacles.slice();
+    // The boxes alone, without room for interface symbols (and the
+    // package tabs, which every label keeps clear of).
+    var boxLabelObstacles = packageTabObstacles.slice();
     var standaloneSquareLabels = {};
     for (var obn in entries) {
       var obe = entries[obn];
@@ -19475,6 +25642,10 @@
         y2: obe.y + obe.box.height + labelPad,
         name: obn
       });
+      boxLabelObstacles.push({
+        x1: obe.x - labelPad, y1: obe.y - labelPad,
+        x2: obe.x + obe.box.width + labelPad, y2: obe.y + obe.box.height + labelPad, name: obn
+      });
       obstacles.push({
         x1: obe.x - obstaclePad - obLeftExt,
         y1: obe.y - obstaclePad,
@@ -19510,7 +25681,7 @@
     function sharedLabelSpots(labelInfo, x, y, radius, direction) {
       var labelText = sharedLabelText(labelInfo);
       var labelDirection = !!(labelInfo && labelInfo.labelDirection);
-      var fs = CFG.fontSize - 1;
+      var fs = CFG.fontSizePort;
       var labelW = UMLShared.labelDirectionTextWidth(labelText, labelDirection, fs);
       var labelH = fs + 6;
       var offset = (radius || CFG.ifaceRadius) + fs + 7;
@@ -19528,12 +25699,22 @@
           { x: x - sideOffset, y: y + fs * 0.35 },
           { x: x + sideOffset, y: y + fs * 0.35 }
         ];
+      } else if (recorder) {
+        // Compact: a symbol close to its box may also carry its name beside
+        // the line, starting at the symbol, on the side away from the box.
+        var shift = labelW / 2 + (radius || CFG.ifaceRadius);
+        candidates.slice().forEach(function(base) {
+          candidates.push({ x: base.x + shift, y: base.y }, { x: base.x - shift, y: base.y });
+        });
       }
+      // Compact keeps the name off the boxes here; the scene keeps it off
+      // the interface symbols (they are recorded as port nodes).
+      var nameObstacles = recorder ? boxLabelObstacles : labelObstacles;
       var spots = candidates.map(function(cand) {
         return { x: cand.x, y: cand.y, rect: makeLabelRect(cand.x, cand.y, labelW, labelH, 'middle') };
       });
       var clear = spots.filter(function(spot) {
-        return !labelRectHitsObstacles(spot.rect, labelObstacles, 2) &&
+        return !labelRectHitsObstacles(spot.rect, nameObstacles, 2) &&
           !labelRectHitsPlacedLabels(spot.rect, placedLabels, 8) &&
           !labelRectCrossesRoutes(spot.rect, 2);
       });
@@ -19544,10 +25725,11 @@
       var labelText = sharedLabelText(labelInfo);
       var labelDirection = !!(labelInfo && labelInfo.labelDirection);
       if (!labelText && !labelDirection) return;
-      var fs = CFG.fontSize - 1;
+      var fs = CFG.fontSizePort;
       var spots = sharedLabelSpots(labelInfo, x, y, radius, direction);
       var best = spots.spot || spots.fallback;
       placedLabels.push(best.rect);
+      if (recorder) recorder.label('iface-label:' + labelText + '@' + best.x + ',' + best.y, best.rect, null, 'interface', fs);
       drawInterfaceConnectionLabel(svg, labelText, best.x, best.y, colors, fs);
       var actualTextRect = UMLShared.labelTextRect(labelText, best.x, best.y, 'middle', fs);
       var directionRect = UMLShared.pushLabelDirectionTriangle(
@@ -19641,13 +25823,15 @@
         // The initial row pitch is deliberately generous. Endpoint alignment
         // may use its spare padding, but must keep the title and label font
         // boxes apart (including ascenders and descenders in the chosen font).
-        var headerMetrics = UMLShared.textMetrics(componentDisplayName(parsed, entry.comp), true, CFG.fontSizeBold, CFG.fontFamily);
-        var labelFontSize = CFG.fontSize - 1;
+        var headerMetrics = UMLShared.textMetrics(entry.label, true, CFG.fontSizeBold, CFG.fontFamily);
+        var labelFontSize = CFG.fontSizePort;
         var labelMetrics = UMLShared.textMetrics(pos.label || alias, false, labelFontSize, CFG.fontFamily, true);
         var headerDescent = isFinite(headerMetrics.fontBoundingBoxDescent) ? headerMetrics.fontBoundingBoxDescent : 4;
         var labelAscent = isFinite(labelMetrics.fontBoundingBoxAscent) ? labelMetrics.fontBoundingBoxAscent : labelFontSize + 6;
-        var titleBottom = CFG.padY + CFG.fontSizeBold * 0.35 + 2 + headerDescent +
-          (componentHeaderLineCount(entry.comp) - 1) * CFG.lineHeight;
+        var nameBaseline = entry.stereotypeText
+          ? componentStereotypeBaselines(entry).name - entry.y
+          : CFG.padY + CFG.fontSizeBold * 0.35 + 2;
+        var titleBottom = nameBaseline + headerDescent;
         var labelAboveCenter = labelAscent - labelFontSize * 0.35;
         if (isFinite(titleBottom) && isFinite(labelAboveCenter)) {
           lower = entry.y + titleBottom + 4 + Math.max(halfPort, labelAboveCenter);
@@ -21802,7 +27986,21 @@
         svg.push('<polyline points="' + pts2 +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dAttr + routeTargetDataAttr + '/>');
 
+        // The symbol and its name are drawn at the end nearer along the route,
+        // which runs from conn.from to conn.to. Mark that component so a
+        // package around it can enclose them (refitComponentPackageFrames).
+        var bsAlongRoute = Math.abs(bsMx - bsSeg0.x) + Math.abs(bsMy - bsSeg0.y);
+        for (var bsk = 0; bsk < bsSi; bsk++) {
+          bsAlongRoute += Math.abs(points[bsk + 1].x - points[bsk].x) + Math.abs(points[bsk + 1].y - points[bsk].y);
+        }
+        var bsDrawnAt = bsAlongRoute <= bsRouteLength / 2 ? conn.from : conn.to;
+        var bsRects = joinedInterfaceRects[bsDrawnAt] = joinedInterfaceRects[bsDrawnAt] || [];
+        bsRects.push({ x: ballCx - ballR, y: ballCy - ballR, width: 2 * ballR, height: 2 * ballR },
+          { x: socketCx - socketR, y: socketCy - socketR, width: 2 * socketR, height: 2 * socketR });
+        var bsLabelsBefore = placedLabels.length;
+        svg.push('<g data-uml-drawn-at="' + UMLShared.escapeXml(bsDrawnAt) + '">');
         // Draw ball (filled circle)
+        if (recorder) recorder.extent({ left: socketCx - socketR, right: socketCx + socketR, top: socketCy - socketR, bottom: socketCy + socketR });
         svg.push('<circle cx="' + ballCx + '" cy="' + ballCy + '" r="' + ballR +
           '" fill="' + colors.fill + '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + portSymbolDAttr + '/>');
         // Draw socket arc
@@ -21824,6 +28022,10 @@
           Math.max(ballR, socketR),
           UMLShared.routeDirectionAtPlacement(points, { x: bsMx, y: bsMy })
         );
+        placedLabels.slice(bsLabelsBefore).forEach(function(rect) {
+          bsRects.push({ x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top });
+        });
+        svg.push('</g>');
       } else {
         routeId = 'edge-' + renderedRouteCount++;
         routeDataAttr = connectorLayoutAttrs(conn, null, routeId);
@@ -21875,6 +28077,7 @@
       }
 
       connectorRoutes.push({ routeIndex: ci, routeId: routeId, conn: conn, points: points });
+      if (recorder) recorder.route(routeId || 'joined:' + ci, conn, points);
     }
 
     var componentRouteSegments = buildComponentRouteSegments(connectorRoutes);
@@ -21937,7 +28140,7 @@
         placedLabels,
         componentRouteSegments,
         CFG,
-        { preferredVerticalSide: preferredLabelVerticalSide(routeInfo) }
+        { preferredVerticalSide: preferredLabelVerticalSide(routeInfo), keepNearOwnRoute: !!recorder }
       );
       if (!labelPlacement) continue;
       labelPlacement.label = routeInfo.conn.label;
@@ -21950,7 +28153,7 @@
       if (routeInfo.conn.label) {
         pushComponentLabelText(svg, labelPlacement, colors, CFG);
       }
-      var componentTextMetrics = componentLabelMetrics(routeInfo.conn.label || '', CFG.fontSize, COMPONENT_CONNECTOR_LABEL_MAX_WIDTH);
+      var componentTextMetrics = componentLabelMetrics(routeInfo.conn.label || '', CFG.fontSize, CFG.labelMaxWidth);
       var componentDirectionRect = UMLShared.pushLabelDirectionTriangle(
         svg,
         routeInfo.conn.label,
@@ -21965,18 +28168,38 @@
       );
       if (labelLayoutId) svg.push('</g>');
       placedLabels.push(UMLShared.unionRects(componentLabelRect, componentDirectionRect));
+      if (recorder) {
+        recorder.label('label:' + (routeInfo.routeId || 'joined:' + routeInfo.routeIndex),
+          UMLShared.unionRects(componentLabelGlyphRect(componentLabelRect), componentDirectionRect),
+          routeInfo.routeId || 'joined:' + routeInfo.routeIndex, 'edge', CFG.fontSize);
+      }
     }
 
-    // The bold display name and, on the next line, the italic «keyword».
-    function pushComponentHeader(entry, x, nameBaselineY, anchor) {
-      var anchorAttr = anchor === 'start' ? '' : ' text-anchor="' + anchor + '"';
-      svg.push('<text x="' + x + '" y="' + nameBaselineY + '"' + anchorAttr +
-        ' font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(entry.comp.name) + '>' +
-        UMLShared.escapeXml(componentDisplayName(parsed, entry.comp)) + '</text>');
-      if (!entry.comp.keyword) return;
-      svg.push('<text x="' + x + '" y="' + (nameBaselineY + CFG.lineHeight) + '"' + anchorAttr +
-        ' font-style="italic" font-size="' + CFG.fontSize + '" fill="' + colors.text + '"' + componentLayoutAttr(entry.comp.name) + '>' +
-        UMLShared.escapeXml(componentKeywordLine(entry.comp)) + '</text>');
+    // ── Draw packages around the members' final extents (routing may have
+    // slid ports along their borders): shapes behind everything, names over
+    // the connectors that cross them. Once connector labels settle, render()
+    // refits them to the joined interfaces drawn at members. ──
+    // A compact drawing is final as generated; the page refits the others
+    // to what the browser draws (refitComponentPackageFrames).
+    // Compact places the notes here, clear of the connectors and labels
+    // already drawn, and draws a package around the notes of its members
+    // too: a note beside a member lies inside that member's package, never
+    // across its outline.
+    if (recorder) {
+      notePositions = placeCompactNotes(parsed, entries, recorder.drawnObstacles(), layout.noteReach === 'far');
+      notePositions.forEach(function(placed) {
+        var target = String(placed.note.target || '').split('.')[0];
+        if (!entries[target]) return;
+        (joinedInterfaceRects[target] = joinedInterfaceRects[target] || []).push({ x: placed.x, y: placed.y, width: placed.w, height: placed.h });
+      });
+    }
+    var finalPackageFrames = layoutComponentPackages(parsed, entries, joinedPorts, recorder ? joinedInterfaceRects : null);
+    if (finalPackageFrames.length) {
+      var packageShapes = [];
+      UMLShared.drawPackageFrames(packageShapes, finalPackageFrames, colors);
+      Array.prototype.splice.apply(svg, [1, 0].concat(packageShapes));
+      UMLShared.drawPackageNames(svg, finalPackageFrames, colors);
+      if (recorder) recorder.packages(finalPackageFrames);
     }
 
     // ── Draw component boxes ──
@@ -21986,7 +28209,8 @@
       var compFills = UMLShared.highlightFills(colors, e.comp.highlight, e.comp.texture);
       var compDashAttr = e.comp.visualStyle === 'dashed' ? COMPONENT_DASH_ATTR : '';
       var portHalf2 = CFG.portSize / 2;
-      var portLblFs2 = CFG.fontSize - 1;
+      var portLblFs2 = CFG.fontSizePort;
+      if (recorder) recorder.component(e);
 
       if (e.standalonePort) {
         for (var spName in e.portPositions) {
@@ -22031,6 +28255,7 @@
             spAnchor = squareLabel.anchor;
           }
 
+          if (recorder) recorder.text(e.comp.name + ':label', spText, spLabelX, spLabelY, spAnchor, portLblFs2, e.comp.name);
           svg.push('<text x="' + spLabelX + '" y="' + spLabelY +
             '" text-anchor="' + spAnchor + '" font-size="' + portLblFs2 + '"' +
             ' font-style="italic" fill="' + colors.text + '">' +
@@ -22042,7 +28267,8 @@
       // Main rectangle
       svg.push('<rect class="uml-node-shadow uml-component-box" x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
         '" fill="' + compFills.headerFill + '" stroke="' + colors.stroke + '" stroke-width="' + CFG.strokeWidth + '"' +
-        compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
+        compDashAttr + componentLayoutAttr(e.comp.name) +
+        ' data-layout-bounds-id="' + UMLShared.escapeXml(e.comp.name) + '"/>');
       if (compFills.textureUrl) {
         svg.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + bh +
           '" fill="' + compFills.textureUrl + '" stroke="none"' + componentLayoutAttr(e.comp.name) + '/>');
@@ -22058,13 +28284,28 @@
       svg.push('<rect x="' + (ix - CFG.iconTabW / 2) + '" y="' + (iy + CFG.iconH - CFG.iconTabH - 2) + '" width="' + CFG.iconTabW + '" height="' + CFG.iconTabH +
         '" fill="' + colors.fill + '" stroke="' + colors.stroke + '" stroke-width="1"' + compDashAttr + componentLayoutAttr(e.comp.name) + '/>');
 
-      if (e.hasPorts) {
-        // Header lines at top-left when component has ports
-        pushComponentHeader(e, bx + CFG.padX, by + CFG.padY + CFG.fontSizeBold * 0.35 + 2, 'start');
+      if (e.stereotypeText) {
+        // «Keywords» in plain face, centered above the centered bold name,
+        // both left of the icon.
+        var headerCx = bx + (bw - CFG.iconW - 8) / 2;
+        var headerBaselines = componentStereotypeBaselines(e);
+        svg.push('<text x="' + headerCx + '" y="' + headerBaselines.stereotype +
+          '" text-anchor="middle" font-size="' + CFG.fontSizeStereotype + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.stereotypeText) + '</text>');
+        svg.push('<text x="' + headerCx + '" y="' + headerBaselines.name +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.label) + '</text>');
+      } else if (e.hasPorts) {
+        // Name at top-left when component has ports
+        svg.push('<text x="' + (bx + CFG.padX) + '" y="' + (by + CFG.padY + CFG.fontSizeBold * 0.35 + 2) +
+          '" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.label) + '</text>');
+
       } else {
-        // Centered header lines when no ports
-        var headerLift = (componentHeaderLineCount(e.comp) - 1) * CFG.lineHeight / 2;
-        pushComponentHeader(e, bx + (bw - CFG.iconW - 8) / 2, by + bh / 2 + CFG.fontSize * 0.35 - headerLift, 'middle');
+        // Centered name when no ports
+        svg.push('<text x="' + (bx + (bw - CFG.iconW - 8) / 2) + '" y="' + (by + bh / 2 + CFG.fontSize * 0.35) +
+          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' + componentLayoutAttr(e.comp.name) + '>' +
+          UMLShared.escapeXml(e.label) + '</text>');
       }
 
       // ── Draw ports (squares, lollipops, sockets) and labels ──
@@ -22152,6 +28393,13 @@
               labelAnchor = 'middle';
               labelY = ifCy + ifR + portLblFs2 + 2;
             }
+            if (recorder) {
+              recorder.port(e, pname, { left: Math.min(pp.cx, ifCx - ifR), right: Math.max(pp.cx, ifCx + ifR),
+                top: Math.min(pp.cy, ifCy - ifR), bottom: Math.max(pp.cy, ifCy + ifR) });
+              if (!suppressInterfacePortLabel[pname]) {
+                recorder.text(e.comp.name + '.' + pname + ':label', plText, labelX, labelY, labelAnchor, portLblFs2, e.comp.name + '.' + pname);
+              }
+            }
             if (!suppressInterfacePortLabel[pname]) {
               svg.push('<text x="' + labelX + '" y="' + labelY +
                 '" text-anchor="' + labelAnchor + '" font-size="' + portLblFs2 + '"' +
@@ -22181,6 +28429,7 @@
           }
         } else {
           // ── Regular port: square straddling the component boundary ──
+          if (recorder) recorder.port(e, pname, { left: pp.x, right: pp.x + CFG.portSize, top: pp.y, bottom: pp.y + CFG.portSize });
           svg.push('<rect x="' + pp.x + '" y="' + pp.y +
             '" width="' + CFG.portSize + '" height="' + CFG.portSize +
             '" fill="' + colors.fill + '" stroke="' + colors.stroke +
@@ -22214,10 +28463,705 @@
       else if (np2.note.position === 'top') { cF = { x: np2.x + np2.w / 2, y: np2.y + np2.h }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty }; }
       else { cF = { x: np2.x + np2.w / 2, y: np2.y }; cT = { x: np2.tx + np2.tw / 2, y: np2.ty + np2.th }; }
       UMLShared.drawNote(svg, np2.x, np2.y, np2.note.lines, colors, { fromX: cF.x, fromY: cF.y, toX: cT.x, toY: cT.y });
+      if (recorder) recorder.note(ni, np2, [cF, cT]);
     }
 
+    if (recorder) svg[0] = recorder.frame(CFG.svgPad);
     svg.push(UMLShared.svgClose());
     return svg.join('\n');
+  }
+
+  /**
+   * Notes placed after the connectors and labels, near their targets as
+   * outside compact. With `far`, where that leaves a note covering
+   * something, the search looks farther along and away from the target
+   * (≈ 290 units each way): the note may grow the drawing instead of
+   * needing a wider gap beside its target.
+   */
+  function placeCompactNotes(parsed, entries, drawn, far) {
+    var near = UMLShared.computeAnchoredNotes(parsed.notes, entries, drawn, { layout: parsed.layout });
+    if (!far || !notesCoverSomething(near, entries, drawn)) return near;
+    return UMLShared.computeAnchoredNotes(parsed.notes, entries, drawn, { layout: parsed.layout, maxSlides: 16, distanceLevels: 16 });
+  }
+
+  // Whether a placed note overlaps a component other than its target, a
+  // drawn obstacle, or another note (touching is not covering).
+  function notesCoverSomething(placed, entries, drawn) {
+    var pad = 0;
+    return placed.some(function(note, i) {
+      var rect = { x: note.x, y: note.y, w: note.w, h: note.h };
+      var boxes = Object.keys(entries).map(function(name) {
+        var e = entries[name];
+        return { x: e.x, y: e.y, w: e.box.width, h: e.box.height };
+      }).filter(function(box) { return !(box.x === note.tx && box.y === note.ty); });
+      var others = placed.filter(function(other, j) { return j !== i; }).map(function(other) {
+        return { x: other.x, y: other.y, w: other.w, h: other.h };
+      });
+      var noteRect = normalizeComponentRect(rect);
+      return boxes.concat(drawn, others).some(function(obstacle) { return rectsOverlap(noteRect, normalizeComponentRect(obstacle), pad); });
+    });
+  }
+
+  /**
+   * Records what the component renderer draws in a UMLLayoutQuality scene,
+   * in layout coordinates: components and standalone ports as nodes, the
+   * ports of a component as nodes inside it, connectors as routes (bundled
+   * by the port they share), and labels and notes as labels.
+   */
+  function createComponentSceneRecorder(scene, entries) {
+    var extents = [];
+
+    function endpointId(compName, alias) {
+      var entry = entries[compName];
+      return !alias || !entry || entry.standalonePort ? compName : compName + '.' + alias;
+    }
+
+    function addLabel(id, rect, owner, kind) {
+      scene.addLabel({ id: id, owner: owner, kind: kind, x: rect.left, y: rect.top,
+        width: rect.right - rect.left, height: rect.bottom - rect.top });
+    }
+
+    function sceneBounds() {
+      var b = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+      function add(left, top, right, bottom) {
+        b.left = Math.min(b.left, left); b.top = Math.min(b.top, top);
+        b.right = Math.max(b.right, right); b.bottom = Math.max(b.bottom, bottom);
+      }
+      scene.nodes.concat(scene.labels).forEach(function(r) { add(r.x, r.y, r.x + r.width, r.y + r.height); });
+      scene.routes.forEach(function(r) { r.points.forEach(function(p) { add(p.x, p.y, p.x, p.y); }); });
+      extents.forEach(function(r) { add(r.left, r.top, r.right, r.bottom); });
+      return b;
+    }
+
+    return {
+      component: function(entry) {
+        scene.addNode({ id: entry.comp.name, x: entry.x, y: entry.y, width: entry.box.width, height: entry.box.height,
+          kind: entry.standalonePort ? 'port' : 'component', parent: UMLShared.packageSceneId(entry.comp.package) });
+        if (!entry.standalonePort) scene.noteFont(CFG.fontSizeBold);
+        if (!entry.standalonePort && entry.comp.stereotype) scene.noteFont(CFG.fontSizeStereotype);
+        if (entry.hasPorts) scene.noteFont(CFG.fontSizePort);
+      },
+      packages: function(frames) { UMLShared.recordPackageFrames(scene, frames); },
+      port: function(entry, alias, rect) {
+        scene.addNode({ id: entry.comp.name + '.' + alias, kind: 'port', parent: entry.comp.name,
+          x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top });
+      },
+      // A name drawn beside a port symbol, owned by that symbol.
+      text: function(id, text, x, baseline, anchor, fontSize, owner) {
+        addLabel(id, UMLShared.labelTextRect(text, x, baseline, anchor, fontSize), owner, 'port-label');
+        scene.noteFont(fontSize);
+      },
+      label: function(id, rect, owner, kind, fontSize) {
+        addLabel(id, rect, owner, kind);
+        scene.noteFont(fontSize);
+      },
+      route: function(id, conn, points) {
+        var source = endpointId(conn.from, conn.fromPort), target = endpointId(conn.to, conn.toPort);
+        // Connectors into one port share its last stretch by design.
+        var shared = conn.toPort ? target : (conn.fromPort ? source : null);
+        scene.addRoute({ id: id, points: points, source: source, target: target, bundle: shared });
+      },
+      note: function(index, placed, leader) {
+        var id = 'note:' + index;
+        var target = placed.note.target ? String(placed.note.target).split('.') : null;
+        var owner = target ? endpointId(target[0], target[1]) : null;
+        addLabel(id, { left: placed.x, top: placed.y, right: placed.x + placed.w, bottom: placed.y + placed.h }, owner, 'note');
+        scene.addRoute({ id: 'leader:' + id, points: leader, source: id, target: owner });
+        scene.noteFont(UMLShared.NOTE_CFG.fontSize);
+      },
+      extent: function(rect) { extents.push(rect); },
+      // What a note placed now must keep clear of: every label drawn so
+      // far, and every connector segment as a thin rectangle.
+      drawnObstacles: function() {
+        var found = scene.labels.map(function(l) { return { x: l.x, y: l.y, w: l.width, h: l.height }; });
+        scene.routes.forEach(function(route) {
+          for (var i = 1; i < route.points.length; i++) {
+            var a = route.points[i - 1], b = route.points[i];
+            found.push({ left: Math.min(a.x, b.x), top: Math.min(a.y, b.y), right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) });
+          }
+        });
+        return found;
+      },
+      // The SVG's opening tag for a frame `margin` around everything drawn.
+      frame: function(margin) {
+        var b = sceneBounds();
+        var width = Math.ceil(b.right - b.left + 2 * margin), height = Math.ceil(b.bottom - b.top + 2 * margin);
+        var originX = margin - b.left, originY = margin - b.top;
+        scene.setSize(width, height);
+        scene.setOrigin(originX, originY);
+        return UMLShared.svgOpen(width, height, originX, originY, CFG.fontFamily);
+      }
+    };
+  }
+
+  // ─── Compact layout ──────────────────────────────────────────────
+  // `layout compact` realizes the normal placement and placements that wrap
+  // its ranks into bands to suit the pane, lets UMLCompactLayout squeeze out
+  // the empty space, and keeps the drawing whose smallest text is largest in
+  // the pane. The ranks keep their order: read band by band, the components
+  // come in the order the author's placement (and hidden constraints) gave.
+
+  // Sizes for compact drawings, stated against the connector-label font (14).
+  var COMPACT_COMPONENT_METRICS = Object.freeze({
+    fontSizePort: 14,  // port names at the base size, like edge labels
+    fontSizeStereotype: 14,  // «keywords» above a name, and in package tabs
+    padX: 12,          // ≈ 0.85 em beside a component's name
+    compMinW: 0,       // a component is as wide as its text needs
+    svgPad: 10,        // ≈ 0.7 em
+    // A path label wraps at its slashes beyond ≈ 7 em, so long API paths
+    // stack instead of holding two components a whole path apart.
+    pathLabelMaxWidth: 100
+  });
+
+  // What the router needs around boxes when the squeeze tightens a gap.
+  var COMPACT_COMPONENT_CLEARANCES = Object.freeze({
+    lanePitch: ROUTE_LANE_STEP,
+    boxClearance: 18,           // the router's obstacle padding
+    stub: 24,                   // a connector's straight run off its side
+    labelPad: 10                // the label placer's clearance to boxes and labels
+  });
+
+  // Bands at most: more only stretch the drawing the other way.
+  var COMPACT_COMPONENT_MAX_BANDS = 6;
+
+  function compactComponentNoteMetrics() {
+    return { fontSize: CFG.fontSize, codeFontSize: CFG.fontSize, lineHeight: CFG.fontSize + 6, padX: 12, padY: 6 };
+  }
+
+  function overrideComponentFields(target, values) {
+    var saved = {};
+    Object.keys(values).forEach(function(key) {
+      saved[key] = target[key];
+      target[key] = values[key];
+    });
+    return saved;
+  }
+
+  // Runs fn with the compact metrics in force; restores them afterwards.
+  function withCompactComponentMetrics(fn) {
+    var savedComponent = overrideComponentFields(CFG, COMPACT_COMPONENT_METRICS);
+    var savedNote = overrideComponentFields(UMLShared.NOTE_CFG, compactComponentNoteMetrics());
+    try {
+      return fn();
+    } finally {
+      overrideComponentFields(CFG, savedComponent);
+      overrideComponentFields(UMLShared.NOTE_CFG, savedNote);
+    }
+  }
+
+  // An authored layout was arranged against today's sizes, so a spec with a
+  // `@layout` block, authored positions or routes keeps today's path.
+  function hasAuthoredComponentLayout(text, layout) {
+    if (/^\s*@layout\b/im.test(text)) return true;
+    return Boolean(layout && ((layout.positions && Object.keys(layout.positions).length) ||
+      (layout.routes && Object.keys(layout.routes).length)));
+  }
+
+  // The ranks of a placement along its flow axis ('x' when ranks run left
+  // to right): groups of components whose extents on that axis overlap, in
+  // flow order, each with its members' offsets from the rank's start.
+  function componentRanks(entries, axis) {
+    var size = axis === 'x' ? 'width' : 'height';
+    var names = Object.keys(entries).sort(function(a, b) {
+      return entries[a][axis] - entries[b][axis] || (a < b ? -1 : a > b ? 1 : 0);
+    });
+    var ranks = [];
+    names.forEach(function(name) {
+      var e = entries[name];
+      var rank = ranks[ranks.length - 1];
+      if (!rank || e[axis] >= rank.end) {
+        rank = { start: e[axis], end: e[axis] + e.box[size], names: [] };
+        ranks.push(rank);
+      }
+      rank.names.push(name);
+      rank.end = Math.max(rank.end, e[axis] + e.box[size]);
+    });
+    return ranks;
+  }
+
+  /**
+   * Positions that wrap the ranks of a placement into `bandCount` bands:
+   * consecutive ranks fill a band along the flow axis, keeping the gaps they
+   * had; bands follow each other across it, each `gapAfter(placed)` after
+   * the last, where `placed` holds the names in it and the bands before.
+   * Within a rank, members keep their offsets across the flow.
+   */
+  function wrapRanks(entries, ranks, axis, bandCount, gapAfter) {
+    var cross = axis === 'x' ? 'y' : 'x';
+    var crossSize = axis === 'x' ? 'height' : 'width';
+    var perBand = Math.ceil(ranks.length / bandCount);
+    var positions = {};
+    var placed = {};
+    var bandStart = 0;
+    for (var b = 0; b * perBand < ranks.length; b++) {
+      var band = ranks.slice(b * perBand, (b + 1) * perBand);
+      var crossMin = Infinity, crossMax = -Infinity;
+      band.forEach(function(rank) {
+        rank.names.forEach(function(name) {
+          crossMin = Math.min(crossMin, entries[name][cross]);
+          crossMax = Math.max(crossMax, entries[name][cross] + entries[name].box[crossSize]);
+        });
+      });
+      var flow = 0;
+      band.forEach(function(rank, i) {
+        if (i > 0) flow += rank.start - band[i - 1].end;
+        rank.names.forEach(function(name) {
+          var p = {};
+          p[axis] = flow + entries[name][axis] - rank.start;
+          p[cross] = bandStart + entries[name][cross] - crossMin;
+          positions[name] = p;
+          placed[name] = true;
+        });
+        flow += rank.end - rank.start;
+      });
+      bandStart += crossMax - crossMin + gapAfter(placed);
+    }
+    return positions;
+  }
+
+  // Room after a band for the connectors that leave it for a later band:
+  // a lane each, two label lines for at most two of them (labels beside
+  // the leads stack in the band), plus the router's clearance at both rows.
+  // The squeeze closes what stays empty.
+  function tightBandGap(parsed, placed) {
+    var crossing = parsed.connectors.filter(function(c) { return !placed[c.from] !== !placed[c.to]; });
+    var labelled = crossing.filter(function(c) { return c.label || c.labelDirection; }).length;
+    var lines = (CFG.fontSize + 6) * 2;
+    return 2 * COMPACT_COMPONENT_CLEARANCES.boxClearance + crossing.length * ROUTE_LANE_STEP + Math.min(labelled, 2) * lines;
+  }
+
+  // Room for every connector to pass between two bands, with a label line
+  // pair for up to four. In a band this tall the router leaves a box by its
+  // side facing the next band, where a tight band can turn a lead sideways
+  // and crowd the labels of the edges beside it.
+  function roomyBandGap(parsed) {
+    var labelled = parsed.connectors.filter(function(c) { return c.label || c.labelDirection; }).length;
+    var lines = (CFG.fontSize + 6) * 2;
+    return 2 * COMPACT_COMPONENT_CLEARANCES.boxClearance + parsed.connectors.length * ROUTE_LANE_STEP + Math.min(labelled, 4) * lines;
+  }
+
+  function entryBounds(entries) {
+    var b = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+    Object.keys(entries).forEach(function(name) {
+      var e = entries[name];
+      b.left = Math.min(b.left, e.x); b.top = Math.min(b.top, e.y);
+      b.right = Math.max(b.right, e.x + e.box.width); b.bottom = Math.max(b.bottom, e.y + e.box.height);
+    });
+    return b;
+  }
+
+  function positionedBounds(entries, positions) {
+    var moved = {};
+    Object.keys(entries).forEach(function(name) {
+      moved[name] = { x: positions[name].x, y: positions[name].y, box: entries[name].box };
+    });
+    return entryBounds(moved);
+  }
+
+  // How much a drawing of these bounds (and the margin) is scaled in the pane.
+  function paneScale(bounds, pane) {
+    var pad = 2 * CFG.svgPad;
+    return Math.min(pane.width / (bounds.right - bounds.left + pad), pane.height / (bounds.bottom - bounds.top + pad));
+  }
+
+  function sameSize(a, b) {
+    return Math.abs((a.right - a.left) - (b.right - b.left)) < 1 && Math.abs((a.bottom - a.top) - (b.bottom - b.top)) < 1;
+  }
+
+  function samePositions(a, b) {
+    return Object.keys(a).every(function(name) { return b[name] && a[name].x === b[name].x && a[name].y === b[name].y; });
+  }
+
+  function positionsOf(entries) {
+    var positions = {};
+    Object.keys(entries).forEach(function(name) { positions[name] = { x: entries[name].x, y: entries[name].y }; });
+    return positions;
+  }
+
+  /**
+   * The spec with its connectors pointing the way a reader follows them,
+   * for placing the components (the drawing keeps the connectors as
+   * written). A ball-and-socket assembly runs from the component that
+   * requires the interface to the one that provides it, whichever end it is
+   * written from; a plain link, which has no direction, leaves the end with
+   * more connectors, so a fan-out is placed from its hub outwards. Arrows
+   * the author drew (dependencies, assemblies between bare components)
+   * keep their direction. The same spec when nothing turns.
+   */
+  function flowOrientedSpec(parsed) {
+    var kinds = {}, degree = {};
+    parsed.components.forEach(function(comp) {
+      comp.ports.forEach(function(port) { kinds[comp.name + '.' + port.alias] = port.kind || null; });
+    });
+    parsed.connectors.forEach(function(c) {
+      if (c.from === c.to) return;
+      degree[c.from] = (degree[c.from] || 0) + 1;
+      degree[c.to] = (degree[c.to] || 0) + 1;
+    });
+    var turned = false;
+    var connectors = parsed.connectors.map(function(c) {
+      var fromKind = c.fromPort ? kinds[c.from + '.' + c.fromPort] : null;
+      var toKind = c.toPort ? kinds[c.to + '.' + c.toPort] : null;
+      var turn = c.type === 'assembly'
+        ? fromKind === 'provide' && toKind === 'require'
+        : c.type === 'link' && (degree[c.to] || 0) > (degree[c.from] || 0);
+      if (!turn) return c;
+      turned = true;
+      return Object.assign({}, c, { from: c.to, fromPort: c.toPort, to: c.from, toPort: c.fromPort });
+    });
+    return turned ? Object.assign({}, parsed, { connectors: connectors }) : parsed;
+  }
+
+  /**
+   * Positions that line each rank of a layered placement up on one edge
+   * across the flow (`axis` is the flow axis, 'x' when ranks run left to
+   * right): the edge facing the earlier ranks where its members'
+   * connectors mostly come from there (a fan-out reaches an aligned
+   * column), else the edge facing the later ones. Members keep their
+   * places along the rank.
+   */
+  function alignedRankPositions(parsed, entries, axis) {
+    var size = axis === 'x' ? 'width' : 'height';
+    var ranks = componentRanks(entries, axis);
+    var rankOf = {};
+    ranks.forEach(function(rank, i) { rank.names.forEach(function(name) { rankOf[name] = i; }); });
+    var positions = positionsOf(entries);
+    ranks.forEach(function(rank, i) {
+      var before = 0, after = 0;
+      parsed.connectors.forEach(function(c) {
+        [[c.from, c.to], [c.to, c.from]].forEach(function(ends) {
+          if (rankOf[ends[0]] !== i || rankOf[ends[1]] === undefined) return;
+          if (rankOf[ends[1]] < i) before++;
+          else if (rankOf[ends[1]] > i) after++;
+        });
+      });
+      var aligned = {};
+      rank.names.forEach(function(name) {
+        aligned[name] = before >= after ? rank.start : rank.end - entries[name].box[size];
+      });
+      // A rank whose members would come to lie on each other keeps its places.
+      var cross = axis === 'x' ? 'y' : 'x', crossSize = axis === 'x' ? 'height' : 'width';
+      var clashes = rank.names.some(function(a, ai) {
+        return rank.names.some(function(b, bi) {
+          if (bi <= ai) return false;
+          var acrossA = [entries[a][cross], entries[a][cross] + entries[a].box[crossSize]];
+          var acrossB = [entries[b][cross], entries[b][cross] + entries[b].box[crossSize]];
+          return acrossA[0] < acrossB[1] && acrossB[0] < acrossA[1];
+        });
+      });
+      if (clashes) return;
+      rank.names.forEach(function(name) { positions[name][axis] = aligned[name]; });
+    });
+    return positions;
+  }
+
+  /**
+   * The component renderer as UMLCompactLayout sees it. A placement is
+   * `{positions, noteReach}`: positions null for the renderer's own
+   * placement in the authored direction, else each component's top-left
+   * corner; noteReach 'far' lets a note that finds no clear spot beside its
+   * target look farther (placeCompactNotes). Realizing a placement lays the
+   * ports and back-edge lanes out for those positions, routes every
+   * connector, and places the notes last. `withoutLayoutLine` is the
+   * drawing the spec gets without a layout line in this pane
+   * (defaultComponentDrawing): its counts bound the search, and its
+   * arrangement is a candidate where its package frames clash.
+   */
+  function createCompactComponentAdapter(parsed, colors, pane, withoutLayoutLine) {
+    // The authored direction: a placement the layered engine turns to fit a
+    // narrow pane is a candidate of its own, not the reference.
+    function layoutFor(placement) {
+      var layout = computeLayout(parsed, { positions: placement.positions, containerAspect: null });
+      layout.noteReach = placement.noteReach || 'near';
+      return layout;
+    }
+
+    var size = { boxes: parsed.components.length + parsed.notes.length, edges: parsed.connectors.length };
+    var componentsByName = {};
+    parsed.components.forEach(function(comp) { componentsByName[comp.name] = comp; });
+
+    function packageOf(name) {
+      return componentsByName[name] ? componentsByName[name].package || null : null;
+    }
+
+    // Whether the frames drawn around these components' boxes would hold a
+    // component they do not, or lie on each other.
+    function collides(entries) {
+      if (!parsed.packages || !parsed.packages.length) return false;
+      var boxes = {};
+      Object.keys(entries).forEach(function(name) {
+        var e = entries[name];
+        boxes[name] = { x: e.x, y: e.y, width: e.box.width, height: e.box.height };
+      });
+      return UMLShared.packagesCollide(parsed.packages, boxes, componentPackageStyle());
+    }
+
+    // A layout's engine input placed package by package, when its own
+    // placement collides; none otherwise.
+    function packagedPositions(layout) {
+      if (!layout.engineInput || !collides(layout.entries)) return [];
+      return UMLShared.packageBlockPlacements(layout.engineInput, layout.layoutResult && layout.layoutResult.direction,
+        parsed.packages, packageOf, componentPackageStyle());
+    }
+
+    // The placements whose packages hold only their own components; all of
+    // them when none does. `entries` are the normal placement's (a
+    // component's box does not depend on where it is placed).
+    function keepingPackages(placements, entries) {
+      var kept = placements.filter(function(placement) {
+        if (!placement.positions) return !collides(entries);
+        var moved = {};
+        Object.keys(entries).forEach(function(name) {
+          var p = placement.positions[name] || entries[name];
+          moved[name] = { x: p.x, y: p.y, box: entries[name].box };
+        });
+        return !collides(moved);
+      });
+      return kept.length ? kept : placements;
+    }
+
+    // The engine placements (normal, then for the pane) that would draw a
+    // package over what it does not hold, placed package by package
+    // instead; the normal one's best for the pane first.
+    function packageBlockCandidates(normal, shapedLayout) {
+      var ranked = packagedPositions(normal).map(function(positions, i) {
+        return { positions: positions, i: i, scale: paneScale(positionedBounds(normal.entries, positions), pane) };
+      }).sort(function(a, b) { return b.scale - a.scale || a.i - b.i; }).map(function(r) { return r.positions; });
+      return ranked.concat(packagedPositions(shapedLayout)).map(function(positions) {
+        return { positions: positions, noteReach: 'far' };
+      });
+    }
+
+    // Whether a note placed beside its target among these components alone
+    // would cover another component or note: then no routing can give it a
+    // clear spot there.
+    function notesNeedRoom(entries) {
+      if (!parsed.notes.length) return false;
+      return notesCoverSomething(placeCompactNotes(parsed, entries, [], false), entries, []);
+    }
+
+    // The drawing without a layout line, with its package frames moved off
+    // each other and off the components they do not hold: each compact box
+    // centred where that drawing centres it, then moved apart
+    // (UMLShared.separatedPackagePositions), the router's clearance at both
+    // frames. It keeps that drawing's arrangement and so its straight
+    // edges, which the package-by-package placements can lose. None when
+    // that drawing's frames clash with nothing, or when moving apart cannot
+    // end the clashes (its packages interleave).
+    function separatedDefault(entries) {
+      var centres = withoutLayoutLine.centres, boxes = {};
+      var names = Object.keys(entries);
+      if (!names.every(function(name) { return centres[name]; })) return [];
+      names.forEach(function(name) {
+        var e = entries[name], c = centres[name];
+        boxes[name] = { x: c.x - e.box.width / 2, y: c.y - e.box.height / 2, width: e.box.width, height: e.box.height };
+      });
+      var positions = UMLShared.separatedPackagePositions(parsed.packages, boxes, componentPackageStyle(),
+        2 * COMPACT_COMPONENT_CLEARANCES.boxClearance);
+      return positions ? [{ positions: positions, noteReach: 'far' }] : [];
+    }
+
+    // The normal placement; the placement the spec gets without a layout
+    // line in this pane, when it differs; then the normal ranks wrapped
+    // into 2, 3, … bands (one rank per band runs the chain across the
+    // authored direction), with tight and with roomy bands, each only when
+    // its boxes alone promise larger text than the normal placement's, so
+    // hopeless wraps spend no pass. With packages, the engine placements
+    // placed package by package where they would draw a package over what
+    // it does not hold: first, when the normal one would, else last; and
+    // no placement that would.
+    function placementsToTry() {
+      var placements = placementsFor(layoutFor({ positions: null }));
+      return letNotesMoveIfUnrepaired(placements);
+    }
+
+    // Where a note beside its target would cover a component whatever the
+    // connectors, the normal placement needs widening, and a search with
+    // this many candidates spares it no pass (the far copy then ranks with
+    // the normal placement, after every placement that promises more): the
+    // normal placement lets that note move farther itself instead, and the
+    // copy goes.
+    function letNotesMoveIfUnrepaired(placements) {
+      if (placements[0].positions || placements[0].noteReach) return placements;
+      if (window.UMLCompactLayout.referenceRepairs(size, placements.length) > 0) return placements;
+      if (!notesNeedRoom(layoutFor(placements[0]).entries)) return placements;
+      return [{ positions: null, noteReach: 'far' }].concat(placements.filter(function(placement) {
+        return placement.positions || !placement.noteReach;
+      }).slice(1));
+    }
+
+    /**
+     * The spec placed with its connectors the way a reader follows them
+     * (flowOrientedSpec), in the authored direction, each rank aligned
+     * (alignedRankPositions); placed package by package where that would
+     * draw a package over what it does not hold. None when no connector
+     * turns.
+     */
+    function flowPlacements() {
+      var flowSpec = flowOrientedSpec(parsed);
+      if (flowSpec === parsed) return [];
+      // In the authored direction: ports sit on the left and right sides,
+      // so a fan-out across the flow would turn every connector.
+      var flowLayout = computeLayout(flowSpec, { containerAspect: null, directionLocked: true });
+      var direction = (flowLayout.layoutResult && flowLayout.layoutResult.direction) || 'LR';
+      var axis = direction === 'TB' || direction === 'BT' ? 'y' : 'x';
+      var entries = flowLayout.entries;
+      if (!collides(entries)) {
+        var aligned = alignedRankPositions(flowSpec, entries, axis);
+        return [{ positions: collides(movedEntries(entries, aligned)) ? positionsOf(entries) : aligned, noteReach: 'far', columns: axis }];
+      }
+      return packagedPositions(flowLayout).map(function(positions) {
+        return { positions: positions, noteReach: 'far' };
+      });
+    }
+
+    function movedEntries(entries, positions) {
+      var moved = {};
+      Object.keys(entries).forEach(function(name) {
+        var p = positions[name] || entries[name];
+        moved[name] = { x: p.x, y: p.y, box: entries[name].box };
+      });
+      return moved;
+    }
+
+    function placementsFor(normal) {
+      var entries = normal.entries;
+      // The direction the layered placement took, which may differ from
+      // the authored one when it fits the pane better.
+      var flow = (normal.layoutResult && normal.layoutResult.direction) || parsed.direction || 'LR';
+      var axis = flow === 'TB' || flow === 'BT' ? 'y' : 'x';
+      var ranks = componentRanks(entries, axis);
+      // Only the normal placement is widened where a note finds no clear
+      // spot beside its target; the others, and a copy of the normal one,
+      // let such a note move farther instead.
+      var placements = [{ positions: null }];
+      if (parsed.notes.length) placements.push({ positions: null, noteReach: 'far' });
+      // The placement without a layout line is a candidate when its shape
+      // differs; a mere shuffle within the same bounds costs a pass for
+      // nothing.
+      var normalBounds = entryBounds(entries);
+      var shapedLayout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
+      var shaped = positionsOf(shapedLayout.entries);
+      if (!sameSize(positionedBounds(entries, shaped), normalBounds)) placements.push({ positions: shaped, noteReach: 'far' });
+      flowPlacements().forEach(function(placement) { placements.push(placement); });
+      var normalScale = paneScale(normalBounds, pane);
+      for (var bands = 2; bands <= Math.min(ranks.length, COMPACT_COMPONENT_MAX_BANDS); bands++) {
+        // Equal ranks per band give equal wraps: skip repeats.
+        if (Math.ceil(ranks.length / bands) === Math.ceil(ranks.length / (bands - 1))) continue;
+        var tight = wrapRanks(entries, ranks, axis, bands, function(placed) { return tightBandGap(parsed, placed); });
+        var roomy = wrapRanks(entries, ranks, axis, bands, function() { return roomyBandGap(parsed); });
+        [tight, roomy].forEach(function(wrapped, i) {
+          if (i > 0 && samePositions(wrapped, tight)) return;
+          if (paneScale(positionedBounds(entries, wrapped), pane) > normalScale) placements.push({ positions: wrapped, noteReach: 'far' });
+        });
+      }
+      var blocks = packageBlockCandidates(normal, shapedLayout).concat(separatedDefault(entries));
+      if (!blocks.length) return placements;
+      return keepingPackages(collides(entries) ? blocks.concat(placements) : placements.concat(blocks), entries);
+    }
+
+    return {
+      clearances: COMPACT_COMPONENT_CLEARANCES,
+      // The squeeze keeps room for the package frames between two components.
+      separation: UMLShared.packageSeparation(parsed.packages, packageOf, { lineHeight: CFG.lineHeight }),
+      size: size,
+
+      candidates: placementsToTry,
+
+      // A placement in aligned columns keeps each column aligned: its
+      // members keep their offsets across the flow.
+      bodies: function(placement) {
+        var entries = layoutFor(placement).entries;
+        var column = {};
+        if (placement.columns) {
+          componentRanks(entries, placement.columns).forEach(function(rank, i) {
+            rank.names.forEach(function(name) { column[name] = 'column:' + i; });
+          });
+        }
+        return Object.keys(entries).map(function(name) {
+          var e = entries[name];
+          var body = { id: name, x: e.x, y: e.y, width: e.box.width, height: e.box.height,
+            pinned: false, alignTop: 'top:' + Math.round(e.y) };
+          if (column[name] && placement.columns === 'x') body.alignLeft = column[name];
+          if (column[name] && placement.columns === 'y') body.alignTop = column[name];
+          return body;
+        });
+      },
+
+      withPositions: function(placement, positions) {
+        var entries = layoutFor(placement).entries;
+        var next = {};
+        Object.keys(entries).forEach(function(name) {
+          var p = positions[name] || entries[name];
+          next[name] = { x: p.x, y: p.y };
+        });
+        var moved = { positions: next, noteReach: placement.noteReach };
+        if (placement.columns) moved.columns = placement.columns;
+        return moved;
+      },
+
+      // One routing pass, without the teaching callouts (annotate adds
+      // them, only to drawings the search could still keep).
+      realize: function(placement) {
+        var scene = UMLLayoutQuality.createScene();
+        var svg = generateSVG(layoutFor(placement), parsed, colors, scene);
+        return { svg: svg, scene: scene };
+      },
+
+      // The teaching callouts at the compact base size (CFG holds the
+      // compact metrics while the search runs).
+      annotate: UMLCallouts.compactAnnotator(parsed.layout && parsed.layout.callouts, function() {
+        return { fontSize: CFG.fontSize, margin: CFG.svgPad, pane: pane };
+      }),
+
+      // Boxes only; edge labels outside the boxes are not counted.
+      estimate: function(placement) {
+        var b = entryBounds(layoutFor(placement).entries);
+        return { width: b.right - b.left + CFG.svgPad * 2, height: b.bottom - b.top + CFG.svgPad * 2 };
+      },
+
+      limits: withoutLayoutLine.counts
+    };
+  }
+
+  // The drawing the spec gets without a layout line in this pane (one extra
+  // routing, with the normal metrics in force): `counts`, its crossings and
+  // bends, which compact should not exceed, and `centres`, where it puts
+  // each component's centre.
+  function defaultComponentDrawing(parsed, colors, pane) {
+    var scene = UMLLayoutQuality.createScene();
+    var layout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
+    generateSVG(layout, parsed, colors, scene);
+    var metrics = UMLLayoutQuality.evaluate(scene, pane);
+    var centres = {};
+    Object.keys(layout.entries).forEach(function(name) {
+      var e = layout.entries[name];
+      centres[name] = { x: e.x + e.box.width / 2, y: e.y + e.box.height / 2 };
+    });
+    return { counts: { crossings: metrics.crossings, bends: metrics.bends }, centres: centres };
+  }
+
+  // Draws the compact SVG into the container (remembered for the same
+  // inputs); marks what stays overlapping.
+  function renderCompact(container, parsed, colors) {
+    var pane = window.UMLLayoutCore.resolvePane(container, parsed.pane);
+    var key = window.UMLCompactMemo.keyOf('component', { parsed: parsed, colors: colors, pane: pane });
+    var drawing = window.UMLCompactMemo.remember(key, function() { return searchCompact(parsed, colors, pane); });
+    container.innerHTML = drawing.svg;
+    UMLShared.markLayoutIssues(container, drawing.issues);
+  }
+
+  // The search itself, as {svg, issues}; it warns once per search, not for
+  // a remembered drawing.
+  function searchCompact(parsed, colors, pane) {
+    var withoutLayoutLine = defaultComponentDrawing(parsed, colors, pane);
+    var result = withCompactComponentMetrics(function() {
+      return window.UMLCompactLayout.optimize(createCompactComponentAdapter(parsed, colors, pane, withoutLayoutLine), pane);
+    });
+    if (result.issues > 0 && typeof console !== 'undefined' && console.warn) {
+      console.warn('ArchUML: compact component diagram has ' + result.issues + ' layout issue(s)', result.metrics.violations);
+    }
+    return { svg: result.svg, issues: result.issues };
   }
 
   // ─── Public API ───────────────────────────────────────────────────
@@ -22302,6 +29246,26 @@
     }
   }
 
+  // A package frame encloses what is drawn at its members, joined interfaces
+  // included. Their names settle only after rendering (labels move off
+  // components, authors pin label positions), so the frames are refitted to
+  // the groups that generateSVG marks with the component they are drawn at.
+  function refitComponentPackageFrames(container, parsed, entries) {
+    if (!parsed.packages || !parsed.packages.length) return;
+    var svg = container.querySelector('svg');
+    if (!svg) return;
+    var drawnAt = {};
+    var groups = svg.querySelectorAll('g[data-uml-drawn-at]');
+    for (var gi = 0; gi < groups.length; gi++) {
+      var box = null;
+      try { box = groups[gi].getBBox(); } catch (e) { /* not measurable */ }
+      if (!box || (!box.width && !box.height)) continue;
+      var id = groups[gi].getAttribute('data-uml-drawn-at');
+      (drawnAt[id] = drawnAt[id] || []).push({ x: box.x, y: box.y, width: box.width, height: box.height });
+    }
+    UMLShared.updatePackageFrames(svg, layoutComponentPackages(parsed, entries, joinedInterfacePorts(parsed), drawnAt));
+  }
+
   function componentLabelLayout(layoutMetadata) {
     var positions = {};
     var source = layoutMetadata && layoutMetadata.positions ? layoutMetadata.positions : {};
@@ -22326,12 +29290,19 @@
     if (window.UMLLayoutCore && typeof window.UMLLayoutCore.containerAspect === 'function') {
       parsed._containerAspect = window.UMLLayoutCore.containerAspect(container);
     }
+    // A compact drawing already carries its callouts and its tight frame.
+    if (parsed.compactLayout && !hasAuthoredComponentLayout(text, parsed.layout)) {
+      renderCompact(container, parsed, colors);
+      UMLShared.autoFitSVG(container);
+      return;
+    }
     var layout = computeLayout(parsed);
     UMLShared.applyLayoutPositions(layout, parsed.layout);
     container.innerHTML = generateSVG(layout, parsed, colors);
     UMLShared.applyLayoutRoutes(container, parsed.layout);
     adjustRenderedComponentLabels(container);
     UMLShared.applyRenderedPositions(container, componentLabelLayout(parsed.layout));
+    refitComponentPackageFrames(container, parsed, layout.entries);
     UMLCallouts.render(container, parsed.layout && parsed.layout.callouts);
     // Compact: trim the auto-fit padding so the final viewBox sits closer
     // to the actual content. The layout itself (node positions, edge
@@ -23689,6 +30660,19 @@
       return aliasToId[ref] || ref;
     }
 
+    // A relationship names each end by alias, bare name, or quoted name:
+    // `User -- "Log In"`.
+    var END = '("[^"]+"|\\S+)';
+    var LABEL = '\\s*(?::\\s*(.*))?$';
+    var generalizationRe = new RegExp('^' + END + '\\s+--\\|>\\s+' + END + '\\s*$');
+    var reverseGeneralizationRe = new RegExp('^' + END + '\\s+<\\|--\\s+' + END + '\\s*$');
+    var dependencyRe = new RegExp('^' + END + '\\s+\\.\\.>\\s+' + END + LABEL);
+    var directedRe = new RegExp('^' + END + '\\s+-->\\s+' + END + LABEL);
+    var associationRe = new RegExp('^' + END + '\\s+--\\s+' + END + LABEL);
+    function endName(ref) {
+      return ref.replace(/^"(.*)"$/, '$1');
+    }
+
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
@@ -23813,21 +30797,21 @@
 
       // Relationships (order matters: longer patterns first)
       // Generalization: A --|> B
-      var genMatch = line.match(/^(\S+)\s+--\|>\s+(\S+)\s*$/);
+      var genMatch = line.match(generalizationRe);
       if (genMatch) {
         relationships.push({
-          from: genMatch[1],
-          to: genMatch[2],
+          from: endName(genMatch[1]),
+          to: endName(genMatch[2]),
           type: 'generalization',
           label: '',
         });
         continue;
       }
-      var reverseGenMatch = line.match(/^(\S+)\s+<\|--\s+(\S+)\s*$/);
+      var reverseGenMatch = line.match(reverseGeneralizationRe);
       if (reverseGenMatch) {
         relationships.push({
-          from: reverseGenMatch[2],
-          to: reverseGenMatch[1],
+          from: endName(reverseGenMatch[2]),
+          to: endName(reverseGenMatch[1]),
           type: 'generalization',
           label: '',
         });
@@ -23835,12 +30819,12 @@
       }
 
       // Include/Extend: A ..> B : <<include>>  or  A ..> B : <<extend>>
-      var dottedMatch = line.match(/^(\S+)\s+\.\.>\s+(\S+)\s*(?::\s*(.*))?$/);
+      var dottedMatch = line.match(dependencyRe);
       if (dottedMatch) {
         var dottedLabelInfo = UMLShared.parseLabelDirectionCue(dottedMatch[3] || '');
         relationships.push({
-          from: dottedMatch[1],
-          to: dottedMatch[2],
+          from: endName(dottedMatch[1]),
+          to: endName(dottedMatch[2]),
           type: 'dependency',
           label: dottedLabelInfo.text,
           labelDirection: dottedLabelInfo.hasDirection,
@@ -23849,12 +30833,12 @@
       }
 
       // Directed association: A --> B
-      var directedMatch = line.match(/^(\S+)\s+-->\s+(\S+)\s*(?::\s*(.*))?$/);
+      var directedMatch = line.match(directedRe);
       if (directedMatch) {
         var directedLabelInfo = UMLShared.parseLabelDirectionCue(directedMatch[3] || '');
         relationships.push({
-          from: directedMatch[1],
-          to: directedMatch[2],
+          from: endName(directedMatch[1]),
+          to: endName(directedMatch[2]),
           type: 'directed',
           label: directedLabelInfo.text,
           labelDirection: directedLabelInfo.hasDirection,
@@ -23863,12 +30847,12 @@
       }
 
       // Association: A -- B
-      var assocMatch = line.match(/^(\S+)\s+--\s+(\S+)\s*(?::\s*(.*))?$/);
+      var assocMatch = line.match(associationRe);
       if (assocMatch) {
         var assocLabelInfo = UMLShared.parseLabelDirectionCue(assocMatch[3] || '');
         relationships.push({
-          from: assocMatch[1],
-          to: assocMatch[2],
+          from: endName(assocMatch[1]),
+          to: endName(assocMatch[2]),
           type: 'association',
           label: assocLabelInfo.text,
           labelDirection: assocLabelInfo.hasDirection,
@@ -27184,6 +34168,9 @@
       var raw = lines[i];
       var trimmed = raw.trim();
       if (!trimmed || trimmed === '@startuml' || trimmed === '@enduml') continue;
+      // A folder tree has no layout modes: a layout preference line
+      // (`layout compact 600x700`, `layout portrait`, …) is not an entry.
+      if (UMLShared.parseLayoutDirective(trimmed)) continue;
 
       var lead = 0;
       for (var k = 0; k < raw.length; k++) {

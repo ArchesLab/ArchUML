@@ -76,13 +76,38 @@ layout horizontal      ← left-to-right (alias: layout LR, layout left-to-right
 layout vertical        ← top-to-bottom (alias: layout TB, layout top-to-bottom)
 layout landscape       ← alias for horizontal
 layout portrait        ← alias for vertical
-layout compact         ← minimise whitespace
+layout compact [WxH]   ← largest readable text in the pane (see below)
 layout square          ← prefer square aspect ratio
 layout auto            ← auto-select (default)
 layout none            ← disable layout engine
 layout shadows on      ← enable drop shadows
 layout shadows off     ← disable drop shadows
 ```
+
+### Compact Layout
+
+`layout compact` lays the diagram out for the largest readable text in its pane: minimal whitespace, no overlapping boxes or labels, and no crossings or bends added in exchange for the smaller drawing. Text is never shrunk or wrapped; the drawing is made smaller around it, and shaped like the pane, so that it needs less scaling to fit.
+
+```
+layout compact           ← pane: the live container, or 900×600 when there is none
+layout compact 600x700   ← pane: 600 by 700 CSS pixels
+```
+
+Give the size when the drawing is rendered somewhere other than where it is shown, for example at build time for a narrow column. A size that is zero or not of the form `WxH` is ignored, and the container is used.
+
+This applies to class, state, sequence, and component diagrams so far. Other diagram types, deployment included, keep the earlier behaviour of `layout compact`: fixed, smaller gaps. A spec with an `@layout` block (positions saved by the visual editor) keeps its authored geometry; the earlier compact spacing is used there and the pane is ignored. A compact drawing that could not be made free of overlaps carries `data-uml-layout-issues` with their count.
+
+In a sequence diagram, a fragment's guard stays at the head of the operand it guards: beside the operator tab when it fits there inside the frame and clear of every lifeline, otherwise on its own line under the tab. An `else` guard starts the line under its divider. A guard widens its frame only when it is wider than the frame its messages need. As in any layout, a guard that crosses lifelines or activation bars covers them with an opaque backdrop.
+
+In class and component diagrams, packages are part of the compact drawing: their names keep clear of other text, an element inside a package it does not belong to counts as an overlap, and the squeeze keeps room for the frames between elements of different packages. In a component diagram, lines still cross package outlines and pass under their names; in a class diagram, compact or not, a relationship goes around the packages that hold neither of its ends and around package names. Where the automatic layout would put an element inside a package it is not in, or two packages on each other, compact layout places the same diagram package by package instead: each package's members, and its inner packages, are laid out together as one block. Such a drawing can have more bends than the placement it replaces, whose packages overlap. A class diagram is placed package by package without `layout compact` as well. In a component diagram whose default drawing only puts frames on each other, or a frame over a component just outside it, compact also tries that drawing with the frames moved apart: it keeps the default arrangement, and with it the straight lines, where moving apart can end every overlap without changing the order of the components. In state diagrams, transitions into a junction or a join, and out of a junction or a fork, may share their stretch at the pseudostate.
+
+In a component diagram, compact may turn and wrap the chain of components to suit the pane: into rows, read row by row and left to right within a row, or top to bottom, one component per row. The author's arrangement and the one the layout would take for a container of the pane's shape are candidates too, and are kept when they read best. To do this, `layout compact` overrides `left to right direction` and `top to bottom direction`, the direction letter of hidden constraints such as `a -[hidden]r- b`, and `skinparam ranksep` / `nodesep` (which ArchUML ignores anyway). It keeps their order: read row by row, the components come in the order the hidden constraints and the authored direction give them. `layout compact` keeps this meaning when a direction line follows it. A port stays on the side of its component that its connectors arrive from, port names are set at the connector-label size, and each connector label sits by its own connector.
+
+In a component diagram, compact also places the components the way a reader follows the connectors, whichever end each connector is written from: a ball-and-socket assembly runs from the component that requires the interface to the one that provides it, and a plain link, which has no direction, leaves the end with more connectors, so a hub that fans out to many consumers comes first and its consumers follow in one column, their edges facing the hub aligned. That arrangement keeps the authored direction and competes with the others on text size, crossings, and bends. A note on a component inside a package lies inside that package; the package is drawn around it, as around the component's joined interfaces. A note across a package outline counts as an overlap.
+
+In a class diagram whose classes form several unconnected groups, compact packs the groups into rows to suit the pane, each with room for the names set beside its lines. Where neither an inheritance hierarchy nor the author fixes the direction, the groups may also be drawn across: two classes side by side, the name along their line, can suit a narrow pane better than the same two stacked with the name beside it.
+
+Teaching callouts are part of a compact drawing (class, state, sequence, and component diagrams). Their text is set at the diagram's base text size, never below the usual callout size; the layout is judged with its callouts in place and keeps the gaps they sit in; and they are drawn with the diagram rather than afterwards in the page, so they are also present when the diagram is rendered in a worker or a hidden tab. The frame keeps the drawing's compact margin around them. Because the page scales a compact drawing to fit its pane, a callout in a class, state, or component diagram prefers room that does not make the drawing smaller there: space inside the drawing, or beside it in the direction the pane has to spare, over a slightly shorter pointer that would widen or lengthen the drawing along its limiting side.
 
 ### Label Direction Cues
 
@@ -598,6 +623,122 @@ class Singleton <<singleton>> {
   + {static} getInstance(): Singleton
   + operation(): void
 }
+@enduml
+</code></pre>
+
+---
+
+### Packages
+
+A package groups the classes declared inside its braces, drawn as in component diagrams (UML 2.5.1, 12.2.4): a rectangle with the name in a tab on the left of its top edge, any stereotype above the name, a solid outline, and no fill. Packages sit behind the classes, they nest to any depth, and they enclose their classes at `@pos` positions. A relationship crosses the outline of a package that holds one of its ends and goes around the others. A name may be qualified with `::` and shows as written.
+
+```
+package opc::partners { ... }
+package opc::partners <<Subsystem>> { ... }
+package "Partner Gateways" as partners { ... }
+```
+
+**Example:**
+
+```
+@startuml
+abstract class Provider {
+  + {abstract} place(order: SupplierOrder)
+}
+package opc::partners {
+  class SupplierProvider {
+    + place(order: SupplierOrder)
+  }
+  class ShuttleProvider {
+    + place(order: SupplierOrder)
+  }
+}
+SupplierProvider --|> Provider
+ShuttleProvider --|> Provider
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+abstract class Provider {
+  + {abstract} place(order: SupplierOrder)
+}
+package opc::partners {
+  class SupplierProvider {
+    + place(order: SupplierOrder)
+  }
+  class ShuttleProvider {
+    + place(order: SupplierOrder)
+  }
+}
+SupplierProvider --|> Provider
+ShuttleProvider --|> Provider
+@enduml
+</code></pre>
+
+---
+
+### Package Diagrams
+
+A `package` line without braces draws a package that does not show its members (UML 2.5.1, 12.2.4): a large rectangle that holds the name, any stereotype above it, and a small empty tab on the left of its top edge. Such a package is a node, like a class: it takes `@pos`, a `#color`, notes, and relationships, and a relationship ends on its outline. Use dependencies between packages for a package diagram, such as the imports between modules.
+
+```
+package infra::http                                 ← a package node; the name shows as written
+package "Message broker" as broker <<framework>>    ← display name, identifier, and stereotype
+loyalty ..> broker                                  ← dependency between packages
+loyalty ..> broker : «use»                          ← with its kind
+services ..> infra                                  ← from one package frame to another
+```
+
+Packages nest to any depth. A package with braces is a frame around what it declares, and its members may be classes, package nodes, or further frames, so one diagram can show some packages opened and others closed:
+
+```
+package infra { package broker; package http }      ← a frame around two package nodes
+```
+
+A dependency may also start or end at a package that shows its members: name the package, and the line stops at its frame. Such a line runs straight where the two ends face each other and otherwise takes one corner. A dependency between a package and something that lies inside it or across its outline is not drawn.
+
+The automatic layout keeps packages apart. Where its placement would put an element inside a package it is not in, or two packages on each other, the diagram is placed package by package instead: the members of a package, its inner packages included, are laid out together, and the package takes its place among its siblings as one block, at any depth of nesting. Relationships go around the packages that hold neither of their ends and around every package's name.
+
+**Example — modules and the packages that hold them:**
+
+```
+@startuml
+package services {
+  package website {
+    package checkout
+    package clients
+  }
+  package loyalty
+}
+package infra {
+  package broker
+  package http
+}
+checkout ..> clients
+clients ..> http
+loyalty ..> broker
+broker ..> http
+@enduml
+```
+
+<pre><code class="language-uml-class">
+@startuml
+package services {
+  package website {
+    package checkout
+    package clients
+  }
+  package loyalty
+}
+package infra {
+  package broker
+  package http
+}
+checkout ..> clients
+clients ..> http
+loyalty ..> broker
+broker ..> http
 @enduml
 </code></pre>
 
@@ -1408,6 +1549,59 @@ Rejected --> [*]
 @enduml
 </code></pre>
 
+### Other Pseudostates
+
+A pseudostate is declared like a choice: `state Name <<kind>>`. The name
+identifies it in transitions; the diagram shows only its symbol.
+
+| Declaration | Symbol | Use |
+| --- | --- | --- |
+| `state Name <<choice>>` | diamond | Branch on guards evaluated when the transition reaches it |
+| `state Name <<junction>>` | small filled circle | Merge or split transition paths with static guards |
+| `state Name <<history>>` | circled **H** | Re-enter the sub-state its region was last in |
+| `state Name <<deepHistory>>` | circled **H\*** | The same, restoring nested sub-states as well |
+| `state Name <<fork>>` | bar | Split one transition into concurrent ones |
+| `state Name <<join>>` | bar | Merge concurrent transitions into one |
+| `state Name <<terminate>>` | cross | End the state machine's own lifetime |
+
+`<<shallowHistory>>` and `<<history*>>` are accepted spellings of the two
+history kinds. A fork or join bar lies across the layout direction: horizontal
+under `layout vertical`, vertical under `layout horizontal`. Declare a history
+pseudostate inside the composite state whose region it remembers.
+
+<pre><code class="language-uml-state">
+@startuml
+[*] --> Idle
+state Split <<fork>>
+state Merge <<join>>
+state Printing {
+  state Resume <<history>>
+  [*] --> Feeding
+  Feeding --> Inking : sheet ready
+}
+Idle --> Split : print
+Split --> Printing
+Split --> Logging
+Printing --> Merge : done
+Logging --> Merge : written
+Merge --> [*]
+Paused --> Resume : resume
+Printing --> Paused : pause
+@enduml
+</code></pre>
+
+### State Stereotypes
+
+Any other `<<name>>` on a state declaration is a stereotype, shown in
+guillemets above the state's name. It works on simple and composite states.
+
+```
+state Ready <<stable>>
+state Active <<subsystem>> {
+  state Running
+}
+```
+
 ---
 
 ## Component Diagrams
@@ -1575,11 +1769,11 @@ o_cust --> crm_cust
 
 ---
 
-### Display Names, Keywords & Layout Direction
+### Display Names & Layout Direction
 
 ```
 component "Display Name" as alias                ← draws the display name; the alias is the id
-component "Display Name" as alias <<keyword>>    ← adds «keyword» as a second, italic line
+component "Display Name" as alias <<keyword>>    ← adds «keyword» above the name (see Stereotypes below)
 component "Display Name" as alias <<keyword>> { ... }
 
 layout vertical      ← top to bottom, whatever the shape of the page
@@ -1674,6 +1868,116 @@ api_enroll --> web_enroll : POST /v1/enrollments
 
 Here the consumer is pinned below its provider, so the ball sits on the provider's lower side and the socket on the
 consumer's upper side, and the line runs straight down between them.
+
+---
+
+### Stereotypes
+
+A stereotype names the kind of component (UML 2.5.1, 12.3.4). Write it after the name or alias, before any `#color`, texture, `dashed`, or port block. A `#color` may also come before it.
+
+```
+component OPC <<service>>
+component "Trip Website" as Website <<web application>> {
+  portout "orders" as w_out
+}
+component Bank <<external>> #lightblue
+component Archive #lightblue <<repository>> dashed
+component Gateway <<Service, External>>       ← two stereotypes
+component Gateway <<Service>> <<External>>    ← the same two
+[Ledger] <<repository>>
+```
+
+Several stereotypes show as one list in a single pair of guillemets, spelled as written: «Service, External». The keywords are centered in plain face above the centered bold name, and the component icon stays in the corner. A component without a stereotype keeps its one-line header.
+
+A connector may carry a stereotype and a property string (UML 2.5.1, 11.2.4). `<<x>>` in a connector label shows as «x»:
+
+```
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+```
+
+**Example:**
+
+```
+@startuml
+component OPC <<service>> {
+  portout "trip events" as opc_pub
+}
+component trips <<topic exchange>> {
+  portin "publish" as ex_in
+  portout "deliver" as ex_out
+}
+component Loyalty <<service>> {
+  portin "events" as l_in
+}
+opc_pub -- ex_in : <<publish>>
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+@enduml
+```
+
+<pre><code class="language-uml-component">
+@startuml
+component OPC <<service>> {
+  portout "trip events" as opc_pub
+}
+component trips <<topic exchange>> {
+  portin "publish" as ex_in
+  portout "deliver" as ex_out
+}
+component Loyalty <<service>> {
+  portin "events" as l_in
+}
+opc_pub -- ex_in : <<publish>>
+ex_out -- l_in : <<subscribe>> {binding = "trip.confirmed"}
+@enduml
+</code></pre>
+
+---
+
+### Packages
+
+A UML package groups the components declared inside its braces (UML 2.5.1, 12.2.4). It is drawn as a rectangle with a tab on the left of its top edge; the tab holds the name, with any stereotype above it. Packages nest, have a solid outline, and sit behind the diagram. They are not routing obstacles: connectors and dependencies cross them. A package encloses its members wherever they are placed, including at `@pos` positions.
+
+```
+package Headliner { ... }
+package "Order Processing Center" as OPC <<Subsystem>> { ... }
+package Headliner { component OPC; component Loyalty }    ← one-line block
+```
+
+A component belongs to the innermost package it is declared in. A component that is only named by a connector inside a package does not join it. The automatic layout does not keep a package's members together, so it can place another component inside a package. The package then lists that component in its `data-package-overlaps` attribute; move it out with `@pos`, or use `layout compact`, which places such a diagram package by package. A `rectangle { ... }` block is not drawn; its contents are read as top-level declarations.
+
+**Example:**
+
+```
+@startuml
+package Headliner {
+  component Website <<web application>> {
+    portout "orders" as w_out
+  }
+  component OPC <<service>> {
+    portin "orders" as opc_in
+  }
+}
+component Bank <<external>>
+w_out -- opc_in : HTTPS
+OPC ..> Bank : capture payment
+@enduml
+```
+
+<pre><code class="language-uml-component">
+@startuml
+package Headliner {
+  component Website <<web application>> {
+    portout "orders" as w_out
+  }
+  component OPC <<service>> {
+    portin "orders" as opc_in
+  }
+}
+component Bank <<external>>
+w_out -- opc_in : HTTPS
+OPC ..> Bank : capture payment
+@enduml
+</code></pre>
 
 ---
 
@@ -1956,6 +2260,7 @@ its relationships in the diagram.
 
 ```
 Actor -- UseCase                          ← association (no arrow)
+Actor -- "Use Case Name"                  ← an end may be a quoted name
 Actor --> UseCase                         ← directed association
 UseCase ..> UseCase : <<include>>         ← include (mandatory sub-flow)
 UseCase ..> UseCase : <<extend>>          ← extend (inserted when its condition is true)
@@ -3985,7 +4290,7 @@ Load `css/callouts.css` from the ArchUML package alongside `uml-bundle.js`. SEBo
 callout <side> of <target> : <brief explanation>
 ```
 
-The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, leaves a neighbour's nearby approach clear so one wide box cannot starve the next, checks the triangular pointer for collisions, and favors short pointers. When every short path is blocked, it would rather graze a connector than run through a relationship name. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships.
+The side (`left`, `right`, `top`, or `bottom`) is a placement preference. The renderer considers nearby positions on all four sides, including empty space within interaction frames and system boundaries. It avoids covering model labels, boxes, and other callouts, leaves a neighbour's nearby approach clear so one wide box cannot starve the next, checks the triangular pointer for collisions, and favors short pointers. When every short path is blocked, it would rather graze a connector than run through a relationship name. Longer pointers widen so they read as the tail of the box rather than as a UML line. Boxes stay compact, and the pointer is painted as part of the same filled outline as the box. It adjusts wrapping to fit nearby space. Callouts do not change model layout or introduce UML relationships. In a `layout compact` class, state, sequence, or component diagram they are placed with the same rules while the layout is chosen, and set at the diagram's base text size; in class, state, and component diagrams a placement that would make the drawing smaller in its pane is also priced (see [Compact Layout](#compact-layout)).
 
 | Target | Example | Meaning |
 | --- | --- | --- |
@@ -4442,9 +4747,13 @@ Output JSON format:
 
 `alt` · `loop` · `opt` · `par` · `break` · `critical` · `ref` · `neg`
 
+### Stereotypes and Packages (Class, Component)
+
+`component Name <<Kind>>` · `component Name <<A, B>>` · `A -- B : <<kind>> {property = "value"}` · `package Name { … }` · `package "Display Name" as Id <<Kind>> { … }` · `package Name` *(class diagrams: a package node)*
+
 ### Layout Hints
 
-`layout horizontal` · `layout vertical` · `layout landscape` · `layout portrait` · `layout compact` · `layout square` · `layout auto`
+`layout horizontal` · `layout vertical` · `layout landscape` · `layout portrait` · `layout compact [WxH]` · `layout square` · `layout auto`
 
 ### Note Targets
 
