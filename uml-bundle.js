@@ -4196,6 +4196,16 @@
     };
   }
 
+  // The diagram each figure container was drawn from. A page script that
+  // loads after a figure was drawn (a text-alternative describer, say) reads
+  // it through UMLShared.figureSource, because drawing replaces the source.
+  var figureSources = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+  function figureSource(container) {
+    var source = figureSources && container ? figureSources.get(container) : null;
+    return source ? { type: source.type, text: source.text } : null;
+  }
+
   function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
     const attributeCaption = (explicitCaption || '').trim();
@@ -4214,6 +4224,7 @@
     container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
+    if (figureSources) figureSources.set(container, { type: normalized, text: captionInfo.source });
     figure.appendChild(container);
 
     var figcaption = document.createElement('figcaption');
@@ -7021,6 +7032,7 @@
     getThemeColors: getThemeColors,
     prepareDiagramContainer: prepareDiagramContainer,
     applySvgAccessibility: applySvgAccessibility,
+    figureSource: figureSource,
     svgOpen: svgOpen,
     svgClose: svgClose,
     parsePackageOpener: parsePackageOpener,
