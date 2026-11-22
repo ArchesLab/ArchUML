@@ -1,0 +1,516 @@
+{
+  "about": "The refusal table of the UML-view editing spec (docs/superpowers/specs/2026-11-12-c4-uml-view-editing.md §5.1), copied verbatim, plus the proposed row link-self (plan Task 33), as the alignment review (CP-4) of Task 33 Step 6 left it: interfaces/add-element and interfaces/neighbour name \"a context, container, or component view\" instead of \"a C4 view\", and same-element-instances speaks of instances, not copies. The sentence of interfaces/declared-elsewhere for an addition on a neighbour, which names no interface yet, is Task 42b's (Ruling U12), marked for the CP-4 wording review. ‹…› are placeholders. uml-refusals.test.js fills every row with `fill` and compares it with parts.umlRefusals.verdict; a row whose words depend on the model (`cases`) is compared case by case with the texts written out below from the spec's notes. `existing` rows use the editor's existing sentences (c4-editor-state.js). The words change only through the alignment review (CP-4), here and in c4-editor-uml-refusals.js together.",
+  "fill": {
+    "subject": "node Ingress load balancer",
+    "Scope": "Enrollment Policy",
+    "Name": "Seat Gateway",
+    "type": "component",
+    "view title": "Component view: Registration API",
+    "Box": "Billing System",
+    "Deep name": "Billing Ledger",
+    "A": "Seat Holds",
+    "B": "Seat_Holds",
+    "Source": "PrerequisiteRule",
+    "Target": "EnrollmentRule",
+    "Sender": "Planner Web App",
+    "Receiver": "Registration Coordinator",
+    "Child": "Live Seat Board",
+    "Parent": "Course Registration",
+    "operator": "opt",
+    "Node": "Ingress load balancer",
+    "Element": "Registration API",
+    "description": "forwards HTTPS requests to",
+    "Node A": "API pod",
+    "Node B": "Canary pod",
+    "Interface": "Enrollment API",
+    "Owner": "Billing Gateway",
+    "uses | provides": "uses",
+    "Consumer": "Advisor Dashboard",
+    "Provider": "Records Service"
+  },
+  "rows": [
+    {
+      "code": "read-only",
+      "summary": "Read-only",
+      "sentence": null,
+      "offer": null,
+      "existing": true
+    },
+    {
+      "code": "yaml-errors",
+      "summary": "Fix the YAML errors first",
+      "sentence": null,
+      "offer": null,
+      "existing": true
+    },
+    {
+      "code": "locked",
+      "summary": "Given by the task",
+      "sentence": "Locked: ‹subject› or a part of it is given by the task, so it cannot be changed here.",
+      "offer": null,
+      "note": "‹subject› is an element's name as today, or \"step 3 of ‹scenario›\", \"the steps of ‹scenario›\", \"node ‹name›\", \"the link from ‹A› to ‹B›\", \"the positions in this view\", \"the lifeline order in this view\"."
+    },
+    {
+      "code": "stale",
+      "summary": null,
+      "sentence": "The drawing changed before this edit was applied, so nothing was changed. Try again.",
+      "offer": null
+    },
+    {
+      "code": "outside-view",
+      "summary": "Shown from outside ‹Scope›",
+      "sentence": "‹Name› is a ‹type› outside ‹Scope›. It is shown here because ‹Scope› works with it. Rename or delete it in ‹view title›.",
+      "offer": "Open ‹view title›"
+    },
+    {
+      "code": "outside-view/lifted-end",
+      "summary": "Ends inside ‹Box›",
+      "sentence": "This line ends at ‹Deep name›, a ‹type› inside ‹Box›, which this view draws as one box. Move or turn that end in ‹view title›, where ‹Deep name› is drawn.",
+      "offer": "Open ‹view title›"
+    },
+    {
+      "code": "outside-view/both-ends",
+      "summary": "Both ends are outside ‹Scope›",
+      "sentence": "‹A› and ‹B› are both outside ‹Scope›, so a line between them would not appear in this view. Add it in ‹view title›.",
+      "offer": "Open ‹view title›"
+    },
+    {
+      "code": "not-in-model/note",
+      "summary": "No notes in this design model",
+      "sentence": "This design model has no place for notes on a diagram. Write the explanation in the element's description.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/duplicate",
+      "summary": "One identity per element",
+      "sentence": "Duplicating is not available here: every element has one identity in the model. Add a new element and name it.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/association",
+      "summary": "Not recorded in this design model",
+      "sentence": "This design model records three kinds of line between code elements: extends, implements, and a collaborator, drawn as a dependency. It has no place for a composition, an aggregation, or an association, although UML has them. Draw a dependency and say what ‹Source› asks ‹Target› for.",
+      "offer": null
+    },
+    {
+      "code": "extends-target",
+      "summary": "‹Target› is not a code element",
+      "sentence": "‹Source› can extend or implement a code element. ‹Target› is a ‹type›.",
+      "offer": "Open code of ‹Target›",
+      "note": "For a component it continues \"Its classes and interfaces are in its code view.\"; for a container, system, or person, \"Classes belong to the components inside a container.\"",
+      "offerNote": "a component only"
+    },
+    {
+      "code": "extends-kind",
+      "summary": "‹Source kind› cannot extend ‹target kind›",
+      "sentence": "‹Source› is ‹its kind› and ‹Target› is ‹its kind›. A class extends a class, and an interface extends an interface.",
+      "offer": null,
+      "note": "Each kind with its article: \"a class\", \"an interface\". For a class and an interface it continues \"To promise an interface's operations, draw a realization.\" Task 29 ruling (progress.md U6): a realization refused with extends-kind says \"cannot implement\"."
+    },
+    {
+      "code": "implements-target",
+      "summary": "Only an interface can be implemented",
+      "sentence": "‹Target› is ‹its kind›. A class implements an interface; to build on a class, draw a generalization.",
+      "offer": null
+    },
+    {
+      "code": "extends-cycle",
+      "summary": "Would make a cycle",
+      "sentence": "‹Target› already extends ‹Source›, so ‹Source› cannot extend ‹Target›.",
+      "offer": null
+    },
+    {
+      "code": "derived/keyword",
+      "summary": "Shows the element's kind",
+      "sentence": "The keyword shows the kind of this code element. Change its kind in the inspector.",
+      "offer": null
+    },
+    {
+      "code": "derived/function-operation",
+      "summary": "Drawn from the function's name",
+      "sentence": "A function is drawn with one operation, its own call. Edit the line to give it a signature; to remove it, change the element's kind.",
+      "offer": null
+    },
+    {
+      "code": "step/not-available",
+      "summary": "No step possible here",
+      "sentence": "A step runs along a relationship the design has, or answers an earlier request in this scenario. A step from ‹Sender› to ‹Receiver› does neither at this place.",
+      "offer": null
+    },
+    {
+      "code": "step/no-relationship",
+      "summary": "No relationship from ‹Sender›",
+      "sentence": "‹Sender› has no relationship to ‹Receiver›, and no earlier step asks ‹Sender› for something it could answer. A scenario uses the collaborations the design has: ‹Sender› can answer an element that asked it earlier, or the message can go through an element that already works with ‹Receiver›.",
+      "offer": "Declare a relationship from ‹Sender› to ‹Receiver›…",
+      "offerProfiles": [
+        "expert"
+      ]
+    },
+    {
+      "code": "step/reply-without-request",
+      "summary": "No request to answer yet",
+      "sentence": "‹Sender› can reply to ‹Receiver› only after an unanswered step from ‹Receiver› to ‹Sender›, earlier in this scenario or branch. A reply travels back along the request's relationship and needs none of its own.",
+      "offer": "Add the request from ‹Receiver› to ‹Sender› first…"
+    },
+    {
+      "code": "step/asynchronous-no-reply",
+      "summary": "No reply to an asynchronous message",
+      "sentence": "The relationship from ‹Receiver› to ‹Sender› is asynchronous: ‹Receiver› does not wait, so no reply travels back along it. If ‹Sender› must tell ‹Receiver› something, that is a collaboration of its own.",
+      "offer": "Declare a relationship from ‹Sender› to ‹Receiver›…",
+      "offerProfiles": [
+        "expert"
+      ],
+      "offerNote": "the same \"Declare…\" offer"
+    },
+    {
+      "code": "step/nested-ends",
+      "summary": "One is inside the other",
+      "sentence": "‹Child› is inside ‹Parent›. A step runs between two elements that are not inside each other.",
+      "offer": null
+    },
+    {
+      "code": "step/same-element",
+      "summary": "A step needs two elements",
+      "sentence": "A step runs between two elements. What ‹Name› does on its own belongs in its responsibilities.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/lifeline",
+      "summary": "Lifelines come from steps",
+      "sentence": "A lifeline appears when a step uses its element. Choose Message, then the sender, then the receiver; Another element… lists the elements a step can reach from the sender.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/sequence-detail",
+      "summary": "Not recorded in a scenario",
+      "sentence": "Activation bars, create and destroy marks, and lost and found messages have no place in this design model's scenarios. A scenario records who asks whom for what, in order.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/fragment",
+      "summary": "Not one of the five fragments",
+      "sentence": "A scenario in this design model has five fragments: alt, opt, loop, par, and break.",
+      "offer": null
+    },
+    {
+      "code": "single-branch",
+      "summary": "‹operator› has one branch",
+      "sentence": "‹operator› has one branch. Use alt for alternatives or par for branches that run at the same time.",
+      "offer": null
+    },
+    {
+      "code": "last-branch",
+      "summary": "A fragment keeps one branch",
+      "sentence": "This is the fragment's only branch. Delete the fragment, or unwrap it to keep its steps.",
+      "offer": null
+    },
+    {
+      "code": "fragment-into-itself",
+      "summary": "Cannot go inside itself",
+      "sentence": "A fragment cannot be moved into one of its own branches.",
+      "offer": null
+    },
+    {
+      "code": "derived/arrow",
+      "summary": "Follows the model",
+      "sentence": "The arrow follows the model: solid for a call, dashed for a reply, an open arrowhead for a message, event, or stream. To change it, change the connector of the relationship this step runs along, or the step's direction.",
+      "offer": null
+    },
+    {
+      "code": "derived/box",
+      "summary": "Follows the model",
+      "sentence": "This box shows that these lifelines belong to ‹Name›. It follows the model.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/artifact",
+      "summary": "Host a container or system instead",
+      "sentence": "A deployment view of this design model shows which containers and software systems run on which nodes. It has no place for artifacts; host a container or a system on the node.",
+      "offer": null
+    },
+    {
+      "code": "infrastructure-leaf",
+      "summary": "Infrastructure hosts nothing",
+      "sentence": "‹Node› is infrastructure, such as a load balancer: it hosts nothing and holds no nodes.",
+      "offer": null
+    },
+    {
+      "code": "node-into-itself",
+      "summary": "Cannot go inside itself",
+      "sentence": "‹Node› cannot be moved into itself or into a node inside it.",
+      "offer": null
+    },
+    {
+      "code": "already-hosted",
+      "summary": "Already runs there",
+      "sentence": "‹Node› already hosts ‹Element›.",
+      "offer": null
+    },
+    {
+      "code": "derived/path",
+      "summary": "Drawn from a relationship",
+      "sentence": "This path is drawn from the relationship from ‹Source› to ‹Target› (‹description›), because both run on these nodes. Change that relationship, or add a link between the two nodes.",
+      "offer": "Show the relationship"
+    },
+    {
+      "code": "link-ends",
+      "summary": "A link joins two nodes",
+      "sentence": "A link joins two nodes. To show that two elements talk, add a relationship between them.",
+      "offer": null
+    },
+    {
+      "code": "link-self",
+      "summary": "A node cannot link to itself",
+      "sentence": "A link joins two different nodes. What runs inside ‹Node› is shown by what it hosts and by the nodes inside it.",
+      "offer": null,
+      "proposed": true
+    },
+    {
+      "code": "link-exists",
+      "summary": "These nodes are already linked",
+      "sentence": "‹Node A› already has a link to ‹Node B›. Edit that link.",
+      "offer": "Show the link"
+    },
+    {
+      "code": "same-element-instances",
+      "summary": "Both are instances of ‹Element›",
+      "sentence": "Both boxes are instances of ‹Element›, running on two nodes. To show that the instances talk to each other, add a link between ‹Node A› and ‹Node B›.",
+      "offer": "Add a link from ‹Node A› to ‹Node B›…"
+    },
+    {
+      "code": "layout/inside-node",
+      "summary": "Laid out inside ‹Parent›",
+      "sentence": "‹Name› is inside ‹Parent›, and what is inside a node is laid out for you. Move ‹Parent›, or use Move to… to put ‹Name› somewhere else.",
+      "offer": null
+    },
+    {
+      "code": "not-in-model/port",
+      "summary": "Offer or use an interface instead",
+      "sentence": "This design model has no ports. An element offers an interface (a ball) and uses one (a socket).",
+      "offer": null
+    },
+    {
+      "code": "interfaces/add-element",
+      "summary": "Elements appear through interfaces",
+      "sentence": "This view shows ‹Scope› and the elements that share an interface with it. Add elements in a context, container, or component view; they appear here once they use or provide an interface.",
+      "offer": null
+    },
+    {
+      "code": "interfaces/declared-elsewhere",
+      "summary": "Declared on ‹Owner›",
+      "sentence": "‹Interface› is declared on ‹Owner›. Rename or remove it in the interfaces view of ‹Owner›.",
+      "offer": "Open interfaces of ‹Owner›"
+    },
+    {
+      "code": "interfaces/neighbour",
+      "summary": "Here because of an interface",
+      "sentence": "‹Name› appears here because it ‹uses | provides› ‹Interface›. Delete that use, or delete the element in a context, container, or component view.",
+      "offer": null
+    },
+    {
+      "code": "interfaces/assembly-ends",
+      "summary": "Delete it and draw the new one",
+      "sentence": "A line joins one use to one interface. To change it, delete this use and draw the new one.",
+      "offer": null
+    },
+    {
+      "code": "interfaces/assembly-direction",
+      "summary": "The provider keeps the ball",
+      "sentence": "The ball is on the side of the element that provides ‹Interface›. To turn the line around, describe an interface on ‹Consumer› and let ‹Provider› use it.",
+      "offer": null
+    },
+    {
+      "code": "derived/assembly-label",
+      "summary": "Lists the operations used",
+      "sentence": "The label lists the operations ‹Consumer› uses. Change them under Uses in the relationship.",
+      "offer": "Show the relationship"
+    },
+    {
+      "code": "layout/assembly",
+      "summary": "Routed for you",
+      "sentence": "The line between a ball and its socket is routed for you, so the two stay joined. Move the elements to change it.",
+      "offer": null
+    },
+    {
+      "code": "layout/port",
+      "summary": "Placed for you",
+      "sentence": "A ball or socket is placed for you, on the side of its element that faces the other end. Move the elements to turn it.",
+      "offer": null
+    },
+    {
+      "code": "layout/inheritance-line",
+      "summary": "Routed for you",
+      "sentence": "Generalization and realization lines are drawn as one tree for each parent, so they are routed for you. Move the elements to change them.",
+      "offer": null
+    },
+    {
+      "code": "layout/parallel-lines",
+      "summary": "Routed for you",
+      "sentence": "Two lines of this kind join ‹A› and ‹B›, so they are routed for you. Move the elements to change them.",
+      "offer": null
+    },
+    {
+      "code": "layout/label",
+      "summary": "Follows its line",
+      "sentence": "Labels follow their lines here. Move a bend, or the elements the line joins.",
+      "offer": null
+    }
+  ],
+  "cases": {
+    "extends-target": [
+      {
+        "values": {
+          "Source": "PrerequisiteRule",
+          "Target": "Enrollment Policy",
+          "type": "component"
+        },
+        "summary": "Enrollment Policy is not a code element",
+        "sentence": "PrerequisiteRule can extend or implement a code element. Enrollment Policy is a component. Its classes and interfaces are in its code view.",
+        "offer": "Open code of Enrollment Policy"
+      },
+      {
+        "values": {
+          "Source": "PrerequisiteRule",
+          "Target": "Registration API",
+          "type": "container"
+        },
+        "summary": "Registration API is not a code element",
+        "sentence": "PrerequisiteRule can extend or implement a code element. Registration API is a container. Classes belong to the components inside a container.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "PrerequisiteRule",
+          "Target": "Course Registration",
+          "type": "system"
+        },
+        "summary": "Course Registration is not a code element",
+        "sentence": "PrerequisiteRule can extend or implement a code element. Course Registration is a software system. Classes belong to the components inside a container.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "PrerequisiteRule",
+          "Target": "Student",
+          "type": "person"
+        },
+        "summary": "Student is not a code element",
+        "sentence": "PrerequisiteRule can extend or implement a code element. Student is a person. Classes belong to the components inside a container.",
+        "offer": null
+      }
+    ],
+    "extends-kind": [
+      {
+        "values": {
+          "Source": "PrerequisiteRule",
+          "Target": "EnrollmentRule",
+          "relation": "extends",
+          "sourceKind": "class",
+          "targetKind": "interface"
+        },
+        "summary": "A class cannot extend an interface",
+        "sentence": "PrerequisiteRule is a class and EnrollmentRule is an interface. A class extends a class, and an interface extends an interface. To promise an interface's operations, draw a realization.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "RuleBase",
+          "Target": "EnrollmentRule",
+          "relation": "extends",
+          "sourceKind": "abstract_class",
+          "targetKind": "interface"
+        },
+        "summary": "An abstract class cannot extend an interface",
+        "sentence": "RuleBase is an abstract class and EnrollmentRule is an interface. A class extends a class, and an interface extends an interface. To promise an interface's operations, draw a realization.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "EnrollmentRule",
+          "Target": "EnrollmentPolicy",
+          "relation": "extends",
+          "sourceKind": "interface",
+          "targetKind": "class"
+        },
+        "summary": "An interface cannot extend a class",
+        "sentence": "EnrollmentRule is an interface and EnrollmentPolicy is a class. A class extends a class, and an interface extends an interface.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "Grade",
+          "Target": "EnrollmentPolicy",
+          "relation": "extends",
+          "sourceKind": "enum",
+          "targetKind": "abstract_class"
+        },
+        "summary": "An enum cannot extend an abstract class",
+        "sentence": "Grade is an enum and EnrollmentPolicy is an abstract class. A class extends a class, and an interface extends an interface.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "EnrollmentRule",
+          "Target": "Auditable",
+          "relation": "implements",
+          "sourceKind": "interface",
+          "targetKind": "interface"
+        },
+        "summary": "An interface cannot implement an interface",
+        "sentence": "EnrollmentRule is an interface and Auditable is an interface. A class, an abstract class, or an enum implements an interface. To build on an interface, draw a generalization.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Source": "checkPrerequisites",
+          "Target": "EnrollmentRule",
+          "relation": "implements",
+          "sourceKind": "function",
+          "targetKind": "interface"
+        },
+        "summary": "A function cannot implement an interface",
+        "sentence": "checkPrerequisites is a function and EnrollmentRule is an interface. A class, an abstract class, or an enum implements an interface.",
+        "offer": null
+      }
+    ],
+    "implements-target": [
+      {
+        "values": {
+          "Target": "EnrollmentPolicy",
+          "targetKind": "class"
+        },
+        "summary": "Only an interface can be implemented",
+        "sentence": "EnrollmentPolicy is a class. A class implements an interface; to build on a class, draw a generalization.",
+        "offer": null
+      },
+      {
+        "values": {
+          "Target": "Grade",
+          "targetKind": "enum"
+        },
+        "summary": "Only an interface can be implemented",
+        "sentence": "Grade is an enum. A class implements an interface; to build on a class, draw a generalization.",
+        "offer": null
+      }
+    ],
+    "interfaces/declared-elsewhere": [
+      {
+        "values": {
+          "Interface": "Enrollment API",
+          "Owner": "Billing Gateway"
+        },
+        "summary": "Declared on Billing Gateway",
+        "sentence": "Enrollment API is declared on Billing Gateway. Rename or remove it in the interfaces view of Billing Gateway.",
+        "offer": "Open interfaces of Billing Gateway"
+      },
+      {
+        "values": {
+          "Owner": "Billing Gateway"
+        },
+        "summary": "Declared on Billing Gateway",
+        "sentence": "Each element declares its own interfaces. Add one to Billing Gateway in the interfaces view of Billing Gateway.",
+        "offer": "Open interfaces of Billing Gateway"
+      }
+    ]
+  }
+}
