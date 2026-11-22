@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "core": [
+    "diagram-editor/de-operations.js",
+    "diagram-editor/de-geometry.js",
+    "diagram-editor/de-scene.js",
+    "diagram-editor/de-selection.js",
+    "diagram-editor/de-viewport.js",
+    "diagram-editor/de-commands.js",
+    "diagram-editor/de-gestures-routes.js",
+    "diagram-editor/de-gestures-move.js",
+    "diagram-editor/de-gestures-connect.js",
+    "diagram-editor/de-gestures-palette.js",
+    "diagram-editor/de-gestures-sequence.js",
+    "diagram-editor/de-gestures-marquee.js",
+    "diagram-editor/de-menus.js",
+    "diagram-editor/de-inline.js",
+    "diagram-editor/de-placing.js",
+    "diagram-editor/de-surface-classic.js",
+    "diagram-editor/de-mount.js"
+  ],
+  "text": [
+    "diagram-editor/text/te-schemas.js",
+    "diagram-editor/text/te-read.js",
+    "diagram-editor/text/te-layout.js",
+    "diagram-editor/text/te-elements.js",
+    "diagram-editor/text/te-relations.js",
+    "diagram-editor/text/te-sequence.js",
+    "diagram-editor/text/te-source.js",
+    "diagram-editor/text/te-adapter.js"
+  ]
+}
