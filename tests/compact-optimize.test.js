@@ -92,6 +92,26 @@ test('passes count every call to realize and never exceed the budget', () => {
   assert.ok(result.passes <= UMLCompactLayout.passBudget(20, 11), `${result.passes} passes`);
 });
 
+// An adapter can ask how many widenings its reference would get: every
+// other candidate keeps a pass to be drawn and one to be squeezed, and the
+// reference itself spent one (8 passes for 2 boxes).
+[[1, 3], [3, 3], [4, 1], [5, 0], [9, 0]].forEach(([count, repairs]) => {
+  test(`with ${count} candidates and 8 passes an overlapping reference gets ${repairs} widenings`, () => {
+    assert.equal(UMLCompactLayout.referenceRepairs({ boxes: 2, edges: 0 }, count), repairs);
+  });
+});
+
+[[4, true], [5, false]].forEach(([count, widened]) => {
+  test(`with ${count} candidates and 8 passes the overlapping reference is ${widened ? '' : 'not '}widened before the others are drawn`, () => {
+    const overlapping = candidate('ref', { A: { x: 0, y: 0 }, B: { x: 50, y: 0 } });
+    const others = Array.from({ length: count - 1 }, (_, i) => candidate(`c${i}`, { A: { x: 0, y: 0 }, B: { x: 300 + 10 * i, y: 0 } }));
+    const { adapter, log } = fakeAdapter({ candidates: [overlapping, ...others] });
+    UMLCompactLayout.optimize(adapter, PANE);
+    assert.equal(log[0].tag, 'ref');
+    assert.equal(log[1].tag === 'ref', widened, `second pass drew ${log[1].tag}`);
+  });
+});
+
 // ── squeeze, verify, select ───────────────────────────────────────────
 
 test('the squeezed drawing is chosen when it is valid', () => {

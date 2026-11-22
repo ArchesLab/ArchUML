@@ -3580,6 +3580,68 @@
     });
   }
 
+  // The first thing the frames drawn around `boxes` clash with, as the two
+  // rectangles involved: a frame over an element it does not hold, or two
+  // frames on each other, neither enclosing the other. Null when none.
+  function firstPackageClash(packages, boxes, style) {
+    var ids = Object.keys(boxes);
+    var frames = layoutPackageFrames(packages, function(id) { return boxes[id] || null; }, ids, style);
+    for (var i = 0; i < frames.length; i++) {
+      if (frames[i].overlaps.length) return [frames[i].outer, boxes[frames[i].overlaps[0]]];
+    }
+    for (var a = 0; a < frames.length; a++) {
+      for (var b = a + 1; b < frames.length; b++) {
+        if (packageEncloses(packages, frames[a].id, frames[b].id) || packageEncloses(packages, frames[b].id, frames[a].id)) continue;
+        var p = frames[a].outer, q = frames[b].outer;
+        if (p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height) return [p, q];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The top-left positions of `boxes` ({id: {x, y, width, height}}) with
+   * their package frames moved off each other and off the elements they do
+   * not hold, `gap` apart; null when nothing clashes, or when moving apart
+   * cannot end the clashes. Each clash is undone on the axis where the two
+   * overlap least: every element from where the later of the two starts
+   * moves on by the overlap and `gap`. The elements keep their order on
+   * both axes, and elements on the same side of each cut keep their
+   * offsets, so straight edges stay straight. An element lying between a
+   * package's members on both axes is not moved out by this (that takes a
+   * new order), and the clashes then remain.
+   */
+  function separatedPackagePositions(packages, boxes, style, gap) {
+    if (!packages || !packages.length) return null;
+    var ids = Object.keys(boxes);
+    var placed = createStringMap();
+    ids.forEach(function(id) {
+      placed[id] = { x: boxes[id].x, y: boxes[id].y, width: boxes[id].width, height: boxes[id].height };
+    });
+    // Each cut moves at least one element on for good, so a placement that
+    // can be separated is within a few cuts per element.
+    var maxCuts = 2 * (ids.length + packages.length);
+    for (var cut = 0; cut <= maxCuts; cut++) {
+      var clash = firstPackageClash(packages, placed, style);
+      if (!clash) {
+        if (!cut) return null;
+        var positions = createStringMap();
+        ids.forEach(function(id) { positions[id] = { x: placed[id].x, y: placed[id].y }; });
+        return positions;
+      }
+      var p = clash[0], q = clash[1];
+      var overlapX = Math.min(p.x + p.width, q.x + q.width) - Math.max(p.x, q.x);
+      var overlapY = Math.min(p.y + p.height, q.y + q.height) - Math.max(p.y, q.y);
+      var axis = overlapX < overlapY ? 'x' : 'y', size = axis === 'x' ? 'width' : 'height';
+      var later = p[axis] + p[size] / 2 <= q[axis] + q[size] / 2 ? q : p;
+      var by = Math.min(overlapX, overlapY) + gap;
+      ids.forEach(function(id) {
+        if (placed[id][axis] >= later[axis] - 1e-9) placed[id][axis] += by;
+      });
+    }
+    return null;
+  }
+
   /**
    * Top-left positions of `nodes` ({id, width, height}) with every
    * package's members kept together, or null when no package holds a node.
@@ -6969,6 +7031,7 @@
     packageEncloses: packageEncloses,
     packageSeparation: packageSeparation,
     packagesCollide: packagesCollide,
+    separatedPackagePositions: separatedPackagePositions,
     packageGroupedPositions: packageGroupedPositions,
     packageBlockPlacements: packageBlockPlacements,
     drawPackageFrames: drawPackageFrames,
@@ -10736,6 +10799,22 @@
     return attempt;
   }
 
+  // The widenings a reference that overlaps may have, with `spent` of
+  // `budget` passes gone and `candidateCount` candidates in the search:
+  // every other candidate keeps a pass to be drawn and one to be squeezed.
+  function repairsLeft(budget, spent, candidateCount) {
+    return Math.min(COMPACT_POLICY.repairAttempts, Math.max(0, budget - spent - 2 * (candidateCount - 1)));
+  }
+
+  /**
+   * The widenings `optimize` can give the reference (its first candidate)
+   * of an adapter of this `size` ({boxes, edges}) with `candidateCount`
+   * candidates, should it overlap once drawn.
+   */
+  function referenceRepairs(size, candidateCount) {
+    return repairsLeft(passBudget(size && size.boxes, size && size.edges), 1, candidateCount);
+  }
+
   // Predicted scale of a placement in the pane, from the adapter's estimate.
   function estimatedScale(adapter, placement, pane) {
     var size = adapter.estimate(placement) || {};
@@ -10816,7 +10895,7 @@
     // invalid reference still says what the normal placement costs.
     var counts = { crossings: drawn.metrics.crossings, bends: drawn.metrics.bends };
     // Every other candidate keeps a pass to be drawn and one to be squeezed.
-    var repairs = Math.min(COMPACT_POLICY.repairAttempts, Math.max(0, run.budget - run.passes - 2 * (candidates.length - 1)));
+    var repairs = repairsLeft(run.budget, run.passes, candidates.length);
     var reference = repairAttempt(run, drawn, repairs);
     var referenceExcess = reference.metrics.valid ? excessOver(reference, counts) : Infinity;
     // What compact may not exceed: the drawing without compact layout where
@@ -10858,6 +10937,7 @@
   window.UMLCompactLayout = {
     POLICY: COMPACT_POLICY,
     passBudget: passBudget,
+    referenceRepairs: referenceRepairs,
     squeeze: squeeze,
     optimize: optimize
   };
@@ -27745,9 +27825,12 @@
    * corner; noteReach 'far' lets a note that finds no clear spot beside its
    * target look farther (placeCompactNotes). Realizing a placement lays the
    * ports and back-edge lanes out for those positions, routes every
-   * connector, and places the notes last.
+   * connector, and places the notes last. `withoutLayoutLine` is the
+   * drawing the spec gets without a layout line in this pane
+   * (defaultComponentDrawing): its counts bound the search, and its
+   * arrangement is a candidate where its package frames clash.
    */
-  function createCompactComponentAdapter(parsed, colors, pane, limits) {
+  function createCompactComponentAdapter(parsed, colors, pane, withoutLayoutLine) {
     // The authored direction: a placement the layered engine turns to fit a
     // narrow pane is a candidate of its own, not the reference.
     function layoutFor(placement) {
@@ -27756,6 +27839,7 @@
       return layout;
     }
 
+    var size = { boxes: parsed.components.length + parsed.notes.length, edges: parsed.connectors.length };
     var componentsByName = {};
     parsed.components.forEach(function(comp) { componentsByName[comp.name] = comp; });
 
@@ -27811,6 +27895,35 @@
       });
     }
 
+    // Whether a note placed beside its target among these components alone
+    // would cover another component or note: then no routing can give it a
+    // clear spot there.
+    function notesNeedRoom(entries) {
+      if (!parsed.notes.length) return false;
+      return notesCoverSomething(placeCompactNotes(parsed, entries, [], false), entries, []);
+    }
+
+    // The drawing without a layout line, with its package frames moved off
+    // each other and off the components they do not hold: each compact box
+    // centred where that drawing centres it, then moved apart
+    // (UMLShared.separatedPackagePositions), the router's clearance at both
+    // frames. It keeps that drawing's arrangement and so its straight
+    // edges, which the package-by-package placements can lose. None when
+    // that drawing's frames clash with nothing, or when moving apart cannot
+    // end the clashes (its packages interleave).
+    function separatedDefault(entries) {
+      var centres = withoutLayoutLine.centres, boxes = {};
+      var names = Object.keys(entries);
+      if (!names.every(function(name) { return centres[name]; })) return [];
+      names.forEach(function(name) {
+        var e = entries[name], c = centres[name];
+        boxes[name] = { x: c.x - e.box.width / 2, y: c.y - e.box.height / 2, width: e.box.width, height: e.box.height };
+      });
+      var positions = UMLShared.separatedPackagePositions(parsed.packages, boxes, componentPackageStyle(),
+        2 * COMPACT_COMPONENT_CLEARANCES.boxClearance);
+      return positions ? [{ positions: positions, noteReach: 'far' }] : [];
+    }
+
     // The normal placement; the placement the spec gets without a layout
     // line in this pane, when it differs; then the normal ranks wrapped
     // into 2, 3, … bands (one rank per band runs the chain across the
@@ -27821,18 +27934,36 @@
     // it does not hold: first, when the normal one would, else last; and
     // no placement that would.
     function placementsToTry() {
-      var reference = { positions: null };
-      var normal = layoutFor(reference);
+      var placements = placementsFor(layoutFor({ positions: null }));
+      return letNotesMoveIfUnrepaired(placements);
+    }
+
+    // Where a note beside its target would cover a component whatever the
+    // connectors, the normal placement needs widening, and a search with
+    // this many candidates spares it no pass (the far copy then ranks with
+    // the normal placement, after every placement that promises more): the
+    // normal placement lets that note move farther itself instead, and the
+    // copy goes.
+    function letNotesMoveIfUnrepaired(placements) {
+      if (placements[0].positions || placements[0].noteReach) return placements;
+      if (window.UMLCompactLayout.referenceRepairs(size, placements.length) > 0) return placements;
+      if (!notesNeedRoom(layoutFor(placements[0]).entries)) return placements;
+      return [{ positions: null, noteReach: 'far' }].concat(placements.filter(function(placement) {
+        return placement.positions || !placement.noteReach;
+      }).slice(1));
+    }
+
+    function placementsFor(normal) {
       var entries = normal.entries;
       // The direction the layered placement took, which may differ from
       // the authored one when it fits the pane better.
       var flow = (normal.layoutResult && normal.layoutResult.direction) || parsed.direction || 'LR';
       var axis = flow === 'TB' || flow === 'BT' ? 'y' : 'x';
       var ranks = componentRanks(entries, axis);
-      var placements = [reference];
       // Only the normal placement is widened where a note finds no clear
       // spot beside its target; the others, and a copy of the normal one,
       // let such a note move farther instead.
+      var placements = [{ positions: null }];
       if (parsed.notes.length) placements.push({ positions: null, noteReach: 'far' });
       // The placement without a layout line is a candidate when its shape
       // differs; a mere shuffle within the same bounds costs a pass for
@@ -27852,7 +27983,7 @@
           if (paneScale(positionedBounds(entries, wrapped), pane) > normalScale) placements.push({ positions: wrapped, noteReach: 'far' });
         });
       }
-      var blocks = packageBlockCandidates(normal, shapedLayout);
+      var blocks = packageBlockCandidates(normal, shapedLayout).concat(separatedDefault(entries));
       if (!blocks.length) return placements;
       return keepingPackages(collides(entries) ? blocks.concat(placements) : placements.concat(blocks), entries);
     }
@@ -27861,7 +27992,7 @@
       clearances: COMPACT_COMPONENT_CLEARANCES,
       // The squeeze keeps room for the package frames between two components.
       separation: UMLShared.packageSeparation(parsed.packages, packageOf, { lineHeight: CFG.lineHeight }),
-      size: { boxes: parsed.components.length + parsed.notes.length, edges: parsed.connectors.length },
+      size: size,
 
       candidates: placementsToTry,
 
@@ -27904,18 +28035,25 @@
         return { width: b.right - b.left + CFG.svgPad * 2, height: b.bottom - b.top + CFG.svgPad * 2 };
       },
 
-      limits: limits
+      limits: withoutLayoutLine.counts
     };
   }
 
-  // The crossings and bends of the drawing the spec gets without a layout
-  // line in this pane, which compact should not exceed (one extra routing,
-  // with the normal metrics in force).
-  function defaultComponentDrawingCounts(parsed, colors, pane) {
+  // The drawing the spec gets without a layout line in this pane (one extra
+  // routing, with the normal metrics in force): `counts`, its crossings and
+  // bends, which compact should not exceed, and `centres`, where it puts
+  // each component's centre.
+  function defaultComponentDrawing(parsed, colors, pane) {
     var scene = UMLLayoutQuality.createScene();
-    generateSVG(computeLayout(parsed, { containerAspect: pane.width / pane.height }), parsed, colors, scene);
+    var layout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
+    generateSVG(layout, parsed, colors, scene);
     var metrics = UMLLayoutQuality.evaluate(scene, pane);
-    return { crossings: metrics.crossings, bends: metrics.bends };
+    var centres = {};
+    Object.keys(layout.entries).forEach(function(name) {
+      var e = layout.entries[name];
+      centres[name] = { x: e.x + e.box.width / 2, y: e.y + e.box.height / 2 };
+    });
+    return { counts: { crossings: metrics.crossings, bends: metrics.bends }, centres: centres };
   }
 
   // Draws the compact SVG into the container (remembered for the same
@@ -27931,9 +28069,9 @@
   // The search itself, as {svg, issues}; it warns once per search, not for
   // a remembered drawing.
   function searchCompact(parsed, colors, pane) {
-    var limits = defaultComponentDrawingCounts(parsed, colors, pane);
+    var withoutLayoutLine = defaultComponentDrawing(parsed, colors, pane);
     var result = withCompactComponentMetrics(function() {
-      return window.UMLCompactLayout.optimize(createCompactComponentAdapter(parsed, colors, pane, limits), pane);
+      return window.UMLCompactLayout.optimize(createCompactComponentAdapter(parsed, colors, pane, withoutLayoutLine), pane);
     });
     if (result.issues > 0 && typeof console !== 'undefined' && console.warn) {
       console.warn('ArchUML: compact component diagram has ' + result.issues + ' layout issue(s)', result.metrics.violations);

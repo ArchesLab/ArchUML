@@ -337,10 +337,7 @@ for (const pane of [COLUMN, WIDE]) {
 
 // Requirements compact does not meet yet, by test name, with what was
 // measured and why. Each stays a todo until the cause is fixed.
-const KNOWN_GAPS = {
-  'notes on a full diagram (_data/narration_visuals/uml_component_diagram.json) in a 600×700 pane: compact is flagged with layout issues':
-    'the note "run by an SMS company" has no room between Registrar and TextGateway; the five routing passes go to the reference and four wraps (all invalid), none to its repair or to the copy whose notes may move farther',
-};
+const KNOWN_GAPS = {};
 const gap = name => (KNOWN_GAPS[name] ? { todo: KNOWN_GAPS[name] } : {});
 
 for (const [heading, spec] of Object.entries({ ...CORPUS, ...SITE })) {
