@@ -10302,6 +10302,38 @@
     return function (a, b) { return !!key[a.id + '\u0000' + b.id]; };
   }
 
+  // The container frames of the scene (package frames) that hold one of two
+  // bodies and not the other, as {frame, holds: id of the body it holds}.
+  function framesBetween(scene) {
+    var nodesById = {};
+    ((scene && scene.nodes) || []).forEach(function (n) { nodesById[n.id] = n; });
+    function containers(id) {
+      var found = [], seen = {};
+      for (var at = nodesById[id] && nodesById[id].parent; at != null && !seen[at]; at = nodesById[at] && nodesById[at].parent) {
+        seen[at] = true;
+        if (nodesById[at] && nodesById[at].container) found.push(nodesById[at]);
+      }
+      return found;
+    }
+    return function (a, b) {
+      var ofA = containers(a.id), ofB = containers(b.id);
+      return ofA.filter(function (f) { return ofB.indexOf(f) < 0; }).map(function (f) { return { frame: f, holds: a.id }; })
+        .concat(ofB.filter(function (f) { return ofA.indexOf(f) < 0; }).map(function (f) { return { frame: f, holds: b.id }; }));
+    };
+  }
+
+  // Whether a frame holding one of the two bodies, as drawn, shares the other
+  // axis with the other body (within `clearance`): the other body then faces
+  // the frame, which its members span, though it may share that axis with
+  // none of them, and keeps outside it.
+  function facesFrameOf(a, b, axis, ctx, clearance) {
+    return ctx.framesBetween(a, b).some(function (between) {
+      var outside = between.holds === a.id ? b : a;
+      return overlapOf(otherStartOf(between.frame, axis), otherEndOf(between.frame, axis),
+        otherStartOf(outside, axis), otherEndOf(outside, axis)) > -clearance;
+    });
+  }
+
   /**
    * How far `b` may move relative to `a` on `axis`: δb − δa ∈ [lo, hi], with
    * lo ≤ 0 ≤ hi and whole units, so staying put is always allowed.
@@ -10330,7 +10362,7 @@
     // as far as its separation there: nearer than that, they face.
     var other = axis.start === 'x' ? 'y' : 'x';
     var across = Math.max(ctx.separation(a.id, b.id, other), ctx.separation(b.id, a.id, other));
-    if (ctx.otherOverlap(a, b) > -Math.max(clearance, base + across)) {
+    if (ctx.otherOverlap(a, b) > -Math.max(clearance, base + across) || facesFrameOf(a, b, axis, ctx, clearance)) {
       var gap = sB - eA;
       var asked = Math.max(ctx.room(a.id, 'after'), ctx.room(b.id, 'before'));
       var required = Math.min(gap, Math.max(clearance, asked, occupiedWidth(a, b, axis, ctx, clearance)));
@@ -10442,6 +10474,7 @@
         return Number(at && at[axis.start]) || 0;
       },
       tied: tiesOnAxis(bodies, scene, axis),
+      framesBetween: framesBetween(scene),
       joins: routeJoiner(bodies, scene),
       bodyOf: bodyResolver(scene, indexBodies(bodies)),
       byId: indexBodies(bodies)
@@ -11632,6 +11665,39 @@
   // `blocked(points)` tells whether a candidate crosses something in its
   // way; of the two one-corner candidates, the first clear one is used.
   // Returns null for rectangles that overlap.
+  /**
+   * A route between two outlines that goes around `obstacles`: from the
+   * middle of a side of `a` to the middle of a side of `b`, by the grid
+   * router, for every pair of sides; the one with the least length and
+   * bends that keeps off the lines already drawn (`segments`). Null when
+   * every route is blocked.
+   */
+  function routeAroundBetweenOutlines(a, b, obstacles, skipNames, segments) {
+    var stub = Math.max(18, CFG.junctionGap + 8);
+    function anchor(rect, side) {
+      if (side === 'top') return { x: Math.round(rect.x + rect.width / 2), y: rect.y, side: side, stub: stub };
+      if (side === 'bottom') return { x: Math.round(rect.x + rect.width / 2), y: rect.y + rect.height, side: side, stub: stub };
+      if (side === 'left') return { x: rect.x, y: Math.round(rect.y + rect.height / 2), side: side, stub: stub };
+      return { x: rect.x + rect.width, y: Math.round(rect.y + rect.height / 2), side: side, stub: stub };
+    }
+    var tracks = { h: segments.filter(function(seg) { return seg.isH; }), v: segments.filter(function(seg) { return !seg.isH; }) };
+    var sides = ['top', 'bottom', 'left', 'right'];
+    var best = null;
+    sides.forEach(function(fromSide) {
+      sides.forEach(function(toSide) {
+        var routed = UMLShared.routeOrthogonalConnector(anchor(a, fromSide), anchor(b, toSide), obstacles, {
+          skipNames: skipNames, stub: stub, bendPenalty: 46
+        });
+        var points = UMLShared.simplifyOrthogonalPath(routed.points);
+        if (UMLShared.routeHitsObstacle(points, obstacles, skipNames, null)) return;
+        var cost = UMLShared.measureOrthogonalRoute(points) + UMLShared.countOrthogonalBends(points) * CLASS_ROUTE_BEND_SCORE +
+          (UMLShared.routeTrackOverlapLength(points, tracks) > 0 ? 100000 : 0);
+        if (!best || cost < best.cost) best = { cost: cost, points: points };
+      });
+    });
+    return best ? best.points : null;
+  }
+
   function routeBetweenOutlines(a, b, blocked) {
     var margin = 12;
     var aAbove = a.y + a.height <= b.y, aBelow = a.y >= b.y + b.height;
@@ -14776,10 +14842,15 @@
       var endTabs = [from.frame, to.frame].filter(Boolean).map(function(frame) {
         return { x1: frame.tab.x, y1: frame.tab.y, x2: frame.tab.x + frame.tab.width, y2: frame.tab.y + frame.tab.height };
       });
-      var points = routeBetweenOutlines(from.rect, to.rect, function(candidate) {
+      var outlineBlocked = function(candidate) {
         return UMLShared.routeHitsObstacle(candidate, classObstacles, skipNames, null) ||
           UMLShared.routeHitsObstacle(candidate, endTabs, null, null);
-      });
+      };
+      var points = routeBetweenOutlines(from.rect, to.rect, outlineBlocked);
+      // Compact layout: a line that would run through a box goes around it.
+      if (searchesAlongRoute && points && outlineBlocked(points)) {
+        points = routeAroundBetweenOutlines(from.rect, to.rect, classObstacles.concat(endTabs), skipNames, noteRouteSegments) || points;
+      }
       if (!points) return;
       points = snapRouteEndsToPackageOutline(points, from.entry, to.entry);
       snapToFrameTab(points[0], points[1], from.frame);
@@ -14797,10 +14868,16 @@
 
       var segments = UMLShared.buildOrthogonalSegments(points);
       noteRouteSegments = noteRouteSegments.concat(segments);
+      // The judge sees this line and its text like any other: a frame end
+      // is the frame's scene node.
+      var routeId = classRelationRouteId(rel, relIndex);
+      recordRoute(routeId, points, from.frame ? UMLShared.packageSceneId(rel.from) : rel.from,
+        to.frame ? UMLShared.packageSceneId(rel.to) : rel.to, null);
       var placement = placeClassRelationLabel({ rel: rel, points: points, routeIndex: -1 });
       if (placement) {
         if (rel.label) pushClassTextSvg(labelSvg, rel.label, placement, CFG.fontSizeStereotype, 'italic');
         placedLabels.push(placement.rect);
+        if (rel.label) recordTextLabel('frame-label:' + relIndex, placement.rect, routeId, 'relation');
       }
     });
     UMLShared.drawPackageNames(svg, packageFrames, colors);
@@ -14823,6 +14900,14 @@
 
       if (cls.type === 'package') {
         drawPackageNode(svg, en, e, headerFill, fills.textureUrl, colors);
+        // A package drawn as a node is a box like a class: the judge must
+        // see lines through it and frames over it.
+        if (scene) {
+          scene.addNode({ id: en, x: x, y: y, width: box.width, height: box.height, kind: 'package-node',
+            parent: UMLShared.packageSceneId(cls.package) });
+          scene.noteFont(CFG.fontSizeBold);
+          if (box.stereotypeText) scene.noteFont(CFG.fontSizeStereotype);
+        }
         continue;
       }
 
@@ -16458,8 +16543,11 @@
 
   // Subclasses of one parent that share a row get equal gaps, the smallest
   // the squeeze left between them, centred under the parent: a squeeze can
-  // close one sibling gap and keep another.
-  function evenSiblingRows(positions, entries, families) {
+  // close one sibling gap and keep another. A sibling with subclasses of its
+  // own takes them along (`descendants`: {class: [its subclasses, at any
+  // depth]}), so their lines stay as they were.
+  function evenSiblingRows(positions, entries, families, descendants) {
+    descendants = descendants || {};
     Object.keys(families).forEach(function(parent) {
       var row = families[parent].filter(function(name) {
         return positions[name] && Math.abs(positions[name].y - positions[families[parent][0]].y) < 0.5;
@@ -16489,16 +16577,20 @@
       var evened = {};
       row.forEach(function(name) {
         evened[name] = { x: x, y: positions[name].y };
+        var dx = x - positions[name].x;
+        (descendants[name] || []).forEach(function(child) {
+          if (positions[child] && !evened[child]) evened[child] = { x: positions[child].x + dx, y: positions[child].y };
+        });
         x += entries[name].box.width + gap;
       });
       // Only where the evened row lands on nothing else (keeping the gap).
-      var blocked = row.some(function(name) {
+      var blocked = Object.keys(evened).some(function(name) {
         return Object.keys(positions).some(function(other) {
           if (evened[other]) return false;
           return boxesWithin(evened[name], entries[name].box, positions[other], entries[other].box, gap);
         });
       });
-      if (!blocked) row.forEach(function(name) { positions[name] = evened[name]; });
+      if (!blocked) Object.keys(evened).forEach(function(name) { positions[name] = evened[name]; });
     });
     return positions;
   }
@@ -16634,7 +16726,10 @@
       if (placement && !distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
     }
     starCandidates(groups, normal, reference.entries, parsed, pane, clearances).forEach(addDistinct);
-    addDistinct(satellitesBeside(normal, reference.entries, parsed, clearances));
+    var satellites = satellitesBeside(normal, reference.entries, parsed, clearances);
+    addDistinct(satellites);
+    // Only subclasses below their parents, with the satellites beside theirs.
+    addDistinct(onlySubclassesBelow(satellites || normal, reference.entries, parsed, clearances));
     if (groups.length < 2) return parsed.relationships.length ? distinct.concat([roomy]) : distinct;
     // The groups packed into rows as the normal placement draws them, the
     // two that best fit the pane. A packing into the rows the normal layout
@@ -16679,17 +16774,32 @@
    * relationship is an association to a class with others) moved beside
    * its partner, level with it, so their edge runs straight across with its
    * text along it: left of the partner, else right, wherever that lands on
-   * no other class. Null when no satellite can move. Another row of the
-   * drawing may empty out, which the squeeze then closes.
+   * no other class and the partner sets no note of its own there (`note left
+   * of`, also of one of its members).
+   * A relationship with a package frame counts toward a
+   * class's others like any. Null when no satellite can move. Another row
+   * of the drawing may empty out, which the squeeze then closes.
    */
   function satellitesBeside(normal, entries, parsed, clearances) {
-    var degree = {};
+    var degree = {}, frames = {};
+    (parsed.packages || []).forEach(function(pkg) { frames[pkg.id] = true; });
+    function present(name) { return !!entries[name] || !!frames[name]; }
+    parsed.relationships.forEach(function(rel) {
+      if (rel.from === rel.to || !present(rel.from) || !present(rel.to)) return;
+      degree[rel.from] = (degree[rel.from] || 0) + 1;
+      degree[rel.to] = (degree[rel.to] || 0) + 1;
+    });
     var counted = parsed.relationships.filter(function(rel) {
       return rel.from !== rel.to && entries[rel.from] && entries[rel.to];
     });
-    counted.forEach(function(rel) {
-      degree[rel.from] = (degree[rel.from] || 0) + 1;
-      degree[rel.to] = (degree[rel.to] || 0) + 1;
+    // The side of a class a note of it (or of one of its members,
+    // `Class.member`) is set on stays the note's.
+    var notedSides = {};
+    (parsed.notes || []).forEach(function(note) {
+      var target = String(note.target || '');
+      var dot = target.lastIndexOf('.');
+      var owner = !entries[target] && dot > 0 && entries[target.slice(0, dot)] ? target.slice(0, dot) : target;
+      notedSides[owner + ':' + note.position] = true;
     });
     var positions = {};
     Object.keys(normal.positions).forEach(function(name) { positions[name] = normal.positions[name]; });
@@ -16702,7 +16812,9 @@
         var box = entries[name].box, at = positions[partner], partnerBox = entries[partner].box;
         var gap = relationTextWidth(rel) + 2 * clearances.stub;
         var y = Math.round(at.y + (partnerBox.height - box.height) / 2);
-        var spots = [{ x: at.x - gap - box.width, y: y }, { x: at.x + partnerBox.width + gap, y: y }];
+        var spots = [{ x: at.x - gap - box.width, y: y, side: 'left' }, { x: at.x + partnerBox.width + gap, y: y, side: 'right' }]
+          .filter(function(spot) { return !notedSides[partner + ':' + spot.side]; })
+          .map(function(spot) { return { x: spot.x, y: spot.y }; });
         var free = spots.filter(function(spot) {
           return Object.keys(positions).every(function(other) {
             return other === name || !boxesWithin(spot, box, positions[other], entries[other].box, clearances.boxClearance);
@@ -16712,6 +16824,59 @@
         positions[name] = free;
         moved = true;
       });
+    });
+    return moved ? { positions: positions } : null;
+  }
+
+  // ─── Only subclasses ──────────────────────────────────────────────────
+
+  /**
+   * The placement with every only subclass (the one subclass of a class
+   * with a single parent) in another package than its parent moved across,
+   * in its row, until it is centred
+   * below its parent, its own subclasses along, so the generalization runs
+   * straight down. A package placed as a block keeps its members in its
+   * own order, so a subclass in another package than its parent can end up
+   * anywhere in its row. A subclass whose place would come within the box
+   * clearance of a class that stays (or of another moved one, the later
+   * of the two) stays where it is. Null when none moves.
+   */
+  function onlySubclassesBelow(placement, entries, parsed, clearances) {
+    var parentsOf = {}, childrenOf = {};
+    parsed.relationships.forEach(function(rel) {
+      if (rel.type !== 'generalization' && rel.type !== 'realization') return;
+      if (rel.from === rel.to || !placement.positions[rel.from] || !placement.positions[rel.to]) return;
+      (parentsOf[rel.from] = parentsOf[rel.from] || []).push(rel.to);
+      (childrenOf[rel.to] = childrenOf[rel.to] || []).push(rel.from);
+    });
+    var descendants = inheritanceDescendants(parsed, entries);
+    function packageOfClass(name) { return (entries[name].cls && entries[name].cls.package) || null; }
+    var positions = {};
+    Object.keys(placement.positions).forEach(function(name) { positions[name] = placement.positions[name]; });
+    var movers = Object.keys(parentsOf).filter(function(child) {
+      var parent = parentsOf[child][0];
+      if (parentsOf[child].length !== 1 || childrenOf[parent].length !== 1) return false;
+      // Within one package the engine already sets the subclass below.
+      if (packageOfClass(child) === packageOfClass(parent)) return false;
+      var p = positions[parent], c = positions[child];
+      return c.y >= p.y + entries[parent].box.height &&
+        Math.abs(c.x + entries[child].box.width / 2 - (p.x + entries[parent].box.width / 2)) >= 0.5;
+    }).sort(function(a, b) { return positions[a].y - positions[b].y || positions[a].x - positions[b].x; });
+    var moved = false;
+    movers.forEach(function(child) {
+      var parent = parentsOf[child][0];
+      var dx = Math.round(positions[parent].x + entries[parent].box.width / 2 - entries[child].box.width / 2) - positions[child].x;
+      var group = [child].concat(descendants[child] || []);
+      var shifted = {};
+      group.forEach(function(name) { shifted[name] = { x: positions[name].x + dx, y: positions[name].y }; });
+      var blocked = group.some(function(name) {
+        return Object.keys(positions).some(function(other) {
+          return !shifted[other] && boxesWithin(shifted[name], entries[name].box, positions[other], entries[other].box, clearances.boxClearance);
+        });
+      });
+      if (blocked) return;
+      group.forEach(function(name) { positions[name] = shifted[name]; });
+      moved = true;
     });
     return moved ? { positions: positions } : null;
   }
@@ -16815,6 +16980,28 @@
     return rowOf.join(',');
   }
 
+  // Every class's subclasses at any depth: {class: [subclass]}.
+  function inheritanceDescendants(parsed, entries) {
+    var children = {};
+    parsed.relationships.forEach(function(rel) {
+      if (rel.type !== 'generalization' && rel.type !== 'realization') return;
+      if (!entries[rel.from] || !entries[rel.to] || rel.from === rel.to) return;
+      (children[rel.to] = children[rel.to] || []).push(rel.from);
+    });
+    var all = {};
+    Object.keys(children).forEach(function(name) {
+      var found = [], stack = children[name].slice();
+      while (stack.length) {
+        var next = stack.pop();
+        if (next === name || found.indexOf(next) >= 0) continue;
+        found.push(next);
+        (children[next] || []).forEach(function(child) { stack.push(child); });
+      }
+      all[name] = found;
+    });
+    return all;
+  }
+
   // Inheritance fans whose subclasses have that one parent: {parent: [child]}.
   function inheritanceFamilies(parsed, entries) {
     var parentsOf = {}, children = {};
@@ -16834,6 +17021,7 @@
 
   function createCompactClassAdapter(reference, shaped, parsed, colors, pane, limits) {
     var families = inheritanceFamilies(parsed, reference.entries);
+    var descendants = inheritanceDescendants(parsed, reference.entries);
     // Routed as without a layout line: the routing rules of the older
     // compact path (a dependency out of a subclass leaves from its bottom)
     // bend edges the default layout draws straight; the judge compares.
@@ -16870,7 +17058,7 @@
           var p = positions[name] || placement.positions[name];
           next[name] = { x: p.x, y: p.y };
         }
-        return { positions: evenSiblingRows(next, reference.entries, families) };
+        return { positions: evenSiblingRows(next, reference.entries, families, descendants) };
       },
       estimate: function(placement) { return estimatedSize(placement, reference.entries); },
       // One routing pass, without the teaching callouts (annotate adds

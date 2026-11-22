@@ -537,3 +537,20 @@ test('squeeze gives the same positions on every run', () => {
     assert.deepEqual(squeeze(generatedLayout(seed)), squeeze(generatedLayout(seed)));
   });
 });
+
+// A package frame drawn around A and B reaches over the whole stretch its
+// members span. C is no member and shares a column with neither, but lies
+// below the frame, so the squeeze must keep it below the frame's bottom.
+test('a box outside a package stays outside the frame its members span, not just clear of the members it faces', () => {
+  const a = body('A', 0, 0, 100, 50, { pinned: true }), b = body('B', 300, 120, 100, 50, { pinned: true });
+  const c = body('C', 150, 400);
+  const s = UMLLayoutQuality.createScene();
+  s.addNode({ id: 'package:P', x: -10, y: -40, width: 420, height: 220, kind: 'package', container: true, crossable: true });
+  [a, b].forEach((n) => s.addNode({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height, kind: 'class', parent: 'package:P' }));
+  s.addNode({ id: c.id, x: c.x, y: c.y, width: c.width, height: c.height, kind: 'class' });
+  const separation = (aId, bId) => (aId === 'C') === (bId === 'C') ? 0 : 10;
+  const at = plain(UMLCompactLayout.squeeze([a, b, c], s, CLEAR, { separation }));
+  const frameBottom = Math.max(at.A.y + a.height, at.B.y + b.height) + 10;
+  assert.ok(at.C.y >= frameBottom + CLEAR.boxClearance,
+    `C at y ${at.C.y} lies inside the frame, whose bottom is at ${frameBottom}`);
+});
