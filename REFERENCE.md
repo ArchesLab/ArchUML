@@ -4,7 +4,7 @@ A complete reference for the `@startuml` syntax supported by the ArchUML rendere
 
 Each section shows the syntax as a code block followed by an HTML rendering div you can embed directly in any page that loads `uml-bundle.js`.
 
-ArchUML supports a subset of UML notation. The visual editor retains incomplete or invalid drafts and reports selected common problems; its diagnostics are not a complete UML validator. Current model limits include nested deployment Nodes, multiple provided/required interfaces owned by one port, distinct same-named activity Actions, multiple independently identified activity InitialNodes, and equal short state names in different composites. Source editing does not remove these model limits.
+ArchUML supports a subset of UML notation. The visual editor retains incomplete or invalid drafts and reports selected common problems; its diagnostics are not a complete UML validator. Current model limits include multiple provided/required interfaces owned by one port, distinct same-named activity Actions, multiple independently identified activity InitialNodes, and equal short state names in different composites. Source editing does not remove these model limits.
 
 ---
 
@@ -23,10 +23,11 @@ ArchUML supports a subset of UML notation. The visual editor retains incomplete 
 11. [Activity Diagrams](#activity-diagrams)
 12. [Freeform Diagrams](#freeform-diagrams)
 13. [Git Commit Graphs](#git-commit-graphs)
-14. [Teaching Callouts](#teaching-callouts)
-15. [Notes & Annotations](#notes--annotations)
-16. [CSS Theming](#css-theming)
-17. [CLI / Node.js API](#cli--nodejs-api)
+14. [C4 Model Diagrams](#c4-model-diagrams)
+15. [Teaching Callouts](#teaching-callouts)
+16. [Notes & Annotations](#notes--annotations)
+17. [CSS Theming](#css-theming)
+18. [CLI / Node.js API](#cli--nodejs-api)
 
 ---
 
@@ -58,8 +59,9 @@ Available class names:
 | `diagram-freeform` | Freeform box-and-line (non-UML) |
 | `diagram-gitgraph` | Git commit graph (non-UML) |
 | `diagram-crc` | Class, Responsibility, Collaborator cards (non-UML) |
+| `language-c4` | C4 model view, drawn from a YAML design model (non-UML) |
 
-The `@startuml` / `@enduml` markers are optional but recommended for clarity. Non-UML types use the `diagram-` prefix. In SEBook Markdown, a fenced `crc` block also renders CRC cards; an embedding container uses `data-uml-type="crc"`.
+The `@startuml` / `@enduml` markers are optional but recommended for clarity. Non-UML types use the `diagram-` prefix. In SEBook Markdown, a fenced `crc` block also renders CRC cards; an embedding container uses `data-uml-type="crc"`. A fenced `c4` block renders a C4 view (see [C4 Model Diagrams](#c4-model-diagrams)).
 
 ---
 
@@ -784,6 +786,21 @@ browser --> user: show dashboard
 deactivate browser
 @enduml
 </code></pre>
+
+---
+
+### Wrapped Names and Labels
+
+Long lifeline names and message labels make a sequence diagram wide, and a wide drawing is scaled down to fit its
+column or printed page, text included. `layout wrap <width>` breaks every lifeline name and message label between
+words so that no line is wider than `<width>` units (the default text is 13 units high); a single longer word keeps
+a line of its own. Without the directive, names and labels stay on one line. C4 dynamic views use `layout wrap 120`.
+
+```
+layout wrap 120
+participant coordinator: Registration Coordinator
+coordinator -> policy: asks for an eligibility decision from
+```
 
 ---
 
@@ -1558,6 +1575,108 @@ o_cust --> crm_cust
 
 ---
 
+### Display Names, Keywords & Layout Direction
+
+```
+component "Display Name" as alias                ← draws the display name; the alias is the id
+component "Display Name" as alias <<keyword>>    ← adds «keyword» as a second, italic line
+component "Display Name" as alias <<keyword>> { ... }
+
+layout vertical      ← top to bottom, whatever the shape of the page
+layout horizontal    ← left to right, whatever the shape of the page
+```
+
+Connectors, ports, and saved layouts refer to a component by its alias; the box shows the
+display name. Without a `layout` line, the diagram starts left to right and may turn to fit
+the page. With `layout vertical` or `layout horizontal`, the direction is fixed and the components keep
+the order in which they are declared: the first is at the top (or on the left), the last at the
+bottom (or on the right). In a vertical layout, an assembly between two components that are next
+to each other in the column runs straight down between them: the provided and the required
+interface sit on the sides of the two boxes that face each other. Every other provided and required
+interface sits on the left side of its box, so those assemblies run in one lane beside the column.
+
+**Example:**
+
+```
+@startuml
+layout vertical
+component "Planner Web App" as web <<Container: TypeScript, React>> {
+  require "Enrollment API" as web_enroll
+}
+component "Registration API" as api <<Container: Python, FastAPI>> {
+  provide "Enrollment API" as api_enroll
+}
+api_enroll --> web_enroll : POST /v1/enrollments
+@enduml
+```
+
+<pre><code class="language-uml-component">
+@startuml
+layout vertical
+component "Planner Web App" as web <<Container: TypeScript, React>> {
+  require "Enrollment API" as web_enroll
+}
+component "Registration API" as api <<Container: Python, FastAPI>> {
+  provide "Enrollment API" as api_enroll
+}
+api_enroll --> web_enroll : POST /v1/enrollments
+@enduml
+</code></pre>
+
+### Balls and Sockets That Face Their Partners
+
+```
+layout ports facing    ← choose the sides of joined balls and sockets after saved positions are applied
+```
+
+Without this line, every provided and required interface gets its side from the automatic layout, and a saved
+position moves the ball or socket with its box: a consumer moved below its provider keeps its socket on its lower
+side, the provider keeps its ball on its upper side, and the line runs around both boxes. With `layout ports facing` on a line of its own, a ball and the socket it
+is joined to (an assembly) are turned to face each other at the boxes' final places:
+
+- one box above the other, with a gap between them: the lower side of the upper box and the upper side of the lower one;
+- one box beside the other: the right side of the left box and the left side of the right one;
+- apart in both directions: the direction with the larger gap, and with equal gaps the direction of `layout vertical`
+  or `layout horizontal` (else the direction the automatic layout chose);
+- overlapping or touching boxes: the sides the automatic layout chose.
+
+A ball or socket in several assemblies faces the partner of its first one. A port with a saved position of its own,
+a port outside every assembly, and a plain port keep their sides. A box is sized for its ports, so it can change
+size when its ports change sides; its top-left corner stays on its saved position. Where the two boxes share an x
+across a vertical gap, or a height at which both can hold a port across a horizontal gap (below each box's name and
+keyword lines), the ball and the socket line up and the line is straight; otherwise the line bends once in the gap.
+With less than 46 units between the facing sides, the joined symbol can enter a box by a few units.
+
+**It acts only when a component has a saved position** (an `@layout` entry or an inline `@pos`). A diagram with the
+line but without a saved component position draws exactly as it does without the line, and the line changes no
+other part of the drawing: not the direction, the layout preference, the boxes, the connectors, or the notes. The UML
+visual editor does not write the line: it draws a diagram that has it, and its layout control and position
+write-back leave the line alone. C4 interfaces views use it when their saved layout holds a position (see
+[Saved layout](#saved-layout) in the C4 section).
+
+```
+@startuml
+@layout
+node "web" x=40 y=320
+node "api" x=40 y=40
+@endlayout
+layout vertical
+layout ports facing
+component "Planner Web App" as web {
+  require "Enrollment API" as web_enroll
+}
+component "Registration API" as api {
+  provide "Enrollment API" as api_enroll
+}
+api_enroll --> web_enroll : POST /v1/enrollments
+@enduml
+```
+
+Here the consumer is pinned below its provider, so the ball sits on the provider's lower side and the socket on the
+consumer's upper side, and the line runs straight down between them.
+
+---
+
 ## Deployment Diagrams
 
 ### Nodes, Artifacts & Relationships
@@ -1593,8 +1712,7 @@ The parser keeps `nodes` and each node's `components` list of child identifiers
 for compatibility. Its `elements` array and `elementMap` expose every typed
 element with `name` (identifier), `label`, `kind`, `parentId`, and `stereotype`;
 nodes also expose typed `children`. Links preserve `arrow` (`--`, `-->`, or
-`..>`) and the independent `dashed` flag. Nested deployment nodes are outside
-the current supported subset.
+`..>`) and the independent `dashed` flag.
 
 Node instance notation (name:Type — underlined per UML spec):
 
@@ -1639,6 +1757,77 @@ ClientDevice --> WebServer : HTTPS
 WebServer --> DatabaseServer : TCP/IP
 @enduml
 </code></pre>
+
+### Nested Nodes
+
+A node may contain other nodes to any depth, for example a device that hosts
+an execution environment that hosts a component. Each element's `parentId` is
+its innermost enclosing node, and that node lists the element's identifier in
+its `components`.
+
+```
+node "Campus cloud" as cloud <<executionEnvironment>> {
+  node "Kubernetes cluster" as k8s <<executionEnvironment>> {
+    node "API pod" as pod <<executionEnvironment>> {
+      component "Registration API" as api
+    }
+  }
+}
+```
+
+**Example:**
+
+```
+@startuml
+node "Student laptop" as laptop <<device>> {
+  node "Web browser" as browser <<executionEnvironment>> {
+    component "Web app" as web
+  }
+}
+node "Campus cloud" as cloud <<executionEnvironment>> {
+  node "API pod" as pod <<executionEnvironment>> {
+    component "Registration API" as api
+  }
+}
+web --> api : HTTPS
+@enduml
+```
+
+<pre><code class="language-uml-deployment">
+@startuml
+node "Student laptop" as laptop <<device>> {
+  node "Web browser" as browser <<executionEnvironment>> {
+    component "Web app" as web
+  }
+}
+node "Campus cloud" as cloud <<executionEnvironment>> {
+  node "API pod" as pod <<executionEnvironment>> {
+    component "Registration API" as api
+  }
+}
+web --> api : HTTPS
+@enduml
+</code></pre>
+
+Every nested node is drawn as a cube inside its parent, below the parent's
+name. A node that contains other nodes leaves a wider margin around them, so
+connectors can cross into nested nodes, and a taller gap between two of them
+when a labelled connector joins their contents, so the label fits beside it.
+A connector that starts or ends at a nested node, or at an element inside
+one, crosses the borders of the nodes that enclose its endpoints, but never
+their names, never runs along their outlines, and goes around every other
+node. Its label sits beside it, inside the node that encloses both ends
+whenever it fits there, and never covers a name. Other connectors, between
+top-level nodes and the components or artifacts directly inside them, keep
+the usual placement: their labels stay clear of every node, even when that
+puts them further from the connector. The text alternative
+names every enclosing level ("API pod inside Kubernetes cluster inside
+Campus cloud").
+
+In the visual editor, moving a node moves everything nested in it and keeps
+the nesting in the source. The editor does not change nesting: it refuses to
+drag an element into or out of a nested node and says why. Edit the source to
+move an element to another node.
 
 ---
 
@@ -2590,6 +2779,1202 @@ Attributes radiate outward from their host entity or relationship. Directions po
 
 ---
 
+## C4 Model Diagrams
+
+C4 diagrams show the architecture of a software system at four zoom levels: system context, containers, components, and code. ArchUML does not draw them from drawing commands. It reads one **design model** written in YAML and draws any **view** of it, so several diagrams of the same system stay consistent. The model schema is `c4-design/1`; a JSON Schema for editors lives at `c4/schema/1/design.schema.json`.
+
+### Embedding
+
+Write the model in a fenced `c4` block (or `<pre><code class="language-c4">`). The optional comment lines at the top are read before the YAML, in this order:
+
+| Line | Meaning |
+|---|---|
+| `# caption: text` | The figure caption. It must be the first non-empty line. |
+| `# description: text` | An authored text alternative that replaces the generated long description. |
+| `# diagnostics: true` | Shows the model's problems as a list after the figure; without it they are not shown. |
+| `# panels: syntax` | For an interface description: shows only its syntactic view and its data types without their meanings, for example to ask a question before the semantics are shown. |
+| `view: selector` | The view to draw. Without it the model's default view is drawn (the first system's context view, else the landscape). |
+
+In SEBook pages, keep one shared model in `_includes/c4-models/<name>.yml` (it never declares `view:`) and embed a view of it with the `c4-view.html` include, whose parameters are `model` (the file name without `.yml`), `view` (a selector), `caption`, `description`, and `panels`; it writes the fenced block described above. A page that shows C4 figures sets `c4: true` in its front matter so the C4 scripts are loaded with the page; elsewhere the first figure loads them on demand.
+
+Every rendered C4 figure keeps its embed text in a `<script type="application/json" data-c4-source>` element inside the figure container, as a JSON string in which each `<` is written as the JSON escape `\u003c`. The drawing's relationship groups also carry a `data-c4-source` attribute (the id of the relationship's source element) and come before that element, so a script that reads the text selects `script[type="application/json"][data-c4-source]` and reads it with `JSON.parse(element.textContent)`; a bare `[data-c4-source]` selector finds a relationship instead.
+
+### View selectors
+
+| Selector | View |
+|---|---|
+| `landscape` | System landscape |
+| `context of <system>` | System context of one software system |
+| `containers of <system>` | Containers inside a software system |
+| `components of <container>` | Components inside a container |
+| `code of <component>` | Classes and interfaces of a component |
+| `dynamic <scenario>` | One scenario, step by step |
+| `deployment <environment>` | One deployment environment |
+| `interfaces of <system, container, or component>` | The interfaces an element provides and requires, with the elements that use them and provide them |
+| `interface <interface>` | The description of one interface, as a card of text |
+
+Each selector uses the identifier of the element, scenario, environment, or interface (the YAML key), not its display name; interface identifiers are matched ignoring case.
+
+A selector may end in `with` and one or more annotations separated by commas, such as `containers of shop with interfaces`. The annotation `interfaces` adds the interfaces to a landscape, context, container, component, or dynamic view: each box gains a line "Provides: …" and each relationship a line "via …" naming the interface it uses. `patterns` (also on code views), `styles`, and `tactics` annotate landscape, context, container, and component views in the same way. An annotation a view cannot carry is an error. An annotated view keeps the layout pins of its plain view.
+
+### Minimal model
+
+A model needs `schema`, `name`, and at least one entry under `people` or `systems`. Identifiers are the YAML keys and are unique within the model. Relationships are written once, on the source element, as `collaborators` (the key is the target's identifier, the value is a description, or a map with `description`, `technology`, `connector`). Containers, components, and code elements nest under `containers`, `components`, and `code`. Relationships between nested elements are lifted to the visible level automatically. Responsibilities are `do:`, `know:`, or `decide:` entries. The model below is used for every example in this section.
+
+```yaml
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+```
+
+The remaining fields (`requirements`, `choices`, `decisions`, `quality`, `invariants`, and others) are optional and are covered by the editor and the checks, not by this reference.
+
+### System landscape view: `landscape`
+
+Every person and software system of the model and how they relate, with no system opened up.
+
+<pre><code class="language-c4">
+# caption: System landscape view of the Online Shop model
+view: landscape
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### System context view: `context of shop`
+
+One software system in the middle, surrounded by the people and systems it interacts with.
+
+<pre><code class="language-c4">
+# caption: System context view of the Online Shop model
+view: context of shop
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Container view: `containers of shop`
+
+The separately running applications and data stores inside one system.
+
+<pre><code class="language-c4">
+# caption: Container view of the Online Shop model
+view: containers of shop
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Component view: `components of orders`
+
+The parts inside one container.
+
+<pre><code class="language-c4">
+# caption: Component view of the Online Shop model
+view: components of orders
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Code view: `code of checkout`
+
+The classes and interfaces that implement one component, drawn as a UML class diagram.
+
+<pre><code class="language-c4">
+# caption: Code view of the Online Shop model
+view: code of checkout
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Dynamic view: `dynamic checkout`
+
+One scenario as numbered relationships between the same elements; alternatives and loops are listed.
+
+<pre><code class="language-c4">
+# caption: Dynamic view of the Online Shop model
+view: dynamic checkout
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Deployment view: `deployment production`
+
+Where container and system instances run, as nested deployment nodes.
+
+<pre><code class="language-c4">
+# caption: Deployment view of the Online Shop model
+view: deployment production
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Interfaces
+
+An element offers an **interface** with `provides`, and a relationship names the interface (or one operation of it) that it calls with `uses`, written `interface-id` or `interface-id.operation-id`. A full interface states its style, technology, and version; each operation has a `syntax` line, its `input` and `output`, and its meaning: `purpose`, `errors`, `examples`, and the responsibilities it `realizes`. A shorthand list such as `provides: ["POST /v1/orders"]` gives the call syntax only. The examples below add two interfaces to the Online Shop model: the Order Service provides the Orders API, which the Web App uses, and the Payment Provider provides the Card Charges API, which the Checkout Coordinator uses.
+
+```yaml
+      web:
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS, uses: orders-api.place-order}
+      orders:
+        provides:
+          orders-api:
+            name: Orders API
+            style: rest
+            technology: JSON/HTTPS
+            version: 1
+            operations:
+              place-order:
+                syntax: POST /v1/orders
+                input:
+                  cart_id: {type: string, meaning: the cart the customer checks out}
+                output:
+                  order_id: {type: string, meaning: the id of the new order}
+                  total: {type: integer, meaning: what the customer pays, unit: US cents}
+                purpose: When a customer checks out a cart, the service stores the order and charges the customer.
+```
+
+A plain view shows an interface only by its technology, on a relationship that names none of its own; the three views below show the interfaces themselves.
+
+### Interfaces view: `interfaces of orders`
+
+One element, the subject of the view, with the interfaces it provides (balls) and requires (sockets), the elements that use them, and the elements that provide them. The automatic layout puts the elements that use the subject's interfaces above it, the subject in the middle, and the elements that provide what it requires below it (with `direction: right`, left to right instead); a saved layout can move every box (see [Saved layout](#saved-layout)), so the order is the automatic layout's only. The view borrows UML's component-diagram notation for provided and required interfaces, while each box keeps its C4 type. A title above the drawing and a legend line and notes below it are text. The legend line names the subject, not a place: "Ball: an interface the element provides. Socket: an interface it requires. Ball in socket: the consumer uses that interface. The subject of this view is Order Service." An element that provides and uses no described interface is drawn alone with a sentence that says so.
+
+<pre><code class="language-c4">
+# caption: Interfaces view of the Order Service in the Online Shop model
+view: interfaces of orders
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS, uses: orders-api.place-order}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+            id: orders-take
+        provides:
+          orders-api:
+            name: Orders API
+            description: Turns a customer's cart into an order.
+            style: rest
+            technology: JSON/HTTPS
+            version: 1
+            operations:
+              place-order:
+                syntax: POST /v1/orders
+                input:
+                  cart_id: {type: string, meaning: the cart the customer checks out}
+                output:
+                  order_id: {type: string, meaning: the id of the new order}
+                  total: {type: integer, meaning: what the customer pays, unit: US cents}
+                purpose: When a customer checks out a cart, the service stores the order and charges the customer.
+                errors:
+                  empty-cart: {code: 422, when: the cart holds no products; the client asks the customer to add one}
+                  payment-refused: {code: 402, when: the card was declined; the client asks for another card}
+                examples:
+                  - input: {cart_id: c-42}
+                    output: {order_id: o-7, total: 2599}
+                    note: A cart worth 25.99 USD.
+                realizes: [orders-take]
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS, uses: card-charges.charge}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+    provides:
+      card-charges:
+        name: Card Charges API
+        style: rest
+        technology: JSON/HTTPS
+        version: 2
+        operations:
+          charge:
+            syntax: POST /v2/charges
+            input:
+              amount: {type: integer, meaning: what to charge, unit: US cents}
+              card_token: {type: string, meaning: one-time token for the customer's card}
+            output:
+              paid: {type: boolean, meaning: whether the money moved}
+            purpose: When a shop sends an amount and a card token, the provider charges the card once.
+            errors:
+              card-declined: {code: 402, when: the card issuer refused the charge; the shop asks for another card}
+            examples:
+              - input: {amount: 2599, card_token: tok-1}
+                output: {paid: true}
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Interface description: `interface orders-api`
+
+One interface as a card of text rather than a drawing: the provider and the clients, a **syntactic view** (each operation's syntax, input, and output), a **semantic view** (purpose, side effects, usage restrictions, errors, examples, and the responsibilities each operation realizes), a data table per type that keeps each field's type in the same row as its meaning and unit, and the shared vocabulary. Missing parts are stated ("Purpose: not stated."). With `# panels: syntax` the card shows the syntactic view and the types only.
+
+<pre><code class="language-c4">
+# caption: Interface description of the Orders API in the Online Shop model
+view: interface orders-api
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS, uses: orders-api.place-order}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+            id: orders-take
+        provides:
+          orders-api:
+            name: Orders API
+            description: Turns a customer's cart into an order.
+            style: rest
+            technology: JSON/HTTPS
+            version: 1
+            operations:
+              place-order:
+                syntax: POST /v1/orders
+                input:
+                  cart_id: {type: string, meaning: the cart the customer checks out}
+                output:
+                  order_id: {type: string, meaning: the id of the new order}
+                  total: {type: integer, meaning: what the customer pays, unit: US cents}
+                purpose: When a customer checks out a cart, the service stores the order and charges the customer.
+                errors:
+                  empty-cart: {code: 422, when: the cart holds no products; the client asks the customer to add one}
+                  payment-refused: {code: 402, when: the card was declined; the client asks for another card}
+                examples:
+                  - input: {cart_id: c-42}
+                    output: {order_id: o-7, total: 2599}
+                    note: A cart worth 25.99 USD.
+                realizes: [orders-take]
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS, uses: card-charges.charge}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+    provides:
+      card-charges:
+        name: Card Charges API
+        style: rest
+        technology: JSON/HTTPS
+        version: 2
+        operations:
+          charge:
+            syntax: POST /v2/charges
+            input:
+              amount: {type: integer, meaning: what to charge, unit: US cents}
+              card_token: {type: string, meaning: one-time token for the customer's card}
+            output:
+              paid: {type: boolean, meaning: whether the money moved}
+            purpose: When a shop sends an amount and a card token, the provider charges the card once.
+            errors:
+              card-declined: {code: 402, when: the card issuer refused the charge; the shop asks for another card}
+            examples:
+              - input: {amount: 2599, card_token: tok-1}
+                output: {paid: true}
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Interfaces in a C4 view: `containers of shop with interfaces`
+
+The container view with the `interfaces` annotation: the boxes name the interfaces they provide, and the relationships name the interface they use.
+
+<pre><code class="language-c4">
+# caption: Container view of the Online Shop model with its interfaces
+view: containers of shop with interfaces
+schema: c4-design/1
+name: Online Shop
+description: Customers order products and pay for them online.
+people:
+  customer:
+    name: Customer
+    description: Browses products and places orders.
+    collaborators:
+      web: orders products using
+systems:
+  shop:
+    name: Online Shop
+    description: Takes orders and arranges payment.
+    responsibilities:
+      - do: take and store customer orders
+    containers:
+      web:
+        name: Web App
+        kind: browser_app
+        technology: TypeScript, React
+        description: Shows products and the cart.
+        responsibilities:
+          - do: let customers fill a cart and submit it
+        collaborators:
+          orders: {description: submits orders to, technology: JSON/HTTPS, uses: orders-api.place-order}
+      orders:
+        name: Order Service
+        technology: Python, FastAPI
+        description: Validates, stores, and pays for orders.
+        responsibilities:
+          - do: validate, store, and pay for each order
+            id: orders-take
+        provides:
+          orders-api:
+            name: Orders API
+            description: Turns a customer's cart into an order.
+            style: rest
+            technology: JSON/HTTPS
+            version: 1
+            operations:
+              place-order:
+                syntax: POST /v1/orders
+                input:
+                  cart_id: {type: string, meaning: the cart the customer checks out}
+                output:
+                  order_id: {type: string, meaning: the id of the new order}
+                  total: {type: integer, meaning: what the customer pays, unit: US cents}
+                purpose: When a customer checks out a cart, the service stores the order and charges the customer.
+                errors:
+                  empty-cart: {code: 422, when: the cart holds no products; the client asks the customer to add one}
+                  payment-refused: {code: 402, when: the card was declined; the client asks for another card}
+                examples:
+                  - input: {cart_id: c-42}
+                    output: {order_id: o-7, total: 2599}
+                    note: A cart worth 25.99 USD.
+                realizes: [orders-take]
+        components:
+          checkout:
+            name: Checkout Coordinator
+            technology: Python module
+            stereotypes: [interfacer]
+            description: Runs one checkout from cart to payment.
+            responsibilities:
+              - do: sequence one checkout from cart to payment
+            collaborators:
+              db: {description: writes orders to, technology: SQL/TCP}
+              payments: {description: requests payment from, technology: HTTPS, uses: card-charges.charge}
+            code:
+              Checkout: {kind: class, operations: ["+ place(cart): Order"]}
+      db:
+        name: Order Database
+        kind: database
+        technology: PostgreSQL 16
+        description: Durably stores every order and its status.
+        responsibilities:
+          - do: durably store every order and its status
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges customer cards for completed orders.
+    provides:
+      card-charges:
+        name: Card Charges API
+        style: rest
+        technology: JSON/HTTPS
+        version: 2
+        operations:
+          charge:
+            syntax: POST /v2/charges
+            input:
+              amount: {type: integer, meaning: what to charge, unit: US cents}
+              card_token: {type: string, meaning: one-time token for the customer's card}
+            output:
+              paid: {type: boolean, meaning: whether the money moved}
+            purpose: When a shop sends an amount and a card token, the provider charges the card once.
+            errors:
+              card-declined: {code: 402, when: the card issuer refused the charge; the shop asks for another card}
+            examples:
+              - input: {amount: 2599, card_token: tok-1}
+                output: {paid: true}
+scenarios:
+  checkout:
+    title: Check out a cart
+    steps:
+      - web -> orders: submits the cart to
+      - orders -> db: writes orders to
+      - orders -> payments: requests payment from
+deployment:
+  production:
+    name: Production
+    nodes:
+      browser: {name: Web browser, kind: environment, hosts: [web]}
+      cloud:
+        name: Cloud
+        kind: environment
+        nodes:
+          pod: {name: Order pod, kind: environment, instances: 2, hosts: [orders]}
+          database: {name: Managed database, kind: environment, hosts: [db]}
+</code></pre>
+
+### Interface checks
+
+The checks for interfaces run once a model describes at least one full interface or names one in `uses`; a model with shorthand lists only is a sketch, and keeps its other checks unchanged. Problems appear in the editor and, with `# diagnostics: true`, under an embedded figure. Errors are references that cannot be resolved or contradict the direction of a contract; warnings are omissions that leave an independently built client guessing; infos have a real chance of a false alarm or matter only across boundaries.
+
+| Rule | Severity | Checks | Rationale | Source |
+|---|---|---|---|---|
+| `model/interface-provider` | error | Interface used from a relationship that cannot provide it | A reference that contradicts containment or the direction of a contract is invalid, like model/responsibility-owner. | Clements2010; WirfsBrock2003 |
+| `model/realizes-owner` | error | Operation realizes a responsibility its provider does not own | A reference that contradicts containment or the direction of a contract is invalid, like model/responsibility-owner. | WirfsBrock2003 |
+| `interface/no-syntax` | warning | Operation without a syntax line | The syntactic view must say how to call the operation and what each parameter's type is; a type that is named but not described leaves the client guessing. | Clements2010; lecture L14 |
+| `interface/untyped-field` | warning | Field without a type | The syntactic view must say how to call the operation and what each parameter's type is; a type that is named but not described leaves the client guessing. | Clements2010; lecture L14 |
+| `interface/undefined-type` | warning | Type used but not described | The syntactic view must say how to call the operation and what each parameter's type is; a type that is named but not described leaves the client guessing. | Clements2010; lecture L14 |
+| `interface/no-purpose` | warning | Operation without a purpose | Without a purpose a client cannot tell whether the operation fits its need; the purpose is the advertised responsibility. | Clements2010; WirfsBrock2003 |
+| `interface/no-errors` | warning; info for event, stream, library, file, and unset styles | Operation without errors | Remote request/response and command calls always fail somehow (authentication, validation, rate limits, outages), and error handling is part of the semantic view, so a missing error list is a warning for them. An emitted event's risks are delivery guarantees (duplicates, order, loss), which the review prompt and the event frame ask about; in-process and unknown styles may genuinely not fail. Hence info there. | Clements2010; Bass2012 |
+| `interface/no-unit` | warning; info for a text field whose name suggests a quantity | Number without a unit | Syntactic interoperability is not enough: independently built systems read a number without a unit or a date without a format differently. The Mars Climate Orbiter's interface specification did state newton-seconds; one side wrote pound-force seconds and no test compared the file with the specification. A stated unit is what makes such a check possible. The exemptions keep false positives low: identifiers state a format, enumerated codes give each value a meaning. The string-name variants are info because names are weak evidence. | MCOMIB1999; Bass2012 |
+| `interface/no-format` | warning; info for a text field whose name suggests a date or time | Date or time without a format | Syntactic interoperability is not enough: independently built systems read a number without a unit or a date without a format differently. The Mars Climate Orbiter's interface specification did state newton-seconds; one side wrote pound-force seconds and no test compared the file with the specification. A stated unit is what makes such a check possible. The exemptions keep false positives low: identifiers state a format, enumerated codes give each value a meaning. The string-name variants are info because names are weak evidence. | MCOMIB1999; Bass2012 |
+| `interface/example-mismatch` | warning | Example that contradicts its types | The model-level counterpart of validating a document against its schema (lecture L14): a description must not contradict itself. Example values are illustrative, so warning rather than error. | lecture L14 |
+| `interface/realizes-internal` | warning | Operation linked to a private obligation | An RDD contract advertises the provider's obligations; its private implementation is not part of it. | WirfsBrock2003; Parnas1972 |
+| `interface/in-process-across-boundary` | warning | In-process interface used from another container | A C4 component is not separately deployable; a client in another container reaches it only through a remote interface. Linking it to a library call mixes abstraction levels. | Brown (c4model.com) |
+| `interface/requested-not-advertised` | warning | Requested responsibility not advertised by the used operation | In RDD the receiver advertises the responsibility a collaborator requests; a used operation that realizes something else contradicts the stated request. | WirfsBrock2003 |
+| `interface/type-spelling` | info | Type written in another language's spelling | Standard type names make descriptions comparable across teams and languages; the other spelling is understood, so this is a suggestion. | — |
+| `interface/syntax-only` | info | Shorthand interface used across a boundary | Formalize contracts selectively: boundary-crossing, independently implemented collaborations need semantics; internal sketches may stay short. | WirfsBrock2003 |
+| `interface/no-meaning` | info | Field without a meaning | Formalize contracts selectively: boundary-crossing, independently implemented collaborations need semantics; internal sketches may stay short. | WirfsBrock2003 |
+| `interface/no-example` | info | Operation without an example | Formalize contracts selectively: boundary-crossing, independently implemented collaborations need semantics; internal sketches may stay short. | WirfsBrock2003 |
+| `interface/unrealized` | info | Operation not linked to a responsibility | Connects an operation to the responsibility it serves; absent links are common in early sketches. | WirfsBrock2003 |
+| `interface/leaks-implementation` | info | Name that reveals implementation | Expose only what is needed: names of tables, keys, and locks couple clients to the implementation, and operations no client uses must still be kept stable. Word lists produce false positives (a restaurant API has tables), and an unused operation may serve clients outside the model, hence info; `cursor` and `thread` are left out because pagination cursors and discussion threads are ordinary API vocabulary. | Parnas1972; Clements2010 |
+| `interface/conflicting-vocabulary` | info | Term with two meanings | A shared vocabulary is a precondition of semantic interoperability; two meanings for one term signal a mismatch, unless the interfaces deliberately differ. | Bass2012; lecture L14 |
+| `interface/style-mismatch` | info | Connector and interface style disagree on synchrony | A message interface used through a synchronous call (or the reverse) contradicts the drawn connector; asynchronous REST patterns exist, hence info. | Clements2010 |
+| `interface/unspecified-use` | info | Cross-system dependency without an interface | Cross-system dependencies are where interoperability matters; an unused interface may be an entry point or dead weight, so the entry-point case is exempt and the rest is a question, not a verdict. | Bass2012 |
+| `interface/unused` | info | Interface nobody uses | Cross-system dependencies are where interoperability matters; an unused interface may be an entry point or dead weight, so the entry-point case is exempt and the rest is a question, not a verdict. | Bass2012 |
+| `interface/unused-operation` | info | Operation no client uses | Expose only what is needed: names of tables, keys, and locks couple clients to the implementation, and operations no client uses must still be kept stable. Word lists produce false positives (a restaurant API has tables), and an unused operation may serve clients outside the model, hence info; `cursor` and `thread` are left out because pagination cursors and discussion threads are ordinary API vocabulary. | Parnas1972; Clements2010 |
+| `interface/no-version` | info | Cross-system interface without a version | A shared interface changes in every system that uses it, so clients across a system boundary need to know which version they implement; a placeholder without a field cannot be called from the description alone. | Bass2012; Clements2010 |
+| `interface/unbound-parameter` | info | Placeholder without an input field | A shared interface changes in every system that uses it, so clients across a system boundary need to know which version they implement; a placeholder without a field cannot be called from the description alone. | Bass2012; Clements2010 |
+
+Sources: Clements2010 is Clements et al., *Documenting Software Architectures: Views and Beyond* (2nd ed.); WirfsBrock2003 is Wirfs-Brock and McKean, *Object Design: Roles, Responsibilities, and Collaborations*; Bass2012 is Bass, Clements, and Kazman, *Software Architecture in Practice* (3rd ed.); Parnas1972 is Parnas, "On the Criteria To Be Used in Decomposing Systems into Modules"; MCOMIB1999 is the Mars Climate Orbiter Mishap Investigation Board's Phase I report; lecture L14 is the course lecture on interfaces.
+
+### Saved layout
+
+A design model keeps where boxes were moved in its top-level `layout` section, which the C4 editor writes. Each
+entry is keyed by the view's canonical selector (a custom view by its id). Views in C4 notation (landscape, context,
+containers, components) keep a map from element id to the top-left corner of its box; a pinned box keeps its place,
+and the boxes it would overlap make room:
+
+```yaml
+layout:
+  containers of shop:
+    web: [40, 120]
+    orders: [420, 120]
+```
+
+Views drawn in UML notation keep named parts instead, because a UML drawing has bends and a lifeline order besides
+positions:
+
+```yaml
+layout:
+  code of checkout:
+    positions:                  # every drawn box
+      Checkout: [80, 40]
+  deployment production:
+    positions:                  # top-level nodes only
+      browser: [40, 40]
+      cloud: [320, 40]
+    routes:
+      - {from: web@browser, to: orders@pod, relation: derived, points: [[200, 90], [260, 90], [260, 150], [340, 150]]}
+  dynamic checkout:
+    lifelines: [web, orders, db, payments]
+  interfaces of orders:
+    positions:                  # every drawn box
+      web: [60, 40]
+      orders: [60, 260]
+```
+
+| Part | Views | Meaning |
+|---|---|---|
+| `positions` | code, deployment, interfaces | The top-left corner of a drawn box, by element id (in a deployment view by node id, and only for top-level nodes: what a node contains is laid out inside it and moves with it). |
+| `routes` | code, deployment | A line's bends, as `{from, to, relation, points}` with at least two points. In a code view `relation` is `collaborator` (a dependency line; `from` and `to` are the drawn ends). In a deployment view it is `link` (between nodes) or `derived` (between hosted instances, each written `<element>@<node>`). |
+| `lifelines` | dynamic | The order of the lifelines, as element ids. The lifelines of one organization box stay together. |
+
+Some things cannot hold a place, and the editor says why when asked to move them: nested deployment nodes and hosted
+instances, generalization and realization lines (the renderer routes them as one tree per target), a bend where
+two lines of one kind join the same two boxes in one direction, and in an interfaces view a ball, a socket, or the
+line between them (the renderer chooses its ends from the places of the boxes). A dynamic view has no positions.
+
+The layout travels inside the ArchUML text the view is drawn from, as an `@layout` block after `@startuml`, so the
+editor, an embedded figure, the static prerender, print, and "Copy ArchUML source" draw the same picture. A UML box
+with a saved position moves alone: its neighbours do not make room. A stored bend is dropped while drawing when its
+line no longer starts and ends on its two boxes (a box moved or grew), and the editor removes it at its next layout
+write. An entry that names something the view no longer draws is ignored. An interfaces view that holds a position
+also gets the line `layout ports facing` (see
+[Balls and Sockets That Face Their Partners](#balls-and-sockets-that-face-their-partners)), so its balls and sockets
+face their partners wherever the boxes are; without a saved position it is drawn as before.
+
+---
+
 ## Teaching Callouts
 
 Teaching callouts are colored explanation boxes with triangular pointers. They are an authoring overlay, **not UML notation** and not UML's folded-corner `note`. Use them to explain the meaning of a particular symbol, relationship, or label. All seven UML diagram renderers support them.
@@ -2936,6 +4321,44 @@ window.UMLClassDiagram.parse(specText);
 // Render from pre-parsed data
 window.UMLClassDiagram.renderFromData(containerEl, parsedData);
 ```
+
+### Drawing over a rendered diagram
+
+An editor or an overlay may add its own elements inside a rendered SVG: hit targets, an accessible listbox, menus,
+buttons, bend numbers. The bundle's route helpers must not take those for parts of the diagram. Put them in a group
+that carries the attribute `data-layout-ignore` (any value, also empty), or in a group with the class
+`uml-pg-edit-layer`, which the UML visual editor's hit layer uses:
+
+```html
+<g data-layout-ignore role="listbox" aria-label="Elements in this view"> … </g>
+```
+
+Everything inside such a group, and the group itself, is outside the layout, as `<defs>` is:
+
+- `UMLShared.collectEditableRoutes(svg)` lists no line or path inside it, so the ordinal ids of unnamed lines
+  (`edge-0`, `edge-1`, …) do not shift when an overlay draws a path;
+- no rectangle inside it is an obstacle when a route is checked or drawn;
+- moving a bend or the end of a route moves the route's own arrowheads and labels, but no element inside the group,
+  even one tagged with the route's id or lying at its end.
+
+Nothing else changes: a drawing that has no such group is drawn and edited as before.
+
+**Stored routes that no longer join their boxes.** By default `UMLShared.applyLayoutRoutes` applies every stored
+route of an `@layout` block. A caller that would rather drop a stored route whose first point no longer lies on the
+border of its source box, or whose last point no longer lies on the border of its target box (because a box moved
+or changed size after the route was saved), draws inside the opt-in:
+
+```javascript
+const dropped = UMLShared.renderSkippingDetachedRoutes(() => {
+  UMLClassDiagram.render(containerEl, specText);
+});
+// dropped: the ids of the stored routes left out, such as ['rel:7']
+```
+
+While `draw` runs, such a route is left out and its line keeps the route the renderer drew; the call returns the ids
+it left out. "On the border" allows 1.5 units, and the points are measured as the route's element will hold them.
+The container must be in the document, because the check measures the drawing. C4 views drawn in UML notation use it,
+so a stale bend costs no second drawing.
 
 ### Node.js CLI (`uml_render.js`)
 
