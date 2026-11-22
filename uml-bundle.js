@@ -3345,6 +3345,21 @@
     return (pkg.stereotype ? 2 : 1) * style.lineHeight + PACKAGE_FRAME.tabPadY * 2;
   }
 
+  // The lines in a package's tab: any stereotype, then the bold name.
+  function packageTabLines(pkg, style) {
+    var lines = [];
+    if (pkg.stereotype) lines.push({ text: stereotypeDisplayText(pkg.stereotype), bold: false, fontSize: style.fontSizeStereotype });
+    lines.push({ text: pkg.label, bold: true, fontSize: style.fontSizeBold });
+    return lines;
+  }
+
+  // The width of a tab holding `lines`.
+  function packageTabWidth(lines, style) {
+    var textW = 0;
+    lines.forEach(function(line) { textW = Math.max(textW, textWidth(line.text, line.bold, line.fontSize, style.fontFamily)); });
+    return Math.max(PACKAGE_FRAME.tabMinW, Math.ceil(textW + PACKAGE_FRAME.tabPadX * 2));
+  }
+
   // Frames for the packages that have drawn members, outermost first.
   // `elementExtent(id)` returns the area an element occupies, or null;
   // `elementIds` lists every drawn element. The layout does not group a
@@ -3353,8 +3368,8 @@
   // @pos. `style` carries the renderer's typography: fontFamily,
   // fontSizeBold, fontSizeStereotype, and lineHeight.
   function layoutPackageFrames(packages, elementExtent, elementIds, style) {
-    var padX = PACKAGE_FRAME.padX, padY = PACKAGE_FRAME.padY, tabPadX = PACKAGE_FRAME.tabPadX;
-    var tabPadY = PACKAGE_FRAME.tabPadY, tabMinW = PACKAGE_FRAME.tabMinW, bodyBeyondTab = PACKAGE_FRAME.bodyBeyondTab;
+    var padX = PACKAGE_FRAME.padX, padY = PACKAGE_FRAME.padY;
+    var tabPadY = PACKAGE_FRAME.tabPadY, bodyBeyondTab = PACKAGE_FRAME.bodyBeyondTab;
     var children = createStringMap();
     packages.forEach(function(pkg) {
       if (pkg.parent) (children[pkg.parent] = children[pkg.parent] || []).push(pkg);
@@ -3386,12 +3401,8 @@
       });
       if (!extent) return null;
 
-      var lines = [];
-      if (pkg.stereotype) lines.push({ text: stereotypeDisplayText(pkg.stereotype), bold: false, fontSize: style.fontSizeStereotype });
-      lines.push({ text: pkg.label, bold: true, fontSize: style.fontSizeBold });
-      var textW = 0;
-      lines.forEach(function(line) { textW = Math.max(textW, textWidth(line.text, line.bold, line.fontSize, style.fontFamily)); });
-      var tabW = Math.max(tabMinW, Math.ceil(textW + tabPadX * 2));
+      var lines = packageTabLines(pkg, style);
+      var tabW = packageTabWidth(lines, style);
       var tabH = packageTabHeight(pkg, style);
       var body = {
         x: extent.x - padX,
@@ -3500,6 +3511,197 @@
         return sum + PACKAGE_FRAME.padY + packageTabHeight(pkg, style);
       }, 0);
     };
+  }
+
+  // ─── Placements that keep packages together (compact layout) ───
+  //
+  // The layered engine places elements without regard to packages, so it
+  // can put an element inside a package it is not in, or two packages on
+  // each other. No widening of the gaps undoes that, since widening keeps
+  // the order of the boxes. A compact search therefore recognizes such a
+  // placement from its boxes and lays the same engine input out again with
+  // every package as one block.
+
+  // Whether the frames drawn around `boxes` ({id: {x, y, width, height}})
+  // would hold an element that is not in them, or overlap without one
+  // enclosing the other. Frames only grow once lines and labels are drawn,
+  // so a placement this rejects cannot be drawn without that overlap.
+  function packagesCollide(packages, boxes, style) {
+    if (!packages || !packages.length) return false;
+    var frames = layoutPackageFrames(packages, function(id) { return boxes[id] || null; }, Object.keys(boxes), style);
+    if (frames.some(function(frame) { return frame.overlaps.length > 0; })) return true;
+    return frames.some(function(a, i) {
+      return frames.slice(i + 1).some(function(b) {
+        if (packageEncloses(packages, a.id, b.id) || packageEncloses(packages, b.id, a.id)) return false;
+        var p = a.outer, q = b.outer;
+        return p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height;
+      });
+    });
+  }
+
+  /**
+   * Top-left positions of `nodes` ({id, width, height}) with every
+   * package's members kept together, or null when no package holds a node.
+   * Each package is laid out on its own, its direct members and inner
+   * packages as one level; padded and with its tab it becomes one node of
+   * the level around it. `layout(levelNodes, lift, depth)` is the
+   * renderer's call into the layered engine for the level `depth` packages
+   * deep (0 for the whole drawing) and returns {nodes: {id: {x, y}}}; `lift(records)`
+   * gives the records ({source, target, ...}, such as edges or edge sizes)
+   * that join two different nodes of that level, as copies naming those
+   * nodes (an end inside an inner package names the package's node).
+   * `packageOf(id)` names the package a node is declared in; `edges`
+   * ({source, target}) join the nodes; `style` is the renderer's
+   * typography, as for layoutPackageFrames. With `anchored`, each level
+   * inside a package also holds two anchor nodes, standing for the outside
+   * its edges come from and go to, which `lift` names as those ends.
+   */
+  var PACKAGE_ANCHORS = { source: '\u0000package-anchor:in', target: '\u0000package-anchor:out' };
+
+  function packageGroupedPositions(packages, packageOf, nodes, edges, layout, style, anchored) {
+    if (!packages || !packages.length) return null;
+    // Each node's packages, outermost first.
+    var chains = createStringMap();
+    var inPackage = false;
+    nodes.forEach(function(node) {
+      chains[node.id] = packageChain(packages, packageOf, node.id).reverse();
+      if (chains[node.id].length) inPackage = true;
+    });
+    if (!inPackage) return null;
+
+    // The node of level `depth` (below the package chain[depth - 1]) that
+    // holds `id`: an inner package's block, else the node itself.
+    function levelNode(id, depth) {
+      var chain = chains[id];
+      return depth < chain.length ? packageSceneId(chain[depth].id) : id;
+    }
+    function inLevel(id, levelId, depth) {
+      return !!chains[id] && (depth === 0 || (chains[id][depth - 1] && chains[id][depth - 1].id === levelId));
+    }
+
+    // Positions of the nodes at or below a level, relative to the level's
+    // top-left corner, and the level's size.
+    function placeLevel(levelId, depth) {
+      var items = [], blocks = createStringMap(), anchors = createStringMap();
+      nodes.forEach(function(node) {
+        if (!inLevel(node.id, levelId, depth)) return;
+        var id = levelNode(node.id, depth);
+        if (id === node.id) { items.push({ id: id, width: node.width, height: node.height, data: node.data }); return; }
+        if (blocks[id]) return;
+        blocks[id] = packageBlock(chains[node.id][depth], depth + 1);
+        items.push({ id: id, width: blocks[id].width, height: blocks[id].height });
+      });
+      // Inside a package, with `anchored`, what lies outside it is one
+      // node before the level (where edges come from) and one after it
+      // (where edges go), so members joined to the outside face that way.
+      function outside(id, end) {
+        return anchored && depth > 0 && chains[id] && !inLevel(id, levelId, depth) ? PACKAGE_ANCHORS[end] : null;
+      }
+      function levelEnd(id, end) {
+        if (inLevel(id, levelId, depth)) return levelNode(id, depth);
+        var anchor = outside(id, end);
+        return anchor && anchors[anchor] ? anchor : null;
+      }
+      (edges || []).forEach(function(edge) {
+        [['source', 'target'], ['target', 'source']].forEach(function(ends) {
+          var anchor = inLevel(edge[ends[1]], levelId, depth) ? outside(edge[ends[0]], ends[0]) : null;
+          if (anchor && !anchors[anchor]) {
+            anchors[anchor] = true;
+            items.push({ id: anchor, width: 1, height: 1, anchor: true });
+          }
+        });
+      });
+      function lift(records) {
+        return (records || []).reduce(function(lifted, record) {
+          var source = levelEnd(record.source, 'source'), target = levelEnd(record.target, 'target');
+          if (!source || !target || source === target || (anchors[source] && anchors[target])) return lifted;
+          // (both ends outside: that edge belongs to an outer level)
+          var copy = {};
+          for (var key in record) if (Object.prototype.hasOwnProperty.call(record, key)) copy[key] = record[key];
+          copy.source = source;
+          copy.target = target;
+          lifted.push(copy);
+          return lifted;
+        }, []);
+      }
+      var placed = items.length > 1 ? layout(items, lift, depth).nodes : createStringMap();
+      items = items.filter(function(item) { return !item.anchor; });
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      items.forEach(function(item) {
+        var at = placed[item.id] || { x: 0, y: 0 };
+        item.x = at.x; item.y = at.y;
+        minX = Math.min(minX, item.x); minY = Math.min(minY, item.y);
+        maxX = Math.max(maxX, item.x + item.width); maxY = Math.max(maxY, item.y + item.height);
+      });
+      var positions = createStringMap();
+      items.forEach(function(item) {
+        var x = item.x - minX, y = item.y - minY;
+        if (!blocks[item.id]) { positions[item.id] = { x: x, y: y }; return; }
+        var inner = blocks[item.id].positions;
+        Object.keys(inner).forEach(function(id) {
+          positions[id] = { x: x + inner[id].x, y: y + inner[id].y };
+        });
+      });
+      return { positions: positions, width: maxX - minX, height: maxY - minY };
+    }
+
+    // A package as one node: its contents inside the padding, below the tab,
+    // as layoutPackageFrames will frame them.
+    function packageBlock(pkg, depth) {
+      var content = placeLevel(pkg.id, depth);
+      var tabW = packageTabWidth(packageTabLines(pkg, style), style);
+      var tabH = packageTabHeight(pkg, style);
+      var positions = createStringMap();
+      Object.keys(content.positions).forEach(function(id) {
+        positions[id] = { x: content.positions[id].x + PACKAGE_FRAME.padX, y: content.positions[id].y + tabH + PACKAGE_FRAME.padY };
+      });
+      return {
+        positions: positions,
+        width: Math.max(content.width + PACKAGE_FRAME.padX * 2, tabW + PACKAGE_FRAME.bodyBeyondTab),
+        height: content.height + PACKAGE_FRAME.padY * 2 + tabH
+      };
+    }
+
+    return placeLevel(null, 0).positions;
+  }
+
+  function samePositionMaps(a, b) {
+    return Object.keys(a).every(function(id) { return b[id] && a[id].x === b[id].x && a[id].y === b[id].y; });
+  }
+
+  /**
+   * The layered engine's input `input` ({nodes, edges, options}, as a
+   * renderer gave it to UMLAdvancedLayout.compute) placed with each package
+   * as one block (packageGroupedPositions), every level in the direction
+   * `direction` the engine took for the whole drawing, once with anchors
+   * to the outside (so members face the edges that leave their package)
+   * and once without; unless the options lock the direction (an
+   * inheritance hierarchy reads top to bottom), also with the levels inside
+   * packages turned across it, alternating with depth, so a chain of
+   * packages can stack its members across the chain. Returns the distinct
+   * position maps (none when no package holds a node).
+   */
+  function packageBlockPlacements(input, direction, packages, packageOf, style) {
+    var along = direction || input.options.direction;
+    var across = along === 'LR' || along === 'RL' ? 'TB' : 'LR';
+    // Aligned levels with and without anchors to the outside; turned ones
+    // without (their flow runs across the outside's).
+    var variants = [{ turned: false, anchored: true }, { turned: false, anchored: false }];
+    if (!input.options.directionLocked) variants.push({ turned: true, anchored: false });
+    var placements = [];
+    variants.forEach(function(variant) {
+      var turned = variant.turned;
+      var positions = packageGroupedPositions(packages, packageOf, input.nodes, input.edges, function(nodes, lift, depth) {
+        var options = Object.assign({}, input.options, { edgeSizes: lift(input.options.edgeSizes) });
+        if (!input.options.directionLocked) {
+          options.direction = turned && depth % 2 === 1 ? across : along;
+          options.directionLocked = true;
+        }
+        return window.UMLAdvancedLayout.compute(nodes, lift(input.edges), options);
+      }, style, variant.anchored);
+      if (positions && !placements.some(function(other) { return samePositionMaps(other, positions); })) placements.push(positions);
+    });
+    return placements;
   }
 
   // The package shapes, to be drawn first so everything else paints over
@@ -6725,6 +6927,9 @@
     packageHolding: packageHolding,
     packageEncloses: packageEncloses,
     packageSeparation: packageSeparation,
+    packagesCollide: packagesCollide,
+    packageGroupedPositions: packageGroupedPositions,
+    packageBlockPlacements: packageBlockPlacements,
     drawPackageFrames: drawPackageFrames,
     drawPackageNames: drawPackageNames,
     updatePackageFrames: updatePackageFrames,
@@ -9996,9 +10201,13 @@
     if (ctx.tied(a, b)) return { lo: 0, hi: 0 };
     if (eA > sB + GEOMETRY_EPSILON) return { lo: -Infinity, hi: Infinity, free: true };
 
-    var clearance = ctx.clearances.boxClearance + Math.max(ctx.extra(a.id), ctx.extra(b.id)) +
-      ctx.separation(a.id, b.id, axis.start);
-    if (ctx.otherOverlap(a, b) > -clearance) {
+    var base = ctx.clearances.boxClearance + Math.max(ctx.extra(a.id), ctx.extra(b.id));
+    var clearance = base + ctx.separation(a.id, b.id, axis.start);
+    // What lies between the two across the axis (package frames) reaches
+    // as far as its separation there: nearer than that, they face.
+    var other = axis.start === 'x' ? 'y' : 'x';
+    var across = Math.max(ctx.separation(a.id, b.id, other), ctx.separation(b.id, a.id, other));
+    if (ctx.otherOverlap(a, b) > -Math.max(clearance, base + across)) {
       var gap = sB - eA;
       var asked = Math.max(ctx.room(a.id, 'after'), ctx.room(b.id, 'before'));
       var required = Math.min(gap, Math.max(clearance, asked, occupiedWidth(a, b, axis, ctx, clearance)));
@@ -11697,7 +11906,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var engineOptions = {
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: effectiveDirection,
@@ -11707,7 +11916,8 @@
       labelFontSize: CFG.fontSizeStereotype,
       markerExtent: Math.max(CFG.triangleW, CFG.diamondH, CFG.arrowSize) + 4,
       edgeSizes: classEdgeSizes
-    });
+    };
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, engineOptions);
 
     // Read back positions
     for (var n in result.nodes) {
@@ -12202,7 +12412,10 @@
       height: maxY - minY,
       offsetX: -minX,
       offsetY: -minY,
-      layoutResult: result // passthrough edge route if ever needed by generateSVG
+      layoutResult: result, // passthrough edge route if ever needed by generateSVG
+      // What the layered engine was given, so compact layout can place the
+      // same input again with packages kept together.
+      engineInput: { nodes: layoutNodes, edges: layoutEdges, options: engineOptions }
     };
   }
 
@@ -12225,7 +12438,12 @@
         maxX = Math.max(maxX, rect.right); maxY = Math.max(maxY, rect.bottom);
       });
       return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-    }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
+    }, Object.keys(entries), classPackageStyle());
+  }
+
+  // The typography of package tabs, from the current metrics.
+  function classPackageStyle() {
+    return { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight };
   }
 
   // Member note targets are derived from class positions: rebuild them once
@@ -15863,9 +16081,39 @@
   }
 
   // An engine placement, opened up only where a label lacks room.
-  function withLabelRoom(layout, entries, parsed, clearances) {
-    var placement = placementOf(layout);
+  function withLabelRoom(placement, entries, parsed, clearances) {
     return roomyPlacement(placement, entries, roomySpread(placement, entries, parsed, clearances, 1));
+  }
+
+  // Whether the package frames drawn around a placement's boxes would hold
+  // a class that is not in them, or lie on each other.
+  function placementCollides(placement, entries, parsed) {
+    if (!parsed.packages || !parsed.packages.length) return false;
+    var boxes = {};
+    Object.keys(placement.positions).forEach(function(name) {
+      var p = placement.positions[name], box = entries[name].box;
+      boxes[name] = { x: p.x, y: p.y, width: box.width, height: box.height };
+    });
+    return UMLShared.packagesCollide(parsed.packages, boxes, classPackageStyle());
+  }
+
+  // When the engine's placement of a layout would draw packages over
+  // classes they do not hold, or over each other: the same engine input
+  // placed with each package as one block (UMLShared.packageBlockPlacements).
+  // None otherwise.
+  function packagedPlacements(layout, parsed) {
+    if (!layout.engineInput || !placementCollides(placementOf(layout), layout.entries, parsed)) return [];
+    return UMLShared.packageBlockPlacements(layout.engineInput, layout.layoutResult && layout.layoutResult.direction, parsed.packages, function(name) {
+      var entry = layout.entries[name];
+      return entry && entry.cls ? entry.cls.package : null;
+    }, classPackageStyle()).map(function(positions) { return { positions: positions }; });
+  }
+
+  // The candidates that draw every package around its own classes only;
+  // all of them when none does.
+  function keepingPackages(placements, entries, parsed) {
+    var kept = placements.filter(function(placement) { return !placementCollides(placement, entries, parsed); });
+    return kept.length ? kept : placements;
   }
 
   // Equal up to a translation of the whole drawing.
@@ -15885,14 +16133,48 @@
    * for the pane's shape and for the other direction (`shaped`); the
    * unconnected groups re-packed into rows for the pane; and the normal one
    * with extra room to route and label. Inheritance stays vertical: groups
-   * move whole, never rotate.
+   * move whole, never rotate. With packages, an engine placement that
+   * would draw a package over a class it does not hold (or over another
+   * package) is also placed package by package; when the normal one would,
+   * the candidates start from its best such placement. A candidate that
+   * still would is dropped (unless every one would).
    */
   function compactClassCandidates(reference, shaped, parsed, pane, clearances) {
-    var normal = withLabelRoom(reference, reference.entries, parsed, clearances);
+    var plain = classCandidates(placementOf(reference), shaped.map(placementOf), reference, parsed, pane, clearances);
+    var blocks = packageBlockCandidates(reference, shaped, parsed, pane);
+    if (!blocks.length) return plain;
+    // When the normal placement would draw a package over what it does not
+    // hold, the candidates start from its best placement package by
+    // package; the others follow.
+    var ordered = placementCollides(placementOf(reference), reference.entries, parsed)
+      ? classCandidates(blocks[0], blocks.slice(1), reference, parsed, pane, clearances).concat(plain)
+      : plain.concat(blocks.map(function(placement) { return withLabelRoom(placement, reference.entries, parsed, clearances); }));
+    var distinct = [];
+    ordered.forEach(function(placement) {
+      if (!distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
+    });
+    return keepingPackages(distinct, reference.entries, parsed);
+  }
+
+  // The engine placements (normal first, then `shaped`) that would draw a
+  // package over what it does not hold, placed package by package instead;
+  // the normal one's best for the pane first. None without such a placement.
+  function packageBlockCandidates(reference, shaped, parsed, pane) {
+    var normal = packagedPlacements(reference, parsed).map(function(placement, i) {
+      var size = estimatedSize(placement, reference.entries);
+      return { placement: placement, i: i, scale: Math.min(pane.width / size.width, pane.height / size.height) };
+    }).sort(function(a, b) { return b.scale - a.scale || a.i - b.i; }).map(function(ranked) { return ranked.placement; });
+    return shaped.reduce(function(blocks, layout) { return blocks.concat(packagedPlacements(layout, parsed)); }, normal);
+  }
+
+  // The candidates around the engine placement `base`, with the other
+  // engine placements `others`, for the classes of `reference`.
+  function classCandidates(base, others, reference, parsed, pane, clearances) {
+    var normal = withLabelRoom(base, reference.entries, parsed, clearances);
     var roomy = roomyPlacement(normal, reference.entries, roomySpread(normal, reference.entries, parsed, clearances, COMPACT_ROOMY_SPREAD));
     var distinct = [normal];
-    shaped.forEach(function(layout) {
-      var placement = withLabelRoom(layout, reference.entries, parsed, clearances);
+    others.forEach(function(other) {
+      var placement = withLabelRoom(other, reference.entries, parsed, clearances);
       if (!distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
     });
     var groups = connectedClassGroups(parsed, reference.entries);
@@ -21886,11 +22168,13 @@
       node.height = entry.box.height = height;
       resizedForLabels = true;
     }
+    var engineOptions = layoutOptions;
     if (resizedForLabels) {
-      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, Object.assign({}, layoutOptions, {
+      engineOptions = Object.assign({}, layoutOptions, {
         direction: result.direction || layoutOptions.direction,
         directionLocked: true
-      }));
+      });
+      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, engineOptions);
     }
     var actualDirection = result.direction || parsed.direction || 'LR';
 
@@ -23151,7 +23435,10 @@
       offsetX: -minX,
       offsetY: -minY,
       layoutResult: result,
-      backEdgeLanes: backEdgeLanes
+      backEdgeLanes: backEdgeLanes,
+      // What the layered engine was given, so compact layout can place the
+      // same input again with packages kept together.
+      engineInput: { nodes: layoutNodes, edges: layoutEdges, options: engineOptions }
     };
   }
 
@@ -24121,7 +24408,12 @@
     if (!parsed.packages || !parsed.packages.length) return [];
     return UMLShared.layoutPackageFrames(parsed.packages, function(id) {
       return entries[id] ? componentDrawnExtent(entries[id], joinedPorts, decorations && decorations[id]) : null;
-    }, Object.keys(entries), { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight });
+    }, Object.keys(entries), componentPackageStyle());
+  }
+
+  // The typography of package tabs, from the current metrics.
+  function componentPackageStyle() {
+    return { fontFamily: CFG.fontFamily, fontSizeBold: CFG.fontSizeBold, fontSizeStereotype: CFG.fontSizeStereotype, lineHeight: CFG.lineHeight };
   }
 
   // With a scene (compact), also records what it draws there and frames the
@@ -27426,53 +27718,111 @@
     var componentsByName = {};
     parsed.components.forEach(function(comp) { componentsByName[comp.name] = comp; });
 
+    function packageOf(name) {
+      return componentsByName[name] ? componentsByName[name].package || null : null;
+    }
+
+    // Whether the frames drawn around these components' boxes would hold a
+    // component they do not, or lie on each other.
+    function collides(entries) {
+      if (!parsed.packages || !parsed.packages.length) return false;
+      var boxes = {};
+      Object.keys(entries).forEach(function(name) {
+        var e = entries[name];
+        boxes[name] = { x: e.x, y: e.y, width: e.box.width, height: e.box.height };
+      });
+      return UMLShared.packagesCollide(parsed.packages, boxes, componentPackageStyle());
+    }
+
+    // A layout's engine input placed package by package, when its own
+    // placement collides; none otherwise.
+    function packagedPositions(layout) {
+      if (!layout.engineInput || !collides(layout.entries)) return [];
+      return UMLShared.packageBlockPlacements(layout.engineInput, layout.layoutResult && layout.layoutResult.direction,
+        parsed.packages, packageOf, componentPackageStyle());
+    }
+
+    // The placements whose packages hold only their own components; all of
+    // them when none does. `entries` are the normal placement's (a
+    // component's box does not depend on where it is placed).
+    function keepingPackages(placements, entries) {
+      var kept = placements.filter(function(placement) {
+        if (!placement.positions) return !collides(entries);
+        var moved = {};
+        Object.keys(entries).forEach(function(name) {
+          var p = placement.positions[name] || entries[name];
+          moved[name] = { x: p.x, y: p.y, box: entries[name].box };
+        });
+        return !collides(moved);
+      });
+      return kept.length ? kept : placements;
+    }
+
+    // The engine placements (normal, then for the pane) that would draw a
+    // package over what it does not hold, placed package by package
+    // instead; the normal one's best for the pane first.
+    function packageBlockCandidates(normal, shapedLayout) {
+      var ranked = packagedPositions(normal).map(function(positions, i) {
+        return { positions: positions, i: i, scale: paneScale(positionedBounds(normal.entries, positions), pane) };
+      }).sort(function(a, b) { return b.scale - a.scale || a.i - b.i; }).map(function(r) { return r.positions; });
+      return ranked.concat(packagedPositions(shapedLayout)).map(function(positions) {
+        return { positions: positions, noteReach: 'far' };
+      });
+    }
+
+    // The normal placement; the placement the spec gets without a layout
+    // line in this pane, when it differs; then the normal ranks wrapped
+    // into 2, 3, … bands (one rank per band runs the chain across the
+    // authored direction), with tight and with roomy bands, each only when
+    // its boxes alone promise larger text than the normal placement's, so
+    // hopeless wraps spend no pass. With packages, the engine placements
+    // placed package by package where they would draw a package over what
+    // it does not hold: first, when the normal one would, else last; and
+    // no placement that would.
+    function placementsToTry() {
+      var reference = { positions: null };
+      var normal = layoutFor(reference);
+      var entries = normal.entries;
+      // The direction the layered placement took, which may differ from
+      // the authored one when it fits the pane better.
+      var flow = (normal.layoutResult && normal.layoutResult.direction) || parsed.direction || 'LR';
+      var axis = flow === 'TB' || flow === 'BT' ? 'y' : 'x';
+      var ranks = componentRanks(entries, axis);
+      var placements = [reference];
+      // Only the normal placement is widened where a note finds no clear
+      // spot beside its target; the others, and a copy of the normal one,
+      // let such a note move farther instead.
+      if (parsed.notes.length) placements.push({ positions: null, noteReach: 'far' });
+      // The placement without a layout line is a candidate when its shape
+      // differs; a mere shuffle within the same bounds costs a pass for
+      // nothing.
+      var normalBounds = entryBounds(entries);
+      var shapedLayout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
+      var shaped = positionsOf(shapedLayout.entries);
+      if (!sameSize(positionedBounds(entries, shaped), normalBounds)) placements.push({ positions: shaped, noteReach: 'far' });
+      var normalScale = paneScale(normalBounds, pane);
+      for (var bands = 2; bands <= Math.min(ranks.length, COMPACT_COMPONENT_MAX_BANDS); bands++) {
+        // Equal ranks per band give equal wraps: skip repeats.
+        if (Math.ceil(ranks.length / bands) === Math.ceil(ranks.length / (bands - 1))) continue;
+        var tight = wrapRanks(entries, ranks, axis, bands, function(placed) { return tightBandGap(parsed, placed); });
+        var roomy = wrapRanks(entries, ranks, axis, bands, function() { return roomyBandGap(parsed); });
+        [tight, roomy].forEach(function(wrapped, i) {
+          if (i > 0 && samePositions(wrapped, tight)) return;
+          if (paneScale(positionedBounds(entries, wrapped), pane) > normalScale) placements.push({ positions: wrapped, noteReach: 'far' });
+        });
+      }
+      var blocks = packageBlockCandidates(normal, shapedLayout);
+      if (!blocks.length) return placements;
+      return keepingPackages(collides(entries) ? blocks.concat(placements) : placements.concat(blocks), entries);
+    }
+
     return {
       clearances: COMPACT_COMPONENT_CLEARANCES,
       // The squeeze keeps room for the package frames between two components.
-      separation: UMLShared.packageSeparation(parsed.packages, function(name) {
-        return componentsByName[name] ? componentsByName[name].package || null : null;
-      }, { lineHeight: CFG.lineHeight }),
+      separation: UMLShared.packageSeparation(parsed.packages, packageOf, { lineHeight: CFG.lineHeight }),
       size: { boxes: parsed.components.length + parsed.notes.length, edges: parsed.connectors.length },
 
-      // The normal placement; the placement the spec gets without a layout
-      // line in this pane, when it differs; then the normal ranks wrapped
-      // into 2, 3, … bands (one rank per band runs the chain across the
-      // authored direction), with tight and with roomy bands, each only
-      // when its boxes alone promise larger text than the normal
-      // placement's, so hopeless wraps spend no pass.
-      candidates: function() {
-        var reference = { positions: null };
-        var normal = layoutFor(reference);
-        var entries = normal.entries;
-        // The direction the layered placement took, which may differ from
-        // the authored one when it fits the pane better.
-        var flow = (normal.layoutResult && normal.layoutResult.direction) || parsed.direction || 'LR';
-        var axis = flow === 'TB' || flow === 'BT' ? 'y' : 'x';
-        var ranks = componentRanks(entries, axis);
-        var placements = [reference];
-        // Only the normal placement is widened where a note finds no clear
-        // spot beside its target; the others, and a copy of the normal one,
-        // let such a note move farther instead.
-        if (parsed.notes.length) placements.push({ positions: null, noteReach: 'far' });
-        // The placement without a layout line is a candidate when its shape
-        // differs; a mere shuffle within the same bounds costs a pass for
-        // nothing.
-        var normalBounds = entryBounds(entries);
-        var shaped = positionsOf(computeLayout(parsed, { containerAspect: pane.width / pane.height }).entries);
-        if (!sameSize(positionedBounds(entries, shaped), normalBounds)) placements.push({ positions: shaped, noteReach: 'far' });
-        var normalScale = paneScale(normalBounds, pane);
-        for (var bands = 2; bands <= Math.min(ranks.length, COMPACT_COMPONENT_MAX_BANDS); bands++) {
-          // Equal ranks per band give equal wraps: skip repeats.
-          if (Math.ceil(ranks.length / bands) === Math.ceil(ranks.length / (bands - 1))) continue;
-          var tight = wrapRanks(entries, ranks, axis, bands, function(placed) { return tightBandGap(parsed, placed); });
-          var roomy = wrapRanks(entries, ranks, axis, bands, function() { return roomyBandGap(parsed); });
-          [tight, roomy].forEach(function(wrapped, i) {
-            if (i > 0 && samePositions(wrapped, tight)) return;
-            if (paneScale(positionedBounds(entries, wrapped), pane) > normalScale) placements.push({ positions: wrapped, noteReach: 'far' });
-          });
-        }
-        return placements;
-      },
+      candidates: placementsToTry,
 
       bodies: function(placement) {
         var entries = layoutFor(placement).entries;

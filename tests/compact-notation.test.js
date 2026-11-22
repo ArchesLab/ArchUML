@@ -256,6 +256,22 @@ test('the squeeze keeps the separation a pair asks for on each axis, and no more
   assert.deepEqual([gapX(kept), gapY(kept)], [38, 58], 'with it: the clearance and the separation');
 });
 
+test('the squeeze keeps diagonal neighbours apart by their separation on at least one axis', () => {
+  // Two boxes in different packages, one below and right of the other:
+  // their frames reach 36 units across and 60 down. Closing the x gap is
+  // only safe when they are that far apart in y, and they are not.
+  const { UMLCompactLayout } = loadBundle();
+  const clearances = { lanePitch: 10, boxClearance: 8, stub: 12, labelPad: 4 };
+  const bodies = [
+    { id: 'a', x: 0, y: 0, width: 40, height: 20, pinned: false },
+    { id: 'b', x: 140, y: 70, width: 40, height: 20, pinned: false },
+  ];
+  const separation = (a, b, axis) => (axis === 'x' ? 36 : 60);
+  const at = UMLCompactLayout.squeeze(bodies, { nodes: [], routes: [], labels: [] }, clearances, { separation });
+  const gapX = at.b.x - (at.a.x + 40), gapY = at.b.y - (at.a.y + 20);
+  assert.ok(gapX >= 8 + 36 || gapY >= 8 + 60, `x gap ${gapX}, y gap ${gapY}`);
+});
+
 for (const [name, source] of [['a junction', JUNCTION], ['a fork and a join', FORK_AND_JOIN]]) {
   test(`compact state diagram with ${name} has no layout issues`, () => {
     // Transitions meet at these pseudostates by design; the judge must not
@@ -299,9 +315,9 @@ async function drawnPackages(page, renderer, source) {
 
 const PACKAGE_DRAWINGS = [
   ['nested class', 'UMLClassDiagram', NESTED_CLASS_PACKAGES, { shop: ['Cart', 'Product', 'Category'], catalog: ['Product', 'Category'] }, ['600x750', '1200x675']],
-  // In a wide pane every placement the layout tries interleaves the two
-  // packages (see REFERENCE.md, Compact Layout).
-  ['two class', 'UMLClassDiagram', TWO_PACKAGES, { orders: ['Order', 'LineItem'], billing: ['Invoice', 'Payment'] }, ['600x750']],
+  // The layered engine interleaves these two packages in a wide pane;
+  // compact places them package by package instead.
+  ['two class', 'UMLClassDiagram', TWO_PACKAGES, { orders: ['Order', 'LineItem'], billing: ['Invoice', 'Payment'] }, ['600x750', '1200x675']],
   ['component', 'UMLComponentDiagram', HEADLINER, { Headliner: ['OPC', 'Loyalty'] }, ['600x750', '1200x675']],
   ['component with a joined interface', 'UMLComponentDiagram', JOINED_IN_PACKAGE, { OPC: ['Workflow', 'Callbacks'] }, ['600x750', '1200x675']],
 ];
