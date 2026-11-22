@@ -16060,15 +16060,37 @@
     return b;
   }
 
+  // What a group covers with the text of its associations: the label of two
+  // classes stacked one above the other sits beside their line, to its
+  // right, so it can reach past both boxes. (Between two classes side by
+  // side the text lies in the gap, inside the boxes' extent.)
+  function labelledBounds(names, placement, entries, parsed, clearances) {
+    var b = boundsOfNames(names, placement, entries);
+    var inGroup = {};
+    names.forEach(function(name) { inGroup[name] = true; });
+    parsed.relationships.forEach(function(rel) {
+      if (rel.from === rel.to || !inGroup[rel.from] || !inGroup[rel.to]) return;
+      var width = (rel.label || rel.labelDirection) ? classRelationLabelWidth(rel, CFG.fontSizeStereotype) : 0;
+      if (!width) return;
+      var p = placement.positions[rel.from], q = placement.positions[rel.to];
+      var pb = entries[rel.from].box, qb = entries[rel.to].box;
+      var left = Math.max(p.x, q.x), right = Math.min(p.x + pb.width, q.x + qb.width);
+      var stacked = right > left && (p.y + pb.height <= q.y || q.y + qb.height <= p.y);
+      if (stacked) b.maxX = Math.max(b.maxX, (left + right) / 2 + clearances.labelPad + width);
+    });
+    return b;
+  }
+
   // The groups, each kept as drawn, in rows of `perRow`. Nothing runs
-  // between unconnected groups, so they sit `groupGap` apart.
-  function groupsInRows(groups, placement, entries, perRow, groupGap) {
+  // between unconnected groups, so they sit `groupGap` apart, each with the
+  // text of its associations (labelledBounds).
+  function groupsInRows(groups, placement, entries, perRow, groupGap, parsed, clearances) {
     var positions = {};
     var cursorY = 0;
     for (var start = 0; start < groups.length; start += perRow) {
       var cursorX = 0, rowHeight = 0;
       groups.slice(start, start + perRow).forEach(function(names) {
-        var b = boundsOfNames(names, placement, entries);
+        var b = labelledBounds(names, placement, entries, parsed, clearances);
         names.forEach(function(name) {
           var p = placement.positions[name];
           positions[name] = { x: cursorX + p.x - b.minX, y: cursorY + p.y - b.minY };
@@ -16079,6 +16101,14 @@
       cursorY += rowHeight + groupGap;
     }
     return { positions: positions };
+  }
+
+  // The estimated size of groups packed by groupsInRows, their text included.
+  function packedSize(groups, placement, entries, parsed, clearances) {
+    var all = groups.map(function(names) { return labelledBounds(names, placement, entries, parsed, clearances); });
+    var width = Math.max.apply(Math, all.map(function(b) { return b.maxX; })) - Math.min.apply(Math, all.map(function(b) { return b.minX; }));
+    var height = Math.max.apply(Math, all.map(function(b) { return b.maxY; })) - Math.min.apply(Math, all.map(function(b) { return b.minY; }));
+    return { width: width + CFG.svgPad * 2, height: height + CFG.svgPad * 2 };
   }
 
   function estimatedSize(placement, entries) {
@@ -16294,9 +16324,13 @@
     var normal = withLabelRoom(base, reference.entries, parsed, clearances);
     var roomy = roomyPlacement(normal, reference.entries, roomySpread(normal, reference.entries, parsed, clearances, COMPACT_ROOMY_SPREAD));
     var distinct = [normal];
+    var drawnOtherwise = [];
     others.forEach(function(other) {
       var placement = withLabelRoom(other, reference.entries, parsed, clearances);
-      if (!distinct.some(function(q) { return samePlacement(placement, q); })) distinct.push(placement);
+      if (!distinct.some(function(q) { return samePlacement(placement, q); })) {
+        distinct.push(placement);
+        drawnOtherwise.push(placement);
+      }
     });
     var groups = connectedClassGroups(parsed, reference.entries);
     // Reading order of the groups as the normal layout drew them.
@@ -16310,18 +16344,40 @@
     starCandidates(groups, normal, reference.entries, parsed, pane, clearances).forEach(addDistinct);
     addDistinct(satellitesBeside(normal, reference.entries, parsed, clearances));
     if (groups.length < 2) return parsed.relationships.length ? distinct.concat([roomy]) : distinct;
-    // A packing that puts the groups into the rows the normal layout already
-    // uses would only repeat it.
+    // The groups packed into rows as the normal placement draws them, the
+    // two that best fit the pane. A packing into the rows the normal layout
+    // already uses would only repeat it.
     var normalRows = groupRows(groups, normal, reference.entries);
-    var packed = [];
+    var packed = packings(groups, normal, reference.entries, parsed, pane, clearances).filter(function(p) {
+      return groupRows(groups, p.placement, reference.entries) !== normalRows;
+    }).slice(0, 2);
+    // Also the groups as another engine placement draws them (the other
+    // direction), where that packing promises more than every other
+    // candidate, labels counted (packedSize): two classes side by side carry
+    // their label along their line, which can suit a narrow pane better than
+    // the same two stacked with the label beside them.
+    var otherwise = drawnOtherwise.reduce(function(best, drawn) {
+      var top = packings(groups, drawn, reference.entries, parsed, pane, clearances)[0];
+      return top && (!best || top.scale > best.scale) ? top : best;
+    }, null);
+    var promised = distinct.concat(packed.map(function(p) { return p.placement; })).map(function(placement) {
+      var size = packedSize(groups, placement, reference.entries, parsed, clearances);
+      return Math.min(pane.width / size.width, pane.height / size.height);
+    });
+    if (otherwise && promised.every(function(scale) { return otherwise.scale > scale; })) packed.push(otherwise);
+    return distinct.concat(packed.map(function(p) { return p.placement; }), [roomy]);
+  }
+
+  // Every packing of the groups of `drawn` into rows (1 to all per row), as
+  // {placement, scale, perRow}, the best estimated fit for the pane first.
+  function packings(groups, drawn, entries, parsed, pane, clearances) {
+    var all = [];
     for (var perRow = 1; perRow <= groups.length; perRow++) {
-      var placement = groupsInRows(groups, normal, reference.entries, perRow, 2 * clearances.lanePitch);
-      if (groupRows(groups, placement, reference.entries) === normalRows) continue;
-      var size = estimatedSize(placement, reference.entries);
-      packed.push({ placement: placement, scale: Math.min(pane.width / size.width, pane.height / size.height), perRow: perRow });
+      var placement = groupsInRows(groups, drawn, entries, perRow, 2 * clearances.lanePitch, parsed, clearances);
+      var size = packedSize(groups, placement, entries, parsed, clearances);
+      all.push({ placement: placement, scale: Math.min(pane.width / size.width, pane.height / size.height), perRow: perRow });
     }
-    packed.sort(function(a, b) { return b.scale - a.scale || a.perRow - b.perRow; });
-    return distinct.concat(packed.slice(0, 2).map(function(p) { return p.placement; }), [roomy]);
+    return all.sort(function(a, b) { return b.scale - a.scale || a.perRow - b.perRow; });
   }
 
   // ─── Satellites ──────────────────────────────────────────────────────
@@ -16446,8 +16502,8 @@
       });
       var best = null;
       for (var perRow = 1; perRow <= groups.length; perRow++) {
-        var placement = groupsInRows(groups, drawn, entries, perRow, 2 * clearances.lanePitch);
-        var size = estimatedSize(placement, entries);
+        var placement = groupsInRows(groups, drawn, entries, perRow, 2 * clearances.lanePitch, parsed, clearances);
+        var size = packedSize(groups, placement, entries, parsed, clearances);
         var scale = Math.min(pane.width / size.width, pane.height / size.height);
         if (!best || scale > best.scale) best = { placement: placement, scale: scale };
       }

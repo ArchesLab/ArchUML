@@ -232,12 +232,15 @@ function assertLabelsNearestOwnRoute(drawing) {
   }
 }
 
-// The plan's target. Measured 784, then 818 once unrelated rows stopped
-// holding each other's gaps (2026-11-21): the 323-unit label beside
-// Created → Cancelled sets the width, and the squeeze that reaches 735 puts
-// "return_initiated" beside Refunded → final, so the retry keeps that label's
-// room beside Paid. No placement found keeps every label on its route
-// within 700. Kept visible as a todo for the plan owner.
+// The plan's target, an estimate (design section 7). Measured 784, then 818
+// once unrelated rows stopped holding each other's gaps (2026-11-21): the
+// 323-unit label of Created → Cancelled sets the width, and the squeeze that
+// reaches 735 puts "return_initiated" beside Refunded → final, because the
+// stretch of Paid → Refunded is flanked by Cancelled → final on its right and
+// by the lead of Paid → Shipped on its left; the retry keeps that label's
+// room beside Paid (818). The other direction draws 1768 units wide. No
+// placement found keeps every label on its route within 700. Kept visible
+// as a todo for the plan owner.
 test('order lifecycle in a 600×750 pane is at most 700 units wide', {
   todo: 'measured 818 units; see the comment above',
 }, async () => {

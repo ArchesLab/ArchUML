@@ -583,12 +583,18 @@ const compactFor = (body, pane) => source(`layout compact ${paneName(pane)}`, bo
 // Each stays a todo until a change to placement or routing meets it.
 const SHORTFALLS = {
   'six-class order 1200x675 size': 'measured 17.86 px (1142×430) against 24.58 px today (0.73×). Today\'s 830×381 ' +
-    'is narrow because "places", "has", "paidBy" and "references" float away from their lines; the squeezes that ' +
-    'keep them by their lines (933×430, 21.9 px) route with 13 bends where the default layout has 9',
-  'layers with two notes 600x750 size': 'measured 13.04 px (782×685) against 14.59 px today (0.89×). The reference ' +
-    'opens its rows only by the height of "calls", "owns" and "contains", which sit beside their vertical lines; ' +
-    'squeezed, it routes "manages" with a sixth bend where the default layout has five, and with nine passes the ' +
-    'best drawing within five bends is 720×614 (14.17 px)',
+    'is narrow because "places", "has", "paidBy" and "references" float 28 to 42 units from their lines (the bound ' +
+    'is 23); the default layout (19.23 px) floats "places", "contains" and "references". Of the drawings compact ' +
+    'tries, the squeezes that keep every label by its line (933×430, 21.86 px) route with 13 bends where the default ' +
+    'layout has 9, and the one within 9 bends that is smaller (1053×407, 19.37 px, 4 bends) sets "paidBy" 30 units ' +
+    'from its line, beside the two multiplicities of its 40-unit lead; its retry draws the same placement. An ' +
+    'arrangement in two rows (Customer, Order and Item above Address, Payment and Invoice) is not among the ' +
+    'engine\'s placements (2026-11-21)',
+  'layers with two notes 600x750 size': 'measured 13.04 px (782×685) against 14.59 px today (0.89×). The width is ' +
+    'the note "right of Game", set beyond the lead of "manages"; today\'s sets that note lower, right of Board, and ' +
+    '"calls" 23 units from its line (the bound is 22). The squeeze of the reference (684×509, 14.91 px) routes with ' +
+    '8 bends where the default layout has 5, and sets "owns" nearer the note\'s link than its own line; with nine ' +
+    'passes the best drawing within five bends was 720×614 (14.17 px) (2026-11-21)',
 };
 const shortfall = key => (SHORTFALLS[key] ? { todo: SHORTFALLS[key] } : {});
 
@@ -667,10 +673,17 @@ for (const pane of REPORTED_PANES) {
     assert.equal(compact.issues, null);
   });
 
-  // Today's compact in a 600×700 element stacks the six pairs in one column
-  // with six labels floating above and below it, away from their lines
-  // (19.3 px); drawn with each label by its line, compact reaches 15.0 px.
-  const todayFloats = pane.width === 600 ? { todo: "today's 19.3 px floats six labels away from their lines; compact keeps them and reaches 15.0 px" } : {};
+  // Today's compact in a 600×700 element (19.25 px, 329×618) sets each pair
+  // side by side with almost no gap and floats all six labels above and
+  // below the column, 35 units and more from their lines. With every label
+  // by its line, compact reaches 17.96 px (568×405): one pair per row, each
+  // side by side with its label along its line, the widest pair 568 units
+  // (its label, the label placer's end pads and the end markers between the
+  // boxes). Stacked instead, each label beside its line, the six pairs need
+  // about 760 units of height (15.6 px), and two columns of them 687 units
+  // of width (14.86 px). 98 % of today's would need at most 541 units wide:
+  // the labels over the end markers or away from their lines (2026-11-21).
+  const todayFloats = pane.width === 600 ? { todo: "measured 17.96 px against today's 19.25 px, which floats all six labels away from their lines; see the comment above" } : {};
   test(`reverse navigability (12 classes): compact for ${paneName(pane)} shows labels at least 98 % as large as today's compact`, todayFloats, async () => {
     const now = predictedLabelSize(await measureOnce(BUNDLE, compactFor(REVERSE_NAVIGABILITY, pane), pane), pane);
     const today = predictedLabelSize(await measureOnce(previousBundle, source('layout compact', REVERSE_NAVIGABILITY), pane), pane);
@@ -684,6 +697,20 @@ for (const pane of REPORTED_PANES) {
     assert.ok(bends(compact) <= bends(normal), `bends ${bends(compact)} > ${bends(normal)}`);
   });
 }
+
+// Unconnected pairs, each joined by a label wider than either box, laid out
+// for a narrow pane show larger text there than the drawing laid out for a
+// wide pane, every label by its line: the pane decides whether a pair sits
+// side by side (its label along the line) or stacked (its label beside it),
+// and the groups are packed with the room their labels take.
+test('the pane shapes the compact drawing of unconnected pairs with long labels', async () => {
+  const narrow = { width: 600, height: 700 };
+  const forNarrow = await measureOnce(BUNDLE, compactFor(REVERSE_NAVIGABILITY, narrow), narrow);
+  const forWide = await measureOnce(BUNDLE, compactFor(REVERSE_NAVIGABILITY, { width: 1200, height: 675 }), narrow);
+  const tall = predictedLabelSize(forNarrow, narrow), wide = predictedLabelSize(forWide, narrow);
+  assert.ok(tall > wide, `in a 600×700 pane: laid out for it ${tall.toFixed(2)} px, laid out for 1200×675 ${wide.toFixed(2)} px`);
+  assert.deepEqual(overlappingBoxes(forNarrow).concat(relationLabelDefects(forNarrow, REVERSE_NAVIGABILITY)), []);
+});
 
 // test-uml.html, the three classes joined by "reads >" and "< publishes":
 // stacked, each name sits beside its line, so a row gap needs the name's
@@ -774,17 +801,9 @@ callout top of text "TaskModel" : Model: owns the task list
 callout bottom of text "TaskView" : View: an observer that redraws the tasks
 callout bottom of text "TaskController" : Controller: handles requests to add tasks`;
 const FLOOR_PANES = [{ width: 600, height: 750 }, { width: 1200, height: 675 }];
-// The default layout's own drawing is the floor only where it breaks no
-// rule compact keeps (2026-11-21).
-const FLOOR_SHORTFALL = {
-  'MVC with observer 1200x675': 'measured 13.19 px against 13.50 px. The default draws "notifies ▼" across its own ' +
-    'line (text left, arrow right); with the compact type that placement (621×794, 14.45 px) is judged invalid for ' +
-    'it, and the repair that clears the line ends 621×870',
-};
 for (const [name, body] of [['mediator', MEDIATOR], ['MVC with observer', MVC_OBSERVER], ['MVC tasks', MVC_TASKS], ['reverse navigability (12 classes)', REVERSE_NAVIGABILITY]]) {
   for (const pane of FLOOR_PANES) {
-    const key = `${name} ${paneName(pane)}`;
-    test(`${name}: compact for ${paneName(pane)} is never smaller than the default layout in that pane`, FLOOR_SHORTFALL[key] ? { todo: FLOOR_SHORTFALL[key] } : {}, async () => {
+    test(`${name}: compact for ${paneName(pane)} is never smaller than the default layout in that pane`, async () => {
       const now = predictedLabelSize(await measureOnce(BUNDLE, compactFor(body, pane), pane), pane);
       const normal = predictedLabelSize(await measureOnce(BUNDLE, source('', body), pane), pane);
       assert.ok(now >= normal, `${now.toFixed(2)} px; default ${normal.toFixed(2)} px`);
@@ -862,9 +881,12 @@ for (const [name, body] of [['abstract factory', ABSTRACT_FACTORY], ['pizza stor
 // Not met since compact is laid out for the pane its directive names rather
 // than for the 1200×800 element these tests stage it in (2026-11-21): that
 // element's wide placement gave "layers with two notes" 16.6 px in 600×750
-// (1.14×); laid out for the pane it reaches 13.04 px (see SHORTFALLS).
+// (1.14×); laid out for the pane it reaches 13.04 px (see SHORTFALLS). Only
+// navigability gains 10 %; today's compact floats labels away from their
+// lines in all four (Observer "notifies", six-class order four labels,
+// navigability six, layers "calls"), which compact does not.
 test('compact makes labels at least 10 % larger than today in one pane for at least two of the four diagrams', {
-  todo: 'measured Observer 0.98 / 1.01, six-class order 1.01 / 0.73, navigability 1.89 / 1.08, layers with two notes 0.89 / 1.02',
+  todo: 'measured Observer 0.98 / 1.01, six-class order 1.01 / 0.73, navigability 1.89 / 1.08, layers with two notes 0.89 / 1.02; see the comment above',
 }, async () => {
   const gains = [];
   for (const [name, body] of DENSITY_SPECS) {
