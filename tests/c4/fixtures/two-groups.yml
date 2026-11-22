@@ -1,0 +1,17 @@
+schema: c4-design/1
+name: Store
+people:
+  clerk: {name: Clerk, collaborators: {desk: records sales using}}
+systems:
+  store:
+    name: Store
+    groups:
+      front: {name: Front office}
+      back: {name: Back office}
+    containers:
+      desk: {name: Sales Desk, group: front, collaborators: {ledger: posts sales to}}
+      kiosk: {name: Kiosk, group: front, collaborators: {ledger: posts sales to}}
+      ledger: {name: Ledger, group: back, collaborators: {archive: archives entries in}}
+      archive: {name: Archive, kind: database, group: back}
+      notifier: {name: Notifier, collaborators: {bank: settles payments through, ledger: reads entries from}}
+  bank: {name: Bank, external: true}

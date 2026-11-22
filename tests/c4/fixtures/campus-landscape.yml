@@ -1,0 +1,61 @@
+schema: c4-design/1
+name: Campus Landscape
+description: A generated landscape with eight systems and twelve relationships.
+enterprise: UCLA
+
+people:
+  student:
+    name: Student
+    description: Plans a term and pays tuition.
+    collaborators:
+      registration: plans a schedule using
+      lms: submits coursework to
+  advisor:
+    name: Academic Advisor
+    description: Approves exceptions to enrollment rules.
+    collaborators:
+      registration: approves petitions in
+
+systems:
+  registration:
+    name: Course Registration
+    description: Plans term schedules and enrolls students in their sections.
+    collaborators:
+      billing: requests tuition charges from
+      sis: reads academic records from
+      identity: signs students in through
+      scheduling: reads section times from
+  billing:
+    name: Billing System
+    description: Charges tuition and fees for the university.
+    external: true
+    collaborators:
+      payments: settles card payments through
+  sis:
+    name: Student Information System
+    description: Keeps every student's academic record.
+    collaborators:
+      identity: checks staff sign-ins with
+  lms:
+    name: Learning Management System
+    description: Hosts course sites and coursework.
+    collaborators:
+      registration: reads class rosters from
+      identity: signs users in through
+  identity:
+    name: Campus Identity
+    description: Signs students and staff in.
+  scheduling:
+    name: Room Scheduling
+    description: Assigns rooms and times to sections.
+  payments:
+    name: Payment Provider
+    description: Processes card payments.
+    external: true
+    in_enterprise: false
+  mail:
+    name: Campus Mail
+    description: Delivers notifications by email.
+    external: true
+    collaborators:
+      student: sends enrollment notices to
