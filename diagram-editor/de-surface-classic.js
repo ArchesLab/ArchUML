@@ -167,7 +167,7 @@
       placeElementAt, pointInsideElement, pointer, pressTaken, revealPending, routeIdForSourceLine,
       routeUsesLockedEndpoints, selectedRelationToolSpec, selectedSequenceMessageToolSpec, setActiveTool,
       setRevealPending, setRouteOverlaySegment, startInlineFragmentConditionEdit, startInlineFragmentEdit,
-      startInlineMemberEdit, startInlineRelationEdit, startInlineRename, toolState, zoomAt;
+      startInlineMemberEdit, startInlineRelationEdit, startInlineRename, toolState, zoomByWheel;
     // What the moves without a drag use of the other parts (plan Task 25c).
     var addBend, closeContextMenu, parseSvgViewBox, removeBend, showBendNumbers, startPlacing, straighten;
 
@@ -670,6 +670,8 @@
     function cancelSequenceMessageDrag() { pointer.cancel('sequence-message'); }
     function cancelFragmentDrag() { pointer.cancel('fragment'); }
     function cancelActivationBarDrag() { pointer.cancel('activation-bar'); }
+    // Tells whether a "+" drag ran.
+    function cancelExtendDrag() { return pointer.cancel('extend-handle'); }
     function activationAriaLabel(bar) {
       var who = bar.target || 'object';
       return 'Activation of ' + who + (bar.endLine == null ? ' (open-ended)' : '') +
@@ -1021,8 +1023,7 @@
       svg.addEventListener('wheel', function (ev) {
         if (!ev.ctrlKey && !ev.metaKey) return;
         ev.preventDefault();
-        var factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
-        zoomAt(factor, ev.clientX, ev.clientY);
+        zoomByWheel(ev);
       }, { passive: false, signal: sessionListeners.signal });
 
       // SVG-level pointerdown handles three things (the placement press):
@@ -1289,6 +1290,13 @@
       var ps2 = selectWhenDrawn(null);
       if (ps2) {
         setSelectedLayoutId(ps2.sourceLine == null ? ps2.id : routeIdForSourceLine(svg, ps2.sourceLine), ps2.kind);
+      }
+      if (toolState.pendingRelation) {
+        // The diagram was redrawn mid-gesture: keep the chosen source marked,
+        // or forget it if an undo or a text edit removed that element.
+        var pendingSource = svg.querySelector('.uml-pg-edit-hitbox[data-layout-id="' + cssAttrEscape(toolState.pendingRelation.sourceId) + '"]');
+        if (pendingSource) pendingSource.classList.add('is-relation-source');
+        else toolState.pendingRelation = null;
       }
       revealSelectedLayoutTarget();
       refreshActionButton();
@@ -1675,6 +1683,7 @@
       cancelSequenceMessageDrag();
       cancelFragmentDrag();
       cancelActivationBarDrag();
+      cancelExtendDrag();
       setSelectedLayoutId(null);
       setActiveTool(null);
       clearEditLayer();
@@ -1748,6 +1757,7 @@
         cancelActivationBarDrag: cancelActivationBarDrag,
         cancelDrag: cancelDrag,
         cancelFragmentDrag: cancelFragmentDrag,
+        cancelExtendDrag: cancelExtendDrag,
         cancelSequenceGesture: cancelSequenceGesture,
         cancelSequenceMessageDrag: cancelSequenceMessageDrag,
         clearEditLayer: clearEditLayer,
@@ -1815,7 +1825,7 @@
         straighten = kit.straighten;
         removeBend = kit.removeBend;
         toolState = kit.toolState;
-        zoomAt = kit.zoomAt;
+        zoomByWheel = kit.zoomByWheel;
       }
     };
   }

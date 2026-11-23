@@ -62,6 +62,7 @@
   var FRAGMENT_UNMOVED = { code: 'fragment/unmoved', summary: 'The fragment is already there', message: null };
   var FRAGMENT_NOT_LOCATED = { code: 'fragment/unmatched', summary: 'Fragment not found in the source', message: 'Could not locate that fragment.' };
   var FRAGMENT_FIRST = { code: 'fragment/first', summary: 'Already first', message: 'Fragment is already first.' };
+  var FRAGMENT_BEFORE_NOT_LOCATED = { code: 'fragment/unmatched', summary: 'Fragment before not found', message: 'Could not locate the fragment before this one.' };
   var FRAGMENT_FIRST_IN_PARENT = { code: 'fragment/first', summary: 'Already first inside its parent', message: 'Fragment is already first inside its parent.' };
   var FRAGMENT_LAST = { code: 'fragment/last', summary: 'Already last', message: 'Fragment is already last.' };
   var FRAGMENT_LAST_IN_PARENT = { code: 'fragment/last', summary: 'Already last inside its parent', message: 'Fragment is already last inside its parent.' };
@@ -184,32 +185,24 @@
     var g = textGrammar;
     var info = g.fragmentInfoForId(operation.ref, text, type, bundle);
     if (!info || info.endIdx === -1) return { refusal: FRAGMENT_UNMATCHED };
-    var positions = g.readLayoutPositions(text, type, bundle);
-    var routes = g.readLayoutRoutes(text, bundle);
     var lines = g.stripLayoutMetadata(text, type).split('\n');
     var openIndent = (lines[info.startIdx].match(/^\s*/) || [''])[0];
     var dedent = '  '; // fragments always indent by 2
-    var dropLines = {};
-    dropLines[info.startIdx] = true;
-    dropLines[info.endIdx] = true;
-    info.branches.forEach(function (b) { dropLines[b.lineIdx] = true; });
-    var out = [];
-    for (var i = 0; i < lines.length; i++) {
-      if (dropLines[i]) continue;
-      if (i > info.startIdx && i < info.endIdx) {
-        var cur = lines[i];
-        if (cur.indexOf(openIndent + dedent) === 0) {
-          cur = openIndent + cur.substring((openIndent + dedent).length);
-        } else if (cur.indexOf(dedent) === 0) {
-          cur = cur.substring(dedent.length);
-        }
-        out.push(cur);
-      } else {
-        out.push(lines[i]);
+    var wrapperLines = [info.startIdx, info.endIdx].concat(info.branches.map(function (b) { return b.lineIdx; }));
+    var edits = [];
+    for (var i = info.startIdx; i <= info.endIdx; i++) {
+      if (wrapperLines.indexOf(i) !== -1) {
+        edits.push({ start: i, end: i, replacement: null });
+        continue;
       }
+      var cur = lines[i];
+      if (cur.indexOf(openIndent + dedent) === 0) cur = openIndent + cur.substring((openIndent + dedent).length);
+      else if (cur.indexOf(dedent) === 0) cur = cur.substring(dedent.length);
+      edits.push({ start: i, end: i, replacement: cur });
     }
     return {
-      text: g.writePositionsIntoSource(out.join('\n'), 'sequence', positions, routes, bundle),
+      // Layout keyed by message line follows each message to its new line.
+      text: g.rewriteSourceLines(text, 'sequence', edits, undefined, undefined, bundle),
       select: null,
       message: 'Removed fragment wrapper, kept inner messages.'
     };
@@ -244,39 +237,28 @@
 
     if (delta < 0) {
       var prevIdx = nextNonBlank(blockStart, -1);
-      if (prevIdx < 0) {
+      var previous = prevIdx >= 0 ? lines[prevIdx] : '';
+      // Nothing to move past: the diagram start, or the declarations that
+      // fix the order of the lifelines.
+      if (prevIdx < 0 || /^\s*(?:@startuml|participant\b|actor\b|box\b|end\s+box\b|layout\b|title\b)/i.test(previous)) {
         return { refusal: FRAGMENT_FIRST };
       }
-      // If the previous line is the END of an outer fragment, refuse — can't
-      // hop out of the parent fragment via reorder.
-      if (/^\s*end\s*$/i.test(lines[prevIdx])) {
+      // A fragment before this one would end in `end`. An opener or `else`
+      // directly above is this fragment's own parent or branch.
+      if (/^\s*(?:alt|opt|loop|par|break|critical|ref|neg|else)\b/i.test(previous)) {
         return { refusal: FRAGMENT_FIRST_IN_PARENT };
       }
-      // Prev line might be a fragment_end of a sibling fragment — find the
-      // matching opener and move the entire sibling block.
-      var prevBlockStart = prevIdx, prevBlockEnd = prevIdx;
-      if (/^\s*end\s*$/i.test(lines[prevIdx])) {
-        // (handled above)
-      } else if (/^\s*(alt|opt|loop|par|break|critical|ref|neg)\b/i.test(lines[prevIdx])) {
-        // We landed on the sibling opener — keep as start, find its end.
-        var depth = 0;
-        for (var i = prevIdx; i < lines.length; i++) {
-          if (/^\s*(alt|opt|loop|par|break|critical|ref|neg)\b/i.test(lines[i])) depth++;
-          if (/^\s*end\s*$/i.test(lines[i])) { depth--; if (!depth) { prevBlockEnd = i; break; } }
-        }
-      } else {
-        // Plain line — back up one since it's the END of the previous block.
-        // For most cases, the prev line is a single line (message/note/lifeline-event).
-        // For multi-line notes, walk back to find the `note ...` opener.
-        if (/^\s*end\s*note$/i.test(lines[prevIdx])) {
-          for (var nj = prevIdx - 1; nj >= 0; nj--) {
-            if (/^\s*note\s+(left|right|over)\b/i.test(lines[nj])) { prevBlockStart = nj; break; }
-          }
-        } else {
-          prevBlockStart = prevIdx;
-          prevBlockEnd = prevIdx;
+      var prevBlockStart = prevIdx;
+      if (/^\s*end\s*$/i.test(previous)) {
+        var fragmentBefore = g.sequenceFragmentRanges(text, type, undefined, bundle).find(function (range) { return range.endIdx === prevIdx; });
+        if (!fragmentBefore) return { refusal: FRAGMENT_BEFORE_NOT_LOCATED };
+        prevBlockStart = fragmentBefore.startIdx;
+      } else if (/^\s*end\s*note$/i.test(previous)) {
+        for (var nj = prevIdx - 1; nj >= 0; nj--) {
+          if (/^\s*note\s+(left|right|over)\b/i.test(lines[nj])) { prevBlockStart = nj; break; }
         }
       }
+      clearSequenceMessageLayoutMetadata(positions, routes);
       var fragChunk = lines.splice(blockStart, blockEnd - blockStart + 1);
       lines.splice.apply(lines, [prevBlockStart, 0].concat(fragChunk));
       return {
@@ -304,6 +286,7 @@
           if (/^\s*end\s*note$/i.test(lines[nk])) { nextBlockEnd = nk; break; }
         }
       }
+      clearSequenceMessageLayoutMetadata(positions, routes);
       var nextChunk = lines.splice(nextBlockStart, nextBlockEnd - nextBlockStart + 1);
       // After splicing the next chunk out, `blockStart` / `blockEnd` are unchanged
       // because the removed chunk is AFTER the fragment block. Insert the

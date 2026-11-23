@@ -113,6 +113,8 @@
             btn.classList.remove('is-dragging');
             withdrawIntoTargets(session.state);
             session.state = null;
+            // No click follows a cancelled pointer, so nothing is left to suppress.
+            clickTaken = false;
           }
         };
         return session;

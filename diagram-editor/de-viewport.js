@@ -238,6 +238,19 @@
       zoom = newZoom;
       applyViewTransform(svg);
     }
+    // A mouse wheel reports one large step per notch; a trackpad pinch reports
+    // many small ones. Scaling by the distance scrolled makes both feel alike,
+    // and the clamp keeps one notch to a single clear step.
+    var WHEEL_ZOOM_PER_PIXEL = 0.0025;
+    var WHEEL_ZOOM_MAX_STEP = 1.25;
+    var WHEEL_LINE_HEIGHT_PX = 16;
+    function zoomByWheel(ev) {
+      var pixels = ev.deltaMode === 1 ? ev.deltaY * WHEEL_LINE_HEIGHT_PX : ev.deltaY;
+      if (!pixels) return;
+      var factor = Math.exp(-pixels * WHEEL_ZOOM_PER_PIXEL);
+      factor = Math.max(1 / WHEEL_ZOOM_MAX_STEP, Math.min(WHEEL_ZOOM_MAX_STEP, factor));
+      zoomAt(factor, ev.clientX, ev.clientY);
+    }
     function zoomIn(clientX, clientY) { zoomAt(1.2, clientX, clientY); }
     function zoomOut(clientX, clientY) { zoomAt(1 / 1.2, clientX, clientY); }
     function zoomToFit() {
@@ -278,6 +291,7 @@
         setRevealPending: setRevealPending,
         updateZoomReadout: updateZoomReadout,
         zoomAt: zoomAt,
+        zoomByWheel: zoomByWheel,
         zoomIn: zoomIn,
         zoomOut: zoomOut,
         zoomToFit: zoomToFit

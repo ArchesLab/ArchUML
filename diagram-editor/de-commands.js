@@ -162,6 +162,7 @@
     var adapter = kit.adapter;
     var clampSlot = kit.clampSlot;
     var diagramSupportsAnchoredNotes = kit.diagramSupportsAnchoredNotes;
+    var componentDeclaration = kit.componentDeclaration;
     var diagramSupportsCreation = kit.diagramSupportsCreation;
     var env = kit.env;
     var escapeQuoted = kit.escapeQuoted;
@@ -186,10 +187,11 @@
     var selectionSize = kit.selectionSize;
     var sequenceMessageBlockForLine = kit.sequenceMessageBlockForLine;
     var sequenceMessageLineIndices = kit.sequenceMessageLineIndices;
+    var selectionKindForId = kit.selectionKindForId;
     var setSelectedLayoutId = kit.setSelectedLayoutId;
     var textGrammar = kit.textGrammar;
     // What the other parts and the pointer driver give this part, bound by link() once all of them exist.
-    var collectConnectedRoutes, collectPositions, shiftPersistedRouteEndpoints;
+    var collectConnectedRoutes, collectPositions, isRelationEndpointId, shiftPersistedRouteEndpoints;
 
     // The diagram type of the document as the adapter reads it now.
     function documentType() { return adapter.contents().type; }
@@ -411,7 +413,11 @@
       updateFragmentFromProperties(fragId, null, { branch: null, text: trimmed }, 'frag-cond:' + fragId);
     }
     function changeFragmentBranchCondition(fragId, branchLineIdx, newCondition) {
+      var info = adapter.contents().fragment(fragId);
+      if (!info) return;
       var trimmed = String(newCondition || '').trim();
+      var branch = info.branches.find(function (candidate) { return candidate.lineIdx === branchLineIdx; });
+      if (!branch || branch.condition === trimmed) return;
       updateFragmentFromProperties(fragId, null, { branch: branchLineIdx, text: trimmed }, 'frag-branch:' + fragId + ':' + branchLineIdx);
     }
     function addFragmentElseBranch(fragId, condition) {
@@ -801,6 +807,7 @@
     }
     function handleHitboxClickForSequenceElementTool(item) {
       if (!toolState.activeTool || toolState.activeTool.kind !== 'element' || documentType() !== 'sequence') return false;
+      if (!isRelationEndpointId(item.id)) return false;
       var spec = toolState.activeTool.spec || {};
       if (!spec.sequenceControl && !spec.sequenceNote) return false;
       // Activate tool on a lifeline head: drop a real, adjustable bar starting
@@ -851,6 +858,10 @@
     }
     function handleHitboxClickForRelation(item, hitbox) {
       if (!toolState.activeTool || toolState.activeTool.kind !== 'relation') return false;
+      if (!isRelationEndpointId(item.id)) {
+        announce('A ' + toolState.activeTool.spec.label + ' connects elements. Pick an element, or press Esc to cancel.', true);
+        return true;
+      }
       if (documentType() === 'sequence' && toolState.activeTool.spec && toolState.activeTool.spec.sequenceSingle) {
         return addSequenceSingleMessage(toolState.activeTool.spec, item.id);
       }
@@ -1024,11 +1035,9 @@
      * Rewrite the visible label of an element while preserving its id (used as
      * the cross-reference key in relations).
      *
-     * For schemas that already separate label from id (sequence's
-     * `actor user: User` form, use-case's `usecase "Label" as id` form), this
-     * just rewrites the label part. For schemas that previously had no
-     * separate label (class, state, component, deployment node, ER entity),
-     * this introduces a `keyword "Label" as id` alias so the id keeps working.
+     * Explicit aliases keep their reference key. Unaliased classifiers,
+     * states, deployment elements and ER entities rename their identity;
+     * components and use cases can introduce a separate display label.
      */
     function setElementLabel(id, newLabel) {
       var type = documentType();
@@ -1048,9 +1057,11 @@
         setSequenceLifelineHead(id, newLabel);
         return;
       }
-      if (type === 'class' || type === 'state') {
+      const declaration = adapter.contents().declarationLine(id, type);
+      const hasAlias = declaration && /^\s*(?:abstract\s+class|class|interface|enum|node|component|artifact)\s+(?:"(?:[^"\\]|\\.)*"|\S+)\s+as\s+/i.test(declaration);
+      if ((type === 'class' && !hasAlias) || type === 'state') {
         var nextId = identifierFromInlineLabel(newLabel);
-        if (!nextId) return;
+        if (!nextId) { announceUnusableName(newLabel); return; }
         renameElement(id, nextId);
         return;
       }
@@ -1058,9 +1069,18 @@
         renameActivityElement(id, newLabel);
         return;
       }
-      if (type === 'deployment' || type === 'er') {
+      // A use case or actor whose name has spaces and no alias is known by
+      // that name alone, and an alias cannot contain spaces. Its new name is
+      // its new identity, carried into every relation that names it.
+      if (type === 'usecase' && declaration && /\s/.test(id) &&
+          !/^\s*(?:usecase|actor)\s+(?:"(?:[^"\\]|\\.)*"|\S+)\s+as\s+/i.test(declaration) &&
+          /^\s*(?:usecase|actor)\b/i.test(declaration)) {
+        renameElement(id, newLabel);
+        return;
+      }
+      if ((type === 'deployment' && !hasAlias) || type === 'er') {
         var nextModelId = identifierFromInlineLabel(newLabel);
-        if (!nextModelId) return;
+        if (!nextModelId) { announceUnusableName(newLabel); return; }
         renameElement(id, nextModelId);
         return;
       }
@@ -1069,7 +1089,14 @@
         return;
       }
       var line = adapter.contents().declarationLine(id, type);
-      if (line == null) return;
+      if (line == null) {
+        // A component that only connectors name gets a declaration that carries the label.
+        if (type === 'component') {
+          adapter.apply(buildOperation('element.update', { ref: id, changes: { declaration: {
+            tool: 'component', name: id, label: newLabel } } }, {}, 'edit:' + id));
+        }
+        return;
+      }
       var t = line.trim();
       // Preserve any trailing { ... } body so members / ports / attributes survive.
       var bodyMatch = t.match(/(\s*\{[\s\S]*\}\s*)$/);
@@ -1079,6 +1106,9 @@
       if (!newHead) return;
       var newLine = newHead + body;
       replaceLineForElementId(id, newLine);
+    }
+    function announceUnusableName(label) {
+      announce('"' + label + '" has no letters or digits to name this element. Use at least one.', true);
     }
     function setSequenceLifelineHead(id, newHeadText) {
       showVerdict(adapter.apply(buildOperation('element.rename', { ref: id, text: newHeadText, part: 'head' }, {}, 'rename-sequence:' + id)));
@@ -1107,6 +1137,12 @@
       var quotedId = /[\s"<>]/.test(id) ? '"' + escapeQuoted(id) + '"' : id;
       var quotedLbl = '"' + escapeQuoted(newLabel) + '"';
 
+      if (type === 'component') {
+        const component = componentDeclaration(head);
+        if (component) return 'component ' + quotedLbl + ' as ' + quotedId + head.slice(component.headEnd);
+      }
+      const alias = head.match(/^(\s*(?:abstract\s+class|\w+)\s+)("(?:[^"\\]|\\.)*"|\S+)(\s+as\s+)/i);
+      if (alias) return alias[1] + quotedLbl + head.slice(alias[1].length + alias[2].length);
       // Sequence: `actor id: Label` or `participant id: Label`
       if (type === 'sequence') {
         var ms = t.match(/^(actor|participant)\s+(\S+?)(?::\s*.*)?$/i);
@@ -1116,14 +1152,13 @@
       if (type === 'usecase') {
         var mu = t.match(/^(usecase|actor|rectangle)\s+/i);
         if (mu) {
-          // Strip current Label/id forms then re-emit
+          // Re-emit as `keyword "Label" as id`, keeping whatever followed the
+          // identity (a highlight colour, a texture). Only a system boundary
+          // may quote its alias; setElementLabel renames the rest by identity.
           var kw = mu[1].toLowerCase();
-          if (kw === 'actor' && t.match(/^actor\s+\S+\s*$/i) && !/\sas\s+/i.test(t)) {
-            // Plain `actor X` — rewrite as `actor "Label" as X`.
-            return 'actor ' + quotedLbl + ' as ' + id;
-          }
-          if (kw === 'rectangle') return 'rectangle ' + quotedLbl;
-          return kw + ' ' + quotedLbl + ' as ' + id;
+          var identity = t.slice(mu[0].length).match(/^(?:"(?:[^"\\]|\\.)*"|\S+)(?:\s+as\s+(?:"(?:[^"\\]|\\.)*"|\S+))?/i);
+          var styleSuffix = identity ? t.slice(mu[0].length + identity[0].length).trim() : '';
+          return kw + ' ' + quotedLbl + ' as ' + (kw === 'rectangle' ? quotedId : id) + (styleSuffix ? ' ' + styleSuffix : '');
         }
       }
       // Deployment artifact: `artifact "Label" as id`
@@ -1190,7 +1225,7 @@
       var kinds = Object.create(null);
       Array.prototype.slice.call(layer.querySelectorAll('.uml-pg-edit-hitbox')).forEach(function (rect) {
         var id = rect.getAttribute('data-layout-id');
-        if (id) kinds[id] = 'node';
+        if (id) kinds[id] = selectionKindForId(id);
       });
       Array.prototype.slice.call(layer.querySelectorAll('.uml-pg-edge-hitbox')).forEach(function (line) {
         var id = line.getAttribute('data-layout-id');
@@ -1276,6 +1311,7 @@
       link: function () {
         collectConnectedRoutes = kit.collectConnectedRoutes;
         collectPositions = kit.collectPositions;
+        isRelationEndpointId = kit.isRelationEndpointId;
         shiftPersistedRouteEndpoints = kit.shiftPersistedRouteEndpoints;
       },
       members: {

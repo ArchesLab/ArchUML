@@ -42,7 +42,8 @@
     // The extend handle's drag: a press on a box's "+" draws a line from the handle to the pointer; the
     // release connects the box to the one under the pointer, or offers a new element on empty canvas.
     function startExtendHandleDrag(ev, press) {
-      if (press.site !== 'extend-handle') return null;
+      // Only the primary button draws a line (a right-click opens the menu).
+      if (press.site !== 'extend-handle' || ev.button > 0) return null;
       var ns = 'http://www.w3.org/2000/svg';
       var svg = press.svg;
       var layer = press.layer;
@@ -60,8 +61,11 @@
       layer.appendChild(line);
       var spec = selectedRelationToolSpec();
       var targets = offerTargets(svg, layer, newLineRequest(spec, press.item.id));
-      var session = dragSession('extend', { svg: svg, layer: layer, line: line, sourceItem: press.item, sourceHitbox: press.hitbox, originX: hx, originY: hy, targets: targets, spec: spec },
+      var session = dragSession('extend', { svg: svg, layer: layer, line: line, sourceItem: press.item, sourceHitbox: press.hitbox, originX: hx, originY: hy, targets: targets, spec: spec,
+        startClientX: ev.clientX, startClientY: ev.clientY, moved: false },
         updateExtendDrag, clearExtendDrag);
+      // A pointer cancel ends the drag as Escape does.
+      session.cancelOnPointerCancel = true;
       announce(spec
         ? 'Drag onto a target element to add ' + spec.label + '. Esc to cancel.'
         : 'Drag onto a target element. Release to choose a relation. Esc to cancel.', true);
@@ -82,13 +86,22 @@
     function newLineOperation(spec, sourceId, targetId) {
       return spec ? buildOperation('relation.add', { tool: spec.id, from: sourceId, to: targetId, label: null }, {}, null) : null;
     }
+    // Labels, activation bars, anchored notes, messages and fragments have
+    // layout ids so they can be moved, but they are not model elements:
+    // nothing connects to them.
+    function isRelationEndpointId(id) {
+      return !!id && !/^(?:actbar|note|label|seqmsg|frag):/.test(String(id));
+    }
+
+    // The model element under a point: where a relation being drawn can end.
     function findItemAtPoint(svg, clientX, clientY) {
       var els = env.document.elementsFromPoint(clientX, clientY);
       for (var i = 0; i < els.length; i++) {
         var el = els[i];
         if (el.classList &&
             (el.classList.contains('uml-pg-edit-hitbox') ||
-             el.classList.contains('uml-pg-edit-a11y-target'))) {
+             el.classList.contains('uml-pg-edit-a11y-target')) &&
+            isRelationEndpointId(el.getAttribute('data-layout-id'))) {
           return { id: el.getAttribute('data-layout-id'), hitbox: el };
         }
       }
@@ -96,7 +109,7 @@
       var editables = findEditableElements(svg);
       for (var j = editables.length - 1; j >= 0; j--) {
         var item = editables[j];
-        if (!item || !item.box) continue;
+        if (!item || !item.box || !isRelationEndpointId(item.id)) continue;
         if (pt.x >= item.box.x && pt.x <= item.box.x + item.box.width &&
             pt.y >= item.box.y && pt.y <= item.box.y + item.box.height) {
           return { id: item.id, hitbox: null };
@@ -110,9 +123,15 @@
       var pt = editorCanvasPoint(extendDragState.svg, ev.clientX, ev.clientY);
       extendDragState.line.setAttribute('x2', pt.x);
       extendDragState.line.setAttribute('y2', pt.y);
+      if (Math.abs(ev.clientX - extendDragState.startClientX) > 5 || Math.abs(ev.clientY - extendDragState.startClientY) > 5) {
+        extendDragState.moved = true;
+      }
       if (finish) {
-        var hit = findItemAtPoint(extendDragState.svg, ev.clientX, ev.clientY);
-        if (!hit && documentType() === 'sequence') {
+        // A click on "+" without a drag names no target: it offers a new
+        // element to connect to, the same as dropping on empty canvas.
+        var dragged = extendDragState.moved;
+        var hit = dragged ? findItemAtPoint(extendDragState.svg, ev.clientX, ev.clientY) : null;
+        if (dragged && !hit && documentType() === 'sequence') {
           var sequenceTarget = findSequenceMessageDropTarget(extendDragState, ev.clientX, ev.clientY);
           if (sequenceTarget) hit = { id: sequenceTarget.id, hitbox: null };
         }
@@ -214,6 +233,7 @@
       },
       members: {
         findItemAtPoint: findItemAtPoint,
+        isRelationEndpointId: isRelationEndpointId,
         startExtendHandleDrag: startExtendHandleDrag
       }
     };

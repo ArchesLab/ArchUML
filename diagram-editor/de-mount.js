@@ -123,6 +123,7 @@
     var diagramSupportsCreation = textSchemas.diagramSupportsCreation;
     var elementSchemasFor = textSchemas.elementSchemasFor;
     var escapeQuoted = textRead.escapeQuoted;
+    var componentDeclaration = textRead.componentDeclaration;
     var findElementSchema = textSchemas.findElementSchema;
     var findInsertPointForDeclaration = textRead.findInsertPointForDeclaration;
     var findRenderedBox = parts.scene.findRenderedBox;
@@ -211,9 +212,18 @@
      * @param {boolean} [opts.extend]  Toggle id in the selection instead of
      *                                 replacing — used by Cmd/Ctrl/Shift+click.
      */
+    // Fragments and activation bars have hitboxes like elements do, but they
+    // are selected, edited and deleted as what they are. Their ids say so.
+    function selectionKindForId(id, kind) {
+      if (kind && kind !== 'node') return kind;
+      if (/^frag:/.test(String(id))) return 'fragment';
+      if (/^actbar:/.test(String(id))) return 'activation';
+      return 'node';
+    }
+
     function setSelectedLayoutId(id, kind, opts) {
       opts = opts || {};
-      var k = kind || 'node';
+      var k = selectionKindForId(id, kind);
       if (!id) {
         selectedLayout.clear();
       } else if (opts.extend) {
@@ -271,6 +281,7 @@
       clampSlot: clampSlot,
       clonePointsOf: clonePointsOf,
       commands: createCommands({ adapter: adapter, host: host, selection: selectedLayout }),
+      componentDeclaration: componentDeclaration,
       diagramSupportsAnchoredNotes: diagramSupportsAnchoredNotes,
       diagramSupportsCreation: diagramSupportsCreation,
       elementSchemasFor: elementSchemasFor,
@@ -306,6 +317,7 @@
       sequenceMessageLineIndices: sequenceMessageLineIndices,
       serializers: adapter.serializers,
       sessionListeners: sessionListeners,
+      selectionKindForId: selectionKindForId,
       setSelectedLayoutId: setSelectedLayoutId,
       snapToggle: snapToggle,
       textGrammar: textGrammar,
@@ -345,6 +357,7 @@
     var buildRouteContextMenu = kit.buildRouteContextMenu;
     var buildSequenceDetailContextMenu = kit.buildSequenceDetailContextMenu;
     var cancelActivationBarDrag = kit.cancelActivationBarDrag;
+    var cancelExtendDrag = kit.cancelExtendDrag;
     var cancelDrag = kit.cancelDrag;
     var cancelFragmentDrag = kit.cancelFragmentDrag;
     var cancelInlineRename = kit.cancelInlineRename;
@@ -553,6 +566,7 @@
         addSequenceParticipant: addSequenceParticipant,
         bends: placing.members.bends,
         cancelActivationBarDrag: cancelActivationBarDrag,
+        cancelExtendDrag: cancelExtendDrag,
         cancelDrag: cancelDrag,
         cancelFragmentDrag: cancelFragmentDrag,
         cancelInlineRename: cancelInlineRename,

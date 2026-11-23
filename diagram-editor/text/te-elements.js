@@ -24,7 +24,6 @@
   var escapeQuoted = readPart.escapeQuoted;
   var formatRelationEndpointId = readPart.formatRelationEndpointId;
   var findInsertPointForDeclaration = readPart.findInsertPointForDeclaration;
-  var clearSequenceMessageLayoutMetadata = readPart.clearSequenceMessageLayoutMetadata;
   var buildCrcCardSource = readPart.buildCrcCardSource;
   var parseMemberLine = readPart.parseMemberLine;
   var buildClassLine = readPart.buildClassLine;
@@ -394,7 +393,7 @@
     var line = g.getDeclarationLine(sourceText, type, oldId, bundle);
     if (line == null) {
       if (type === 'activity') return actionRename(text, type, operation, bundle);
-      if ((type !== 'state' && type !== 'deployment') || oldId === '[*]') return { refusal: NOTHING_TO_RENAME };
+      if ((type !== 'state' && type !== 'deployment' && type !== 'component') || oldId === '[*]') return { refusal: NOTHING_TO_RENAME };
       return withSelected(g.renameReferencesInRelations(sourceText, type, oldId, newId, text, bundle), newId);
     }
     var renamed = g.renameDeclarationIdentifier(line, type, oldId, newId, bundle);
@@ -543,7 +542,8 @@
     if (oldLine && /\{/.test(oldLine) && declLine) {
       declLine = g.setBraceBody(declLine, g.parseBraceBody(oldLine, bundle), oldLine.indexOf('\n') !== -1, bundle);
     }
-    var sourceText = g.replaceBlockByMatch(text, type, function (line) {
+    // A component that only connectors name has no declaration yet: the form adds one.
+    var sourceText = !oldLine && type === 'component' ? g.appendRawLine(text, type, declLine, bundle) : g.replaceBlockByMatch(text, type, function (line) {
       return g.declarationIdForLine(line, type, bundle) === oldId;
     }, declLine, bundle);
     if (newId !== oldId && newId) sourceText = g.renameReferencesInRelations(sourceText, type, oldId, newId, text, bundle);
@@ -653,49 +653,31 @@
   // kept. Nothing stays selected; the message counts what went and what was kept.
   function rewriteSelectionRemove(text, type, operation, bundle) {
     var g = textGrammar;
-    var current = text;
-    var activationLineIdxs = [];
-    operation.activations.forEach(function (bar) {
-      if (bar.startLine != null) activationLineIdxs.push(bar.startLine);
-      if (bar.endLine != null) activationLineIdxs.push(bar.endLine);
-    });
-    if (activationLineIdxs.length) {
-      var actPositions = g.readLayoutPositions(current, type, bundle);
-      var actRoutes = g.readLayoutRoutes(current, bundle);
-      clearSequenceMessageLayoutMetadata(actPositions, actRoutes);
-      var actLines = g.stripLayoutMetadata(sequenceSourceWithScaffold(current), type).split('\n');
-      activationLineIdxs.sort(function (a, b) { return b - a; }).forEach(function (idx) {
-        if (idx >= 0 && idx < actLines.length && /^\s*(de)?activate\b/i.test(actLines[idx])) actLines.splice(idx, 1);
-      });
-      current = g.writePositionsIntoSource(actLines.join('\n'), 'sequence', actPositions, actRoutes, bundle);
-    }
-    var lines = g.stripLayoutMetadata(current, type).split('\n');
-    var routeIdxs = [];
+    // Activation bars, relations and fragments are all identified by source
+    // line. Resolve every one against the same lines before removing any,
+    // so no id is read against lines an earlier removal has shifted.
+    var lines = g.stripLayoutMetadata(text, type).split('\n');
+    var doomedLines = Object.create(null);
     var keptRoutes = 0;
+    operation.activations.forEach(function (bar) {
+      [bar.startLine, bar.endLine].forEach(function (idx) {
+        if (idx != null && /^\s*(de)?activate\b/i.test(lines[idx] || '')) doomedLines[idx] = true;
+      });
+    });
     operation.relations.forEach(function (relation) {
-      if (relation.line !== -1 && lines[relation.line] != null) routeIdxs.push(relation.line);
+      if (relation.line !== -1 && lines[relation.line] != null) doomedLines[relation.line] = true;
       else keptRoutes++;
     });
-    // Drop highest-numbered route lines first.
-    routeIdxs.sort(function (a, b) { return b - a; });
-    routeIdxs.forEach(function (idx) {
-      current = g.removeRelationLine(current, type, idx, bundle);
+    // The whole block of a fragment goes: opener, branches, nested content and `end`.
+    operation.fragments.forEach(function (fid) {
+      var fragment = g.fragmentInfoForId(fid, text, type, bundle);
+      if (!fragment || fragment.endIdx === -1) return;
+      for (var line = fragment.startIdx; line <= fragment.endIdx; line++) doomedLines[line] = true;
     });
-    // Drop fragments wholesale (opener + branches + end + nested content).
-    // Sort by source-line descending so earlier indices remain valid.
-    if (operation.fragments.length) {
-      var fragInfos = operation.fragments.map(function (fid) {
-        return g.fragmentInfoForId(fid, current, type, bundle);
-      }).filter(Boolean);
-      fragInfos.sort(function (a, b) { return b.startIdx - a.startIdx; });
-      fragInfos.forEach(function (info) {
-        var positions = g.readLayoutPositions(current, type, bundle);
-        var routes = g.readLayoutRoutes(current, bundle);
-        var fragmentLines = g.stripLayoutMetadata(current, type).split('\n');
-        if (info.endIdx === -1) return;
-        fragmentLines.splice(info.startIdx, info.endIdx - info.startIdx + 1);
-        current = g.writePositionsIntoSource(fragmentLines.join('\n'), 'sequence', positions, routes, bundle);
-      });
+    var current = text;
+    var doomed = Object.keys(doomedLines).map(Number);
+    if (doomed.length) {
+      current = g.rewriteSourceLines(text, type, doomed.map(function (idx) { return { start: idx, end: idx }; }), undefined, undefined, bundle);
     }
     // Then drop elements (each call also strips relations referencing the id).
     operation.elements.forEach(function (id) {

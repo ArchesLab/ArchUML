@@ -57,12 +57,18 @@
       { id: 'state',     label: 'State',          glyph: '▢', base: 'State',  keyword: 'state', supports: { stereotype: true, highlight: true, texture: true, subStates: true } },
       { id: 'composite', label: 'Composite',      glyph: '⊞', base: 'Group',  keyword: 'state', supports: { stereotype: true, highlight: true, texture: true, subStates: true }, isComposite: true },
       { id: 'choice',    label: 'Choice <>',      glyph: '⬢', base: 'Choice', keyword: 'state', supports: {}, fixedStereotype: '<<choice>>' },
+      { id: 'junction',    label: 'Junction',          glyph: '●', base: 'Junction',    keyword: 'state', supports: {}, fixedStereotype: '<<junction>>' },
+      { id: 'history',     label: 'History (H)',       glyph: 'Ⓗ', base: 'History',     keyword: 'state', supports: {}, fixedStereotype: '<<history>>' },
+      { id: 'deepHistory', label: 'Deep history (H*)', glyph: 'Ⓗ', base: 'DeepHistory', keyword: 'state', supports: {}, fixedStereotype: '<<deepHistory>>' },
+      { id: 'fork',        label: 'Fork',              glyph: '━', base: 'Fork',        keyword: 'state', supports: {}, fixedStereotype: '<<fork>>' },
+      { id: 'join',        label: 'Join',              glyph: '━', base: 'Join',        keyword: 'state', supports: {}, fixedStereotype: '<<join>>' },
+      { id: 'terminate',   label: 'Terminate ✕',       glyph: '✕', base: 'Terminate',   keyword: 'state', supports: {}, fixedStereotype: '<<terminate>>' },
       { id: 'initial', label: 'Initial ●', glyph: '●', base: '__init', keyword: '',     supports: {}, pseudo: 'initial' },
       { id: 'final',   label: 'Final ◉',   glyph: '◉', base: '__final',keyword: '',     supports: {}, pseudo: 'final' },
       NOTE_SCHEMA
     ],
     component: [
-      { id: 'component', label: 'Component', glyph: '▢', base: 'Component', keyword: 'component', supports: { stereotype: true, dashed: true, ports: true, highlight: true, texture: true } },
+      { id: 'component', label: 'Component', glyph: '▢', base: 'Component', keyword: 'component', supports: { displayLabel: true, stereotype: true, dashed: true, ports: true, highlight: true, texture: true } },
       { id: 'portin',    label: 'Port In',   glyph: '▶', base: 'in',  keyword: 'port',    supports: { displayLabel: true }, isPort: true,      portKind: 'portin' },
       { id: 'portout',   label: 'Port Out',  glyph: '◀', base: 'out', keyword: 'port',    supports: { displayLabel: true }, isPort: true,      portKind: 'portout' },
       { id: 'provide',   label: 'Provided I/F', glyph: '○', base: 'p_iface', keyword: 'provide', supports: { displayLabel: true }, isInterface: true, interfaceKind: 'provide' },
@@ -70,9 +76,9 @@
       NOTE_SCHEMA
     ],
     deployment: [
-      { id: 'node',      label: 'Node',      glyph: '□', base: 'Node',     keyword: 'node',      supports: { stereotype: true, highlight: true, texture: true } },
-      { id: 'component', label: 'Component', glyph: '▢', base: 'Component',keyword: 'component', supports: { stereotype: true, highlight: true, texture: true } },
-      { id: 'artifact',  label: 'Artifact',  glyph: '⧉', base: 'Artifact', keyword: 'artifact',  supports: { displayLabel: true, highlight: true, texture: true } },
+      { id: 'node',      label: 'Node',      glyph: '□', base: 'Node',     keyword: 'node',      supports: { displayLabel: true, stereotype: true, highlight: true, texture: true } },
+      { id: 'component', label: 'Component', glyph: '▢', base: 'Component',keyword: 'component', supports: { displayLabel: true, stereotype: true, highlight: true, texture: true } },
+      { id: 'artifact',  label: 'Artifact',  glyph: '⧉', base: 'Artifact', keyword: 'artifact',  supports: { displayLabel: true, stereotype: true, highlight: true, texture: true } },
       NOTE_SCHEMA
     ],
     usecase: [
@@ -137,6 +143,7 @@
       { id: 'sync',   label: 'Synchronous',  glyph: '─→', op: '->',  supports: { label: true }, defaultLabel: 'message()' },
       { id: 'async',  label: 'Asynchronous', glyph: '↠', op: '->>', supports: { label: true }, defaultLabel: 'event()' },
       { id: 'return', label: 'Return',       glyph: '··→', op: '-->', supports: { label: true }, defaultLabel: 'response' },
+      { id: 'asyncReply', label: 'Async reply', glyph: '··↠', op: '-->>', supports: { label: true }, defaultLabel: 'reply' },
       { id: 'create', label: 'Create',       glyph: '⊕', op: '-->', supports: { label: true }, defaultLabel: '<<create>>', sequenceCreate: true },
       { id: 'lost',   label: 'Lost',         glyph: '→●', op: '->o', supports: { label: true }, defaultLabel: 'lost', sequenceSingle: 'lost' },
       { id: 'found',  label: 'Found',        glyph: '●→', op: 'o->', supports: { label: true }, defaultLabel: 'found', sequenceSingle: 'found' }
@@ -207,6 +214,27 @@
     return { elements: elementSchemasFor(type).slice(), relations: relationSchemasFor(type).slice(), unavailable: [] };
   }
 
+  // What a state's `<<kind>>` makes it. '' is an ordinary state, which may
+  // carry any other stereotype. Aliases are the spellings the renderer accepts.
+  var STATE_KINDS = [
+    { value: '', label: 'State' },
+    { value: 'choice', label: 'Choice' },
+    { value: 'junction', label: 'Junction' },
+    { value: 'history', label: 'Shallow history (H)', aliases: ['shallowhistory'] },
+    { value: 'deepHistory', label: 'Deep history (H*)', aliases: ['history*'] },
+    { value: 'fork', label: 'Fork' },
+    { value: 'join', label: 'Join' },
+    { value: 'terminate', label: 'Terminate' }
+  ];
+
+  function stateKindForStereotype(stereotype) {
+    var name = String(stereotype || '').replace(/^<<\s*|\s*>>$/g, '').toLowerCase();
+    var kind = STATE_KINDS.find(function (candidate) {
+      return candidate.value && (candidate.value.toLowerCase() === name || (candidate.aliases || []).indexOf(name) !== -1);
+    });
+    return kind ? kind.value : '';
+  }
+
   // Whether the editor can add elements to a diagram of `type` (it has a palette). Moved from the top level of the
   // inline script of _includes/uml-editor.html by plan Task 24, without a changed statement.
   function diagramSupportsCreation(type) {
@@ -214,6 +242,8 @@
   }
 
   return {
+    STATE_KINDS: STATE_KINDS,
+    stateKindForStereotype: stateKindForStereotype,
     isSequenceKeyword: isSequenceKeyword,
     diagramSupportsCreation: diagramSupportsCreation,
     diagramSupportsAnchoredNotes: diagramSupportsAnchoredNotes,

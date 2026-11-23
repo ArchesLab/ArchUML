@@ -92,7 +92,7 @@
   }
 
   function cloneRoutes(routes) {
-    var copy = {};
+    var copy = Object.create(null);
     Object.keys(routes || {}).forEach(function (id) {
       var route = routes[id];
       if (!route || !route.points || route.points.length < 2) return;
@@ -106,7 +106,9 @@
 
   function tokenizeRelationParts(text) {
     var tokens = [];
-    var re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\S+)/g;
+    // A bracketed group is one token even with spaces inside: an activity
+    // guard `[is valid]`, a component `[Web App]`.
+    var re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\[[^\]\s][^\]]*\]|\S+)/g;
     var m;
     while ((m = re.exec(String(text || '')))) {
       if (m[1] != null) {
@@ -164,10 +166,17 @@
     return '"' + escapeQuoted(value) + '"';
   }
 
-  function formatRelationEndpointId(id) {
+  // `type`, the diagram type, matters for a component diagram only.
+  function formatRelationEndpointId(id, type) {
     var value = String(id || '').trim();
     if (!value) return value;
     if (/^"((?:[^"\\]|\\.)*)"$/.test(value)) return value;
+    // A component connector names a component with spaces in brackets;
+    // the component grammar reads a quoted endpoint as nothing at all.
+    if (type === 'component') {
+      if (/^\[[^\]]+\]$/.test(value)) return value;
+      if (/\s/.test(value) && !/[\[\]"]/.test(value)) return '[' + value + ']';
+    }
     return /\s|"/.test(value) ? '"' + escapeQuoted(value) + '"' : value;
   }
 
@@ -188,7 +197,7 @@
   }
 
   function clonePositions(positions) {
-    var copy = {};
+    var copy = Object.create(null);
     Object.keys(positions || {}).forEach(function (id) {
       var pos = positions[id];
       if (!pos || pos.x === undefined || pos.y === undefined) return;
@@ -236,11 +245,17 @@
     return id !== label ? id + ': ' + label : label;
   }
 
-  function parseComponentPortLine(line) {
-    var m = String(line || '').trim().match(/^(portin|portout|port|provide|require)\s+"([^"]+)"(?:\s+as\s+(\S+))?/i) ||
-      String(line || '').trim().match(/^(portin|portout|port|provide|require)\s+(\S+?)(?:\s+as\s+(\S+))?(?:\s+dashed)?$/i);
-    if (!m) return null;
-    return { label: m[2], alias: m[3] || m[2] };
+  // Source spans complement the renderer model when rewriting a declaration.
+  function componentDeclaration(line) {
+    const match = String(line || '').match(/^(\s*(?:component\s+)?)(\[[^\]]+\]|"(?:[^"\\]|\\.)*"|[^\s{]+)(?:\s+as\s+("(?:[^"\\]|\\.)*"|[^\s{]+))?/i);
+    if (!match || (!/^\s*component\s/i.test(line) && match[2].charAt(0) !== '[')) return null;
+    if (isRelationOperatorToken({ value: match[2] })) return null;
+    if (isRelationOperatorToken({ value: String(line).slice(match[0].length).trim().split(/\s+/)[0] })) return null;
+    const label = match[2].charAt(0) === '[' ? match[2].slice(1, -1).trim() : unquoteId(match[2]);
+    const token = match[3] || match[2];
+    const start = match[3] ? match[0].lastIndexOf(token) : match[1].length;
+    return { id: match[3] ? unquoteId(match[3]) : label, label: label,
+      start: start, end: start + token.length, headEnd: match[0].length };
   }
 
   // Venn names may contain spaces; separators only count outside quotes.
@@ -278,9 +293,10 @@
     if (/^end$/i.test(t)) return 'Fragment end';
     if (/^o->\s+\S+/i.test(t)) return 'Found message';
     if (/^\S+\s+->o\b/i.test(t)) return 'Lost message';
-    if (/^\S+\s+->>\s+\S+/i.test(t)) return 'Async message';
-    if (/^\S+\s+-->\s+\S+/i.test(t)) return 'Return message';
-    if (/^\S+\s+->\s+\S+/i.test(t)) return 'Sync message';
+    // Mirror the renderer's arrows, including the right-to-left spellings.
+    if (/^\S+\s+(?:--?>>|<<--?)\s+\S+/.test(t)) return 'Async message';
+    if (/^\S+\s+(?:-->|<--)\s+\S+/.test(t)) return 'Return message';
+    if (/^\S+\s+(?:->x|->\s*\*|->|<-)\s+\S+/.test(t)) return 'Sync message';
     return '';
   }
 
@@ -427,6 +443,7 @@
     if (tokenized) {
       tokenized.label = info.label;
       tokenized.stereotype = info.stereotype;
+      tokenized.dashed = info.dashed;
       return finalizeParsedRelationInfo(tokenized);
     }
     var quotedBoth = t.match(/^"((?:[^"\\]|\\.)*)"\s+([-.\|<>=*ox]+)\s+"((?:[^"\\]|\\.)*)"$/);
@@ -518,6 +535,17 @@
     return info;
   }
 
+  // The palette kind that a freeform operator is a style of.
+  function freeformRelationKind(op) {
+    if (op === '<--' || op === '<..' || op === '<==') return 'back';
+    if (op === '<->' || op === '<..>' || op === '<==>') return 'both';
+    if (op === '--') return 'plain';
+    if (op === '..>' || op === '..') return 'dash';
+    if (op === '==>' || op === '==') return 'thick';
+    if (op === '-->') return 'arrow';
+    return '';
+  }
+
   function guessRelationKind(op) {
     var t = (op || '').trim();
     if (t === '--|>') return 'gen';
@@ -532,6 +560,7 @@
     if (t === '==') return 'total';
     if (t === '->') return 'sync';
     if (t === '->>') return 'async';
+    if (t === '-->>') return 'asyncReply';
     if (t === '->o') return 'lost';
     if (t === 'o->') return 'found';
     return '';
@@ -556,12 +585,7 @@
     if ((type === 'component' || type === 'deployment') && info.kind === 'assoc') info.kind = 'arrow';
     if (type === 'sequence' && op === '-->' && info.kind === 'assoc') info.kind = 'return';
     if (type === 'freeform') {
-      if (op === '<--' || op === '<..' || op === '<==') info.kind = 'back';
-      else if (op === '<->' || op === '<..>' || op === '<==>') info.kind = 'both';
-      else if (op === '--') info.kind = 'plain';
-      else if (op === '..>' || op === '..') info.kind = 'dash';
-      else if (op === '==>' || op === '==') info.kind = 'thick';
-      else if (op === '-->' || info.kind === 'assoc') info.kind = 'arrow';
+      info.kind = freeformRelationKind(op) || (info.kind === 'assoc' ? 'arrow' : info.kind);
     }
     if (type === 'usecase') {
       if (/^<<\s*include\s*>>$/i.test(info.stereotype || '')) info.kind = 'include';
@@ -577,7 +601,7 @@
       label: info.label, sourceMult: info.sourceMult, targetMult: info.targetMult,
       navigability: info.navigability, sourceNavigability: info.sourceNavigability,
       targetNavigability: info.targetNavigability, stereotype: info.stereotype, dashed: info.dashed,
-      guard: info.guard, labelIsGuard: info.labelIsGuard, implicitSource: info.implicitSource
+      guard: info.guard, labelIsGuard: info.labelIsGuard, implicitSource: info.implicitSource, op: info.op
     };
   }
 
@@ -669,7 +693,7 @@
     else if (info.kind === 'enum') keyword = 'enum';
     else keyword = 'class';
     const declarationName = info.declarationLabel == null ? info.name : info.declarationLabel;
-    var line = keyword + ' ' + (/[\s"<>]/.test(declarationName) ? '"' + escapeQuoted(declarationName) + '"' : declarationName);
+    var line = keyword + ' ' + (/[\s"]/.test(declarationName) ? '"' + escapeQuoted(declarationName) + '"' : declarationName);
     if (info.declarationLabel != null) line += ' as ' + formatRelationEndpointId(info.name);
     if (info.stereotype) line += ' ' + info.stereotype;
     if (info.highlight) line += ' #' + String(info.highlight).replace(/^#/, '');
@@ -739,9 +763,11 @@
   function identifierFromInlineLabel(label) {
     var raw = String(label || '').trim();
     if (!raw) return '';
-    var cleaned = raw.replace(/[^A-Za-z0-9_]/g, '_').replace(/^_+|_+$/g, '');
+    // Letters and digits of any script are identifier characters: `Zähler`
+    // stays `Zähler`. Everything else becomes an underscore.
+    var cleaned = raw.replace(/[^\p{L}\p{N}_]/gu, '_').replace(/^_+|_+$/g, '');
     if (!cleaned) return '';
-    if (!/^[A-Za-z_]/.test(cleaned)) cleaned = '_' + cleaned;
+    if (!/^[\p{L}_]/u.test(cleaned)) cleaned = '_' + cleaned;
     return cleaned;
   }
 
@@ -816,7 +842,8 @@
         var tokens = tokenizeRelationParts(clean);
         if (isRelationOperatorToken(tokens[1]) ||
             (relationTokenLooksLikeMultiplicity(tokens[1]) && isRelationOperatorToken(tokens[2]))) return null;
-        m = clean.match(/^(?:abstract\s+class|class|interface|enum)\s+("[^"]+"|\S+)(?:\s+as\s+(\S+))?/i);
+        // The name ends at whitespace or at the body's brace: `class Foo{`.
+        m = clean.match(/^(?:abstract\s+class|class|interface|enum)\s+("[^"]+"|[^\s{]+)(?:\s+as\s+([^\s{]+))?/i);
         return m ? unquoteId(m[2] || m[1]) : null;
       }
       if (type === 'sequence') {
@@ -825,12 +852,12 @@
         return participant ? unquoteId(participant.id) : null;
       }
       if (type === 'state') {
-        m = clean.match(/^(?:state|choice)\s+("[^"]+"|\S+)/i);
+        m = clean.match(/^(?:state|choice)\s+("[^"]+"|[^\s{]+)/i);
         return m ? unquoteId(m[1]) : null;
       }
       if (type === 'component') {
-        m = clean.match(/^component\s+("[^"]+"|\S+)(?:\s+as\s+(\S+))?/i);
-        if (m) return unquoteId(m[2] || m[1]);
+        const component = componentDeclaration(clean);
+        if (component) return component.id;
         m = clean.match(/^(?:portin|portout|port|provide|require)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?/i);
         return m ? unquoteId(m[3] || m[1] || m[2]) : null;
       }
@@ -876,7 +903,7 @@
     function writePositionsIntoSource(text, type, positions, routeOverrides, bundle) {
       var routes = routeOverrides || readLayoutRoutes(text, bundle);
       var lines = stripLayoutMetadata(text, type).split('\n');
-      var remaining = {};
+      var remaining = Object.create(null);
       Object.keys(positions || {}).forEach(function (id) { remaining[id] = positions[id]; });
       var out = [];
 
@@ -1137,13 +1164,23 @@
       var lines = stripLayoutMetadata(text, type).split('\n');
       var elements = [];
       var seen = Object.create(null);
-      var componentContext = null;
       var stateInitialCount = 0;
       var stateFinalCount = 0;
 
       if (type === 'crc') {
         return bundle.UMLCRCDiagram.parse(text).cards.map(function (card) {
           return { id: card.id, label: card.name, axis: 'xy' };
+        });
+      }
+      if (type === 'component' && bundle.UMLComponentDiagram) {
+        // The renderer's model of the text without its layout (`@pos` would end a name).
+        const model = bundle.UMLComponentDiagram.parse(lines.join('\n'));
+        model.components.forEach(function (component) {
+          addElement(elements, seen, component.name, model.displayNameMap[component.name] || component.label || component.name,
+            component.standalonePort ? 'port' : 'xy');
+          if (!component.standalonePort) component.ports.forEach(function (port) {
+            addElement(elements, seen, component.name + '.' + port.alias, port.name, 'port');
+          });
         });
       }
       if (type === 'deployment' && bundle.UMLDeploymentDiagram) {
@@ -1177,10 +1214,6 @@
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
         if (!line || line === '@startuml' || line === '@enduml' || /^layout\s+/i.test(line)) continue;
-        if (type === 'component' && line === '}') {
-          componentContext = null;
-          continue;
-        }
         var m;
         if (type !== 'gitgraph' && type !== 'folder-tree' && type !== 'er' && /^note\s+(left|right|top|bottom|over)\b/i.test(line)) {
           var noteLine = line.match(/^note\s+(left|right|top|bottom|over)\s+(?:of\s+)?(\S+)\s*:\s*(.+)$/i);
@@ -1197,14 +1230,14 @@
         }
 
         if (type === 'class') {
-          m = line.match(/^(?:abstract\s+class|class|interface|enum)\s+("[^"]+"|\S+)(?:\s+as\s+(\S+))?/i);
+          m = line.match(/^(?:abstract\s+class|class|interface|enum)\s+("[^"]+"|[^\s{]+)(?:\s+as\s+([^\s{]+))?/i);
           if (m) addElement(elements, seen, m[2] || m[1], m[1]);
         } else if (type === 'sequence') {
           // Participants already come from the renderer's model; note prose
           // and declaration order must not invent different editable heads.
           continue;
         } else if (type === 'state') {
-          m = line.match(/^state\s+("[^"]+"|\S+)/i);
+          m = line.match(/^state\s+("[^"]+"|[^\s{]+)/i);
           if (m) addElement(elements, seen, m[1], m[1]);
           var stateRel = parseRelationLine(line);
           if (stateRel && stateRel.source && stateRel.target && /->/.test(stateRel.op || '')) {
@@ -1222,35 +1255,8 @@
             }
           }
         } else if (type === 'component') {
-          m = line.match(/^component\s+("[^"]+"|\S+)(?:\s+as\s+(\S+))?/i);
-          if (m) {
-            var componentId = m[2] || unquoteId(m[1]).replace(/^\[|\]$/g, '');
-            addElement(elements, seen, componentId, m[1]);
-            if (line.indexOf('{') !== -1) {
-              componentContext = componentId;
-              var inlineBody = line.match(/\{([^}]*)\}/);
-              if (inlineBody) {
-                var portRe = /(portin|portout|port|provide|require)\s+(?:"([^"]+)"|(\S+?))(?:\s+as\s+(\S+))?(?=\s+(?:portin|portout|port|provide|require)\b|\s*$)/ig;
-                var pm;
-                while ((pm = portRe.exec(inlineBody[1])) !== null) {
-                  var inlinePortLabel = pm[2] || pm[3];
-                  var inlinePortAlias = pm[4] || inlinePortLabel;
-                  addElement(elements, seen, componentId + '.' + inlinePortAlias, inlinePortLabel, 'port');
-                }
-                componentContext = null;
-              }
-            }
-            continue;
-          }
-          var topPort = parseComponentPortLine(line);
-          if (topPort && !componentContext) {
-            addElement(elements, seen, topPort.alias, topPort.label, 'port');
-            continue;
-          }
-          if (componentContext) {
-            var port = parseComponentPortLine(line);
-            if (port) addElement(elements, seen, componentContext + '.' + port.alias, port.label, 'port');
-          }
+          // Components and their ports already come from the renderer model.
+          continue;
         } else if (type === 'deployment') {
           m = line.match(/^node\s+("[^"]+"|\S+)(?:\s+as\s+(\S+))?/i);
           if (m) addElement(elements, seen, m[2] || m[1], m[1]);
@@ -1300,7 +1306,7 @@
     }
 
     function existingIds(text, type, bundle) {
-      var seen = {};
+      var seen = Object.create(null);
       collectModelElements(text, type, bundle).forEach(function (e) {
         var id = String(e.id || '');
         if (id) seen[id] = true;
@@ -1361,9 +1367,10 @@
         line = 'box' + (spec.freeformShape && spec.freeformShape !== 'rect' ? ' ' + spec.freeformShape : '') +
           ' "' + escapeQuoted(label).replace(/\n/g, '\\n') + '" as ' + id;
       } else if (spec.keyword === 'usecase') {
-        line = 'usecase "' + escapeQuoted(label) + '" as ' + id;
+        // A name with spaces cannot be an alias: the quoted name is the identity.
+        line = 'usecase "' + escapeQuoted(label) + '"' + (/\s/.test(id) ? '' : ' as ' + id);
       } else if (spec.keyword === 'rectangle') {
-        line = 'rectangle "' + escapeQuoted(label) + '"' + (label !== id ? ' as ' + formatRelationEndpointId(id) : '') + ' { }';
+        line = 'rectangle "' + escapeQuoted(label) + '"' + (label !== id ? ' as ' + formatRelationEndpointId(id, type) : '') + ' { }';
       } else if (spec.keyword === 'artifact') {
         line = 'artifact "' + escapeQuoted(label) + '" as ' + id;
       } else if (spec.keyword === 'set') {
@@ -1379,10 +1386,10 @@
       } else if (spec.keyword === 'actor' && (type === 'sequence' || type === 'usecase')) {
         if (type === 'sequence') {
           line = 'actor ' + id + ': ' + label;
-        } else if (id !== label) {
+        } else if (id !== label && !/\s/.test(id)) {
           line = 'actor "' + escapeQuoted(label) + '" as ' + id;
         } else {
-          line = 'actor ' + id;
+          line = 'actor ' + formatRelationEndpointId(id, type);
         }
       } else if (spec.keyword === 'participant') {
         line = 'participant ' + id + ': ' + label;
@@ -1390,8 +1397,10 @@
         line = '"' + escapeQuoted(label) + '"';
       } else if (spec.keyword === '(*)') {
         line = null;
+      } else if ((spec.keyword === 'component' || spec.keyword === 'node') && label !== id) {
+        line = spec.keyword + ' "' + escapeQuoted(label) + '" as ' + formatRelationEndpointId(id, type);
       } else if (spec.keyword) {
-        line = spec.keyword + ' ' + id;
+        line = spec.keyword + ' ' + formatRelationEndpointId(id, type);
       } else {
         line = id;
       }
@@ -1440,12 +1449,14 @@
     function buildRelationLine(spec, sourceId, targetId, opts, type) {
       opts = opts || {};
       var op = spec.op;
-      var label = opts.label || (spec.defaultLabel || '');
+      // A new relation starts with its default label. An existing one states
+      // its label, and an empty one stays empty.
+      var label = opts.label != null ? opts.label : (spec.defaultLabel || '');
       if (type === 'sequence' && spec.sequenceSingle === 'lost') {
-        return formatRelationEndpointId(sourceId) + ' ->o' + (label ? ' : ' + label : '');
+        return formatRelationEndpointId(sourceId, type) + ' ->o' + (label ? ' : ' + label : '');
       }
       if (type === 'sequence' && spec.sequenceSingle === 'found') {
-        return 'o-> ' + formatRelationEndpointId(targetId) + (label ? ' : ' + label : '');
+        return 'o-> ' + formatRelationEndpointId(targetId, type) + (label ? ' : ' + label : '');
       }
       // Composition / aggregation navigability: combine '*--' or 'o--' with the
       // navigability variant.
@@ -1469,6 +1480,10 @@
         }
       }
 
+      // Freeform has more line styles than palette entries (`<..>`, `==`).
+      // An edit that keeps the relation's kind keeps the style it was drawn in.
+      if (type === 'freeform' && opts.op && freeformRelationKind(opts.op) === spec.id) op = opts.op;
+
       if (type === 'activity') {
         var actHead = opts.implicitSource ? op : formatActivityEndpointId(sourceId) + ' ' + op;
         var guard = opts.labelIsGuard ? label : opts.guard;
@@ -1477,8 +1492,8 @@
         return actLine;
       }
 
-      var src = formatRelationEndpointId(sourceId);
-      var tgt = formatRelationEndpointId(targetId);
+      var src = formatRelationEndpointId(sourceId, type);
+      var tgt = formatRelationEndpointId(targetId, type);
       if (opts.sourceMult) src = src + ' "' + escapeQuoted(opts.sourceMult) + '"';
       if (opts.targetMult) tgt = '"' + escapeQuoted(opts.targetMult) + '" ' + tgt;
 
@@ -1486,8 +1501,8 @@
       // We surface it via `sourceMult` / `targetMult` already, but the entity-quote
       // ordering differs: cardinality follows the entity name. Correct that for ER.
       if (type === 'er') {
-        src = formatRelationEndpointId(sourceId) + (opts.sourceMult ? ' "' + escapeQuoted(opts.sourceMult) + '"' : '');
-        tgt = (opts.targetMult ? '"' + escapeQuoted(opts.targetMult) + '" ' : '') + formatRelationEndpointId(targetId);
+        src = formatRelationEndpointId(sourceId, type) + (opts.sourceMult ? ' "' + escapeQuoted(opts.sourceMult) + '"' : '');
+        tgt = (opts.targetMult ? '"' + escapeQuoted(opts.targetMult) + '" ' : '') + formatRelationEndpointId(targetId, type);
       }
 
       var line = src + ' ' + op + ' ' + tgt;
@@ -1633,6 +1648,15 @@
       }
       var st = t.match(/<<\s*([^>]+?)\s*>>/);
       if (st) info.stereotype = '<<' + st[1] + '>>';
+      if (type === 'component') {
+        const component = componentDeclaration(t);
+        if (component) {
+          info.name = component.id;
+          info.label = component.label;
+          info.dashed = /\bdashed\b/i.test(t.slice(component.headEnd));
+          return info;
+        }
+      }
       if (type === 'sequence' && /^(?:participant|actor)\s/i.test(t)) {
         // Sequence `id as Class` runs in the opposite direction to the
         // generic `label as id` syntax. Use the renderer's declaration model.
@@ -1769,7 +1793,8 @@
           .map(function (endpoint) {
             const first = endpoint.tokens[0];
             const last = endpoint.tokens[endpoint.tokens.length - 1];
-            return { value: endpoint.id, quoted: endpoint.tokens.length === 1 && first.quoted,
+            const id = type === 'component' ? endpoint.id.replace(/^\[([^\]]+)\]$/, '$1') : endpoint.id;
+            return { value: id, quoted: endpoint.tokens.length === 1 && first.quoted,
               start: first.start, end: last.end };
           });
       }
@@ -1786,6 +1811,13 @@
     }
 
     function renameDeclarationIdentifier(declaration, type, oldId, newId, bundle) {
+      if (type === 'component') {
+        const component = componentDeclaration(declaration);
+        if (component) {
+          const token = declaration.charAt(component.start) === '[' ? '[' + newId + ']' : formatRelationEndpointId(newId, type);
+          return declaration.slice(0, component.start) + token + declaration.slice(component.end);
+        }
+      }
       if (type === 'sequence') {
         // A sequence declaration puts the id before either ':' or 'as'.
         // The generic alias grammar below puts it after 'as' instead.
@@ -1803,7 +1835,11 @@
       const aliasIndex = tokens.findIndex(function (token) { return token.text === 'as'; });
       const token = aliasIndex >= 0 ? tokens[aliasIndex + 1] : tokens.find(function (candidate, index) { return index > 0 && unquoteId(candidate.text) === oldId; });
       if (!token) return declaration;
-      return declaration.slice(0, token.start) + formatRelationEndpointId(newId) + declaration.slice(token.end);
+      // A use case without an alias is declared by its quoted name alone:
+      // `usecase "Log In"`. An alias (`... as UC1`) is never quoted.
+      const quotedByGrammar = aliasIndex < 0 && type === 'usecase' && /^\s*usecase\b/i.test(header);
+      const renamed = quotedByGrammar ? '"' + escapeQuoted(newId) + '"' : formatRelationEndpointId(newId, type);
+      return declaration.slice(0, token.start) + renamed + declaration.slice(token.end);
     }
 
     function declarationStatementRanges(declaration, type, bundle) {
@@ -1853,10 +1889,10 @@
           const referenceLine = /^\s*note\b/.test(changed) ? changed.split('\n')[0] : changed;
           referenceSpans(referenceLine, type, bundle).reverse().forEach(function (span) {
             const next = clonedReference(span.value);
-            if (next !== span.value) changed = changed.slice(0, span.start) + formatRelationEndpointId(next) + changed.slice(span.end);
+            if (next !== span.value) changed = changed.slice(0, span.start) + formatRelationEndpointId(next, type) + changed.slice(span.end);
           });
           if (type === 'usecase' && mapping.has(unquoteId(changed.trim()))) {
-            changed = changed.replace(/\S[\s\S]*\S|\S/, formatRelationEndpointId(mapping.get(unquoteId(changed.trim()))));
+            changed = changed.replace(/\S[\s\S]*\S|\S/, formatRelationEndpointId(mapping.get(unquoteId(changed.trim())), type));
           }
         }
         cloned = cloned.slice(0, statement.start) + changed + cloned.slice(statement.end);
@@ -1968,8 +2004,9 @@
       var lines = sourceLinesWithoutNotes(text, type, bundle);
       var stack = [];
       var ranges = [];
-      var openRe = /^\s*(alt|opt|loop|par|break|critical|ref|neg)\b\s*(?:\[(.*?)\])?\s*$/i;
-      var elseRe = /^\s*else\b\s*(?:\[(.*?)\])?\s*$/i;
+      // A condition may be bracketed (`alt [ok]`) or bare (`loop each item`).
+      var openRe = /^\s*(alt|opt|loop|par|break|critical|ref|neg)\b\s*(?:\[(.*?)\]|(\S.*?))?\s*$/i;
+      var elseRe = /^\s*else\b\s*(?:\[(.*?)\]|(\S.*?))?\s*$/i;
       var endRe  = /^\s*end\s*$/i;
       for (var i = 0; i < lines.length; i++) {
         var raw = lines[i];
@@ -1979,7 +2016,7 @@
             id: 'frag:' + i,
             startIdx: i,
             kind: openMatch[1].toLowerCase(),
-            condition: (openMatch[2] || '').trim(),
+            condition: (openMatch[2] || openMatch[3] || '').trim(),
             branches: [],
             endIdx: -1
           });
@@ -1989,7 +2026,7 @@
         if (elseMatch && stack.length) {
           stack[stack.length - 1].branches.push({
             lineIdx: i,
-            condition: (elseMatch[1] || '').trim()
+            condition: (elseMatch[1] || elseMatch[2] || '').trim()
           });
           continue;
         }
@@ -2191,7 +2228,7 @@
             const spans = referenceSpans(referenceLine, type, bundle).filter(function (span) { return idIsReferenceTo(span.value, oldId, text, type, bundle); });
             if (newId == null && spans.length) changed = '';
             else spans.reverse().forEach(function (span) {
-              changed = changed.slice(0, span.start) + formatRelationEndpointId(newId + span.value.slice(oldId.length)) + changed.slice(span.end);
+              changed = changed.slice(0, span.start) + formatRelationEndpointId(newId + span.value.slice(oldId.length), type) + changed.slice(span.end);
             });
           }
           body = body.slice(0, statement.start) + changed + body.slice(statement.end);
@@ -2295,7 +2332,7 @@
         spans.reverse().forEach(function (span) {
           if (!idIsReferenceTo(span.value, oldId, referenceText, type, bundle)) return;
           const renamed = newId + span.value.slice(oldId.length);
-          const token = span.quoted ? '"' + escapeQuoted(renamed) + '"' : formatRelationEndpointId(renamed);
+          const token = span.quoted ? '"' + escapeQuoted(renamed) + '"' : formatRelationEndpointId(renamed, type);
           lines[i] = lines[i].slice(0, span.start) + token + lines[i].slice(span.end);
         });
         if (/^\s*note\b/i.test(lines[i]) && lines[i].indexOf(':') < 0) inNote = true;
@@ -2636,6 +2673,7 @@
     sourceWithScaffold: sourceWithScaffold,
     escapeQuoted: escapeQuoted,
     formatRelationEndpointId: formatRelationEndpointId,
+    componentDeclaration: componentDeclaration,
     findInsertPointForDeclaration: findInsertPointForDeclaration,
     clearSequenceMessageLayoutMetadata: clearSequenceMessageLayoutMetadata,
     buildCrcCardSource: buildCrcCardSource,

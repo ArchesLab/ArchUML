@@ -30,10 +30,12 @@
     var diagramSupportsAnchoredNotes = kit.diagramSupportsAnchoredNotes;
     var elementSchemasFor = kit.elementSchemasFor;
     var env = kit.env;
+    var focusLayoutTarget = kit.focusLayoutTarget;
     var host = kit.host;
-    var joiningPreviousStep = kit.joiningPreviousStep;
     var output = kit.output;
+    var previewPane = kit.previewPane;
     var relationSchemasFor = kit.relationSchemasFor;
+    var selectedLayoutPrimaryId = kit.selectedLayoutPrimaryId;
     var setSelectedLayoutId = kit.setSelectedLayoutId;
     var wrap = kit.wrap;
     // What the other parts and the pointer driver give this part, bound by link() once all of them exist.
@@ -55,6 +57,15 @@
       }
       relationChooserReturnFocus = null;
     }
+    // Choosing a menu item removes the item that held focus. Put focus back on
+    // the selection (or the canvas) so Delete, undo and Esc keep working.
+    function keepFocusInEditor() {
+      var focused = env.document.activeElement;
+      if (focused && focused !== env.document.body && wrap.contains(focused)) return;
+      focusLayoutTarget(selectedLayoutPrimaryId());
+      if (!wrap.contains(env.document.activeElement) || env.document.activeElement === env.document.body) previewPane.focus();
+    }
+
     // ─── Right-click context menu ───
     var contextMenu = null;
     var contextMenuReturnFocus = null;
@@ -94,7 +105,8 @@
     }
     function dismissContextMenuOnEsc(ev) {
       if (!contextMenu) return closeContextMenu();
-      if (ev.key === 'Escape') { ev.preventDefault(); closeContextMenu(true); }
+      // Tab leaves a menu: close it rather than strand it open behind the focus.
+      if (ev.key === 'Escape' || ev.key === 'Tab') { ev.preventDefault(); closeContextMenu(true); }
       else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
         ev.preventDefault();
         var btns = Array.prototype.slice.call(contextMenu.querySelectorAll('button'));
@@ -133,6 +145,7 @@
         btn.addEventListener('click', function () {
           closeContextMenu();
           item.onClick();
+          keepFocusInEditor();
         });
         box.appendChild(btn);
       });
@@ -275,6 +288,7 @@
           closeRelationChooser();
           cleanupChooserListeners();
           onPick(spec);
+          keepFocusInEditor();
         });
         box.appendChild(btn);
       });
@@ -319,11 +333,13 @@
         btn.appendChild(env.document.createTextNode(spec.label));
         btn.addEventListener('click', function () {
           closeRelationChooser();
+          cleanupChooserListeners();
           setActiveTool(null);
-          // As today, the chosen relation takes no undo step of its own.
-          commands.apply(joiningPreviousStep(buildOperation('relation.add',
-            { tool: spec.id, from: sourceId, to: targetId, label: null }, relationAddFacts(null), null)));
+          // The chosen relation is one undo step.
+          commands.apply(buildOperation('relation.add',
+            { tool: spec.id, from: sourceId, to: targetId, label: null }, relationAddFacts(null), null));
           announce('Added ' + spec.label + ' from "' + sourceId + '" to "' + targetId + '".', false);
+          keepFocusInEditor();
         });
         box.appendChild(btn);
       });
@@ -354,7 +370,7 @@
     }
     function dismissOnEsc(ev) {
       if (!relationChooser) return cleanupChooserListeners();
-      if (ev.key === 'Escape') {
+      if (ev.key === 'Escape' || ev.key === 'Tab') {
         ev.preventDefault();
         closeRelationChooser(true);
         cleanupChooserListeners();
