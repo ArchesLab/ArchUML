@@ -2631,7 +2631,8 @@
    * asked for. A reading is of one revision and never changes; reading has no side effects.
    *
    * It also answers the grammar's questions the classic canvas still asks, all of this one
-   * document (the text adapter's own; the C4 adapter has none): `lines`, the rendered document
+   * document (the C4 adapter gives `lines`, `sequenceLines`, `deploymentNesting`, `ownedElementIds`,
+   * and `lifelineDeclarations` too, read off its drawing): `lines`, the rendered document
    * (the lines a relation's `line`, a fragment's lines, and an anchor's `beforeLine` count);
    * `sequenceLines`, the same with a sequence's scaffold; the stored `layoutPositions` and
    * `layoutRoutes`; a deployment's `deploymentNesting`; `relationLines`, the relation lines' indices;

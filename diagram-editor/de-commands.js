@@ -358,15 +358,20 @@
     function addSequenceRelationAtY(svg, spec, sourceId, targetId, canvasY) {
       return addSequenceRelationAtLine(spec, sourceId, targetId, sequenceInsertLineForY(svg, canvasY, null));
     }
+    // The message.move of the drawn message `routeId` to before line `insertBeforeLine` of the framed document. The
+    // message is its relation reference alone, which every adapter's reading resolves (spec §3.4).
+    function messageMoveToLine(routeId, insertBeforeLine) {
+      var ref = relationReference(String(routeId || ''), adapter.contents());
+      return buildOperation('message.move', { ref: ref, at: { beforeLine: insertBeforeLine } }, {}, 'seq-reorder-message');
+    }
     function moveSequenceMessageBlockToLine(routeId, insertBeforeLine) {
-      var meta = relationInfoForRouteId(routeId);
-      var verdict = adapter.apply(buildOperation('message.move',
-        { ref: meta.ref, at: { beforeLine: insertBeforeLine } }, {}, 'seq-reorder-message'));
+      var verdict = adapter.apply(messageMoveToLine(routeId, insertBeforeLine));
       if (verdict.ok) announce(verdict.message, false);
       return verdict.ok;
     }
-    function moveSequenceMessageToY(routeId, svg, canvasY) {
-      return moveSequenceMessageBlockToLine(routeId, sequenceInsertLineForY(svg, canvasY, routeId));
+    // The message.move of the drawn message `routeId` dropped at height `canvasY`: to the place there (spec §3.4).
+    function messageMoveOperation(routeId, svg, canvasY) {
+      return messageMoveToLine(routeId, sequenceInsertLineForY(svg, canvasY, routeId));
     }
     function moveSequenceMessageBy(routeId, delta) {
       var meta = relationInfoForRouteId(routeId);
@@ -1347,11 +1352,11 @@
         handleHitboxClickForSequenceElementTool: handleHitboxClickForSequenceElementTool,
         invertRelationDirection: invertRelationDirection,
         layoutSetOperation: layoutSetOperation,
+        messageMoveOperation: messageMoveOperation,
         moveFragmentBy: moveFragmentBy,
         moveSequenceFragmentToY: moveSequenceFragmentToY,
         moveSequenceMessageBy: moveSequenceMessageBy,
         moveSequenceMessageToBranch: moveSequenceMessageToBranch,
-        moveSequenceMessageToY: moveSequenceMessageToY,
         movedBoxesOf: movedBoxesOf,
         nudgeElement: nudgeElement,
         placeElementAt: placeElementAt,

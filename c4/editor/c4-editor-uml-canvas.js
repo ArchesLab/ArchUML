@@ -288,7 +288,7 @@
      * wait until the press has ended, so its release and click neither close the chooser nor take the focus.
      */
     function chooseDrawnLine(routeId) {
-      const reading = Object.assign({}, adapter.contents(), { lines: parts.umlAdapter.textLines(drawing.uml.text) });
+      const reading = adapter.contents();
       const match = root.ArchUMLDiagramEditorParts.scene.readScene(drawing.svg, reading, doc.defaultView).relationRef(routeId, reading);
       const refs = match.candidates.map((line) => `rel:${line}`).filter((ref) => canvas.optionElement(ref));
       if (refs.length === 0) return;

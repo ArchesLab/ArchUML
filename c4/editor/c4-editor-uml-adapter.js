@@ -335,8 +335,10 @@
 
   /**
    * The contents of the drawing of `context` (spec §3.4): `{ type, revision, elements, relations, fragments,
-   * activations }`, with the queries the module's gestures ask: `ownedElementIds(parentId)` (the boxes drawn inside a
-   * box); for a sequence drawing `sequenceLines` (its lines) and `lifelineDeclarations(ids)` (whether every one of the
+   * activations }`, with what the module's gestures read beside them: `lines`, the drawn text without its layout block,
+   * the lines every item's `line` counts (a drawn route resolves to its line in them); `ownedElementIds(parentId)` (the
+   * boxes drawn inside a box); for a sequence drawing `sequenceLines` (the same lines, where its insertion anchors
+   * count) and `lifelineDeclarations(ids)` (whether every one of the
    * lifelines `ids` is declared) and `reorderNamesMoved` (a reorder's operation may name its moved lifeline); for a deployment drawing `deploymentNesting` (how its boxes nest). Each item carries the `line` of the drawn text (without its layout block) it stands for and `ref`,
    * the model thing it stands for, from the source map (spec §4.1); boxes are named by their aliases. `holders` are the
    * aliases of the boxes that can hold a position (their `axis` is 'xy'). In a deployment drawing every node and hosted
@@ -348,7 +350,7 @@
   function readContents(context, holders) {
     const { uml, viewModel, design } = context;
     const lines = textLines(uml.text);
-    const reading = { type: uml.type, revision: context.revision, elements: [], relations: [], fragments: [], activations: [] };
+    const reading = { type: uml.type, revision: context.revision, lines, elements: [], relations: [], fragments: [], activations: [] };
     // A sequence drawing's lines, which the module's insertion anchors index (spec §4.1: a message's anchor is a line),
     // and whether lifelines `ids` can be reordered: in this view every drawn lifeline stands for an element of the
     // model, so each is declared, and the module may build lifeline.reorder for them.
@@ -548,5 +550,5 @@
     },
   };
 
-  return { createUmlAdapter, textLines };
+  return { createUmlAdapter };
 });

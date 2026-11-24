@@ -60,7 +60,7 @@ function sequenceKit(reading) {
     applyRoutePoints: () => {},
     syncRouteOverlays: () => {},
     clonePoints: (points) => points.map((point) => ({ ...point })),
-    moveSequenceMessageToY: () => false,
+    messageMoveOperation: () => null,
     activityNodeInfoForId: () => null,
   };
   const part = createMoveGestures(kit);

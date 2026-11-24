@@ -135,6 +135,35 @@ test('contents maps every source line to elements, relations, and fragments with
   }
 });
 
+test('contents gives the drawn lines without the layout block, so the line a relation names is the one that draws it', () => {
+  // code of policy keeps a position here, so its drawn text has a layout block above the lines the source map counts.
+  const pinned = `${REFERENCE}layout:\n  ${POLICY}:\n    positions:\n      EnrollmentPolicy: [40, 40]\n`;
+  const { adapter, state } = harness({ text: pinned });
+  const uml = C4.toUml(C4.project(state.getDesign(), POLICY));
+  const aliasOf = (id) => Object.keys(uml.ids).find((alias) => uml.ids[alias] === id);
+  assert.ok(uml.text.split('\n').includes('@layout'), 'the drawn text has a layout block');
+
+  const { lines } = adapter.contents();
+
+  assert.equal(lines.length, uml.source.lines.length, 'one line for each line the source map counts');
+  uml.source.lines.forEach((entry, index) => {
+    if (entry === null || entry.kind !== 'relation') return;
+    assert.match(lines[index], new RegExp(`^\\s*${aliasOf(entry.from)}\\s+\\S+\\s+${aliasOf(entry.to)}\\b`),
+      `line ${index} draws the ${entry.relation} from ${entry.from} to ${entry.to}`);
+  });
+});
+
+test('a dynamic view\'s contents count its message anchors and its relations in the same lines', () => {
+  const { adapter } = harness({ view: 'dynamic enroll' });
+
+  const contents = adapter.contents();
+
+  assert.deepEqual(contents.lines, contents.sequenceLines);
+  for (const relation of contents.relations) {
+    assert.match(contents.lines[relation.line], /^\S+ --?>>? \S+/, `line ${relation.line} is the drawn message ${relation.routeId}`);
+  }
+});
+
 test('in a deployment drawing every node and hosted instance can be pressed and moved (axis xy), whichever boxes hold positions', () => {
   const topLevel = (context) => new Set(Object.keys(context.uml.ids).filter((alias) => {
     const id = context.uml.ids[alias];

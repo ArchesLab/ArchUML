@@ -56,7 +56,7 @@ function moveKit() {
     applyRoutePoints: () => {},
     syncRouteOverlays: () => {},
     clonePoints: (points) => points.map((point) => ({ ...point })),
-    moveSequenceMessageToY: () => false,
+    messageMoveOperation: () => null,
     activityNodeInfoForId: () => null,
   };
   return kit;

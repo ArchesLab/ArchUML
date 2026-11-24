@@ -70,7 +70,7 @@
     // What the other parts and the pointer driver give this part, bound by link() once all of them exist.
     var activityNodeInfoForId, announce, applyConnectedRouteDeltas, applyRoutePoints, buildOperation, clonePoints,
       collectConnectedRoutes, documentType, editorCanvasPoint, layoutSetOperation, mergeConnectedRouteEntries,
-      moveSequenceMessageToY, movedBoxesOf, routeLayoutSetOperation, syncRouteOverlays, toolState;
+      messageMoveOperation, movedBoxesOf, routeLayoutSetOperation, syncRouteOverlays, toolState;
 
     function collectPositions(editables) {
       var positions = {};
@@ -601,18 +601,7 @@
           });
           applyRoutePoints(dragState.route, shiftedPoints);
           syncRouteOverlays(dragState.layer, dragState.route.id, shiftedPoints);
-          if (finish) {
-            // No-movement clicks should not trigger a reorder. The drop-Y can
-            // land just below the route's own Y and snap the message past the
-            // next sibling, silently swapping their order on plain selection
-            // clicks.
-            var moved = false;
-            if (Math.abs(routeDy) > 4) {
-              moved = moveSequenceMessageToY(dragState.route.id, dragState.svg, now.y);
-            }
-            gesture.state = null;
-            if (!moved) host.redraw();
-          }
+          if (finish) return dropMessage(gesture, routeDy, now.y);
           return;
         }
         var nextPoints = clonePoints(dragState.points);
@@ -650,6 +639,34 @@
       var next = pointerPosition(dragState, now);
       dragState.pointer = now;
       return showMoveAt(gesture, next.x, next.y, finish);
+    }
+    // The drop of a message moved up or down by `dy` to height `canvasY` (spec §3.4 message.move, §5.6). No-movement
+    // clicks should not trigger a reorder: the drop-Y can land just below the route's own Y and snap the message past
+    // the next sibling, silently swapping their order on plain selection clicks. As a box's drop, the move is asked
+    // about, then applied; a refused move puts the preview back and says why, and so does a drop that throws, before
+    // the error goes on. Returns the verdict, or the apply's promise of it; null when nothing was dropped.
+    function dropMessage(gesture, dy, canvasY) {
+      var dragState = gesture.state;
+      var verdict = null;
+      try {
+        if (Math.abs(dy) > 4) {
+          var move = messageMoveOperation(dragState.route.id, dragState.svg, canvasY);
+          var advice = commands.can(move);
+          verdict = advice.ok ? commands.apply(move) : advice;
+        }
+      } finally {
+        gesture.state = null;
+        if (!verdict) host.redraw();
+      }
+      return verdict && whenSettled(verdict, function (settled) {
+        if (settled.ok) {
+          announce(settled.message, false, settled);
+        } else {
+          host.redraw();
+          if (settled.message) announceRefusal(settled);
+        }
+        return settled;
+      });
     }
     // The drop of a route edit or of a bend's move (spec §3.11): the line's points `points` are stored, or, when the
     // adapter refuses them, the drawing is made again and the refusal announced. Returns the verdict, or the apply's
@@ -874,7 +891,7 @@
         editorCanvasPoint = kit.editorCanvasPoint;
         layoutSetOperation = kit.layoutSetOperation;
         mergeConnectedRouteEntries = kit.mergeConnectedRouteEntries;
-        moveSequenceMessageToY = kit.moveSequenceMessageToY;
+        messageMoveOperation = kit.messageMoveOperation;
         movedBoxesOf = kit.movedBoxesOf;
         routeLayoutSetOperation = kit.routeLayoutSetOperation;
         syncRouteOverlays = kit.syncRouteOverlays;
