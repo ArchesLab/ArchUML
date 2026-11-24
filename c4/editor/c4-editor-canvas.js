@@ -610,7 +610,8 @@
     /** Goes up to the view that contains this one and focuses the element just left (spec §9.2 Focus). */
     function zoomOut() {
       const viewModel = drawn.viewModel;
-      const crumbs = viewModel ? viewModel.breadcrumbs : [];
+      // The editor's trail starts at the context view (ED-10), so going up stops there.
+      const crumbs = state.breadcrumbs(viewModel);
       if (crumbs.length < 2) {
         announce('This is the top view; no view contains it.');
         return;

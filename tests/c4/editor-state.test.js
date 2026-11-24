@@ -228,6 +228,45 @@ test('openView with an unknown selector opens the default view and reports the p
   assert.equal(state.getView(), 'context of registration');
 });
 
+// ---- No landscape level: the context view is the editor's top view ------------------------------------
+
+const PEOPLE_ONLY = `schema: c4-design/1
+people:
+  student:
+    name: Student
+`;
+
+test('a landscape request opens the context view of the first internal system, as the default view does', () => {
+  const { host, calls } = recordingHost();
+  const state = createEditorState({ text: REFERENCE, host, view: 'landscape' });
+  assert.equal(state.getView(), 'context of registration');
+  assert.equal(state.getViewProblem(), null);
+
+  state.openView('containers of registration');
+  const opened = state.openView('landscape');
+  assert.deepEqual([opened.ok, opened.selector, opened.problem], [true, 'context of registration', null]);
+  assert.deepEqual(calls.view, ['containers of registration', 'context of registration']);
+});
+
+test('a model without an internal system keeps the whole-model drawing, and adding one does not switch views', () => {
+  const state = createEditorState({ text: PEOPLE_ONLY, host: recordingHost().host, view: 'landscape' });
+  assert.equal(state.getView(), 'landscape');
+  assert.equal(createEditorState({ text: '', host: recordingHost().host }).getView(), 'landscape');
+
+  state.dispatch({ op: 'addElement', parentId: null, type: 'system', name: 'Billing' });
+  assert.equal(state.getView(), 'landscape', 'an edit keeps the open view');
+});
+
+test('the editor\'s breadcrumbs start at the context view', () => {
+  const state = createEditorState({ text: REFERENCE, host: recordingHost().host });
+  const trail = (selector) => state.breadcrumbs(core.project(core.load(REFERENCE), selector)).map((crumb) => crumb.label);
+  assert.deepEqual(trail('components of api'),
+    ['Context: Course Registration', 'Containers: Course Registration', 'Components: Registration API']);
+  assert.deepEqual(trail('context of registration'), ['Context: Course Registration']);
+  assert.deepEqual(trail('landscape'), []);
+  assert.deepEqual(state.breadcrumbs(null), []);
+});
+
 test('YAML errors switch to read-only mode and keep the last valid model', () => {
   const { host, calls } = recordingHost();
   const state = createEditorState({ text: REFERENCE, host, view: 'containers of registration' });
