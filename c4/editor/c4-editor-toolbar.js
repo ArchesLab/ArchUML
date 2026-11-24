@@ -598,24 +598,29 @@
    * before the word, a tooltip that is also the accessible description, naming the step the button would take back or
    * repeat and its keys, and `aria-keyshortcuts` with exactly the keys the mount routes (listenForCanvasKeys).
    */
-  function createHistory({ dom, state }) {
+  function createHistory({ dom, ids, state }) {
     const buttons = HISTORY_COMMANDS.map((command) => {
+      // The description is its own element: a page's tooltip script may move `title` away (the site's does).
+      const description = dom.el('span', { id: ids(`history-${command.run}-description`), class: 'c4-editor__sr-only' });
       const button = dom.el('button', {
         type: 'button',
         class: 'c4-editor__button c4-editor__history-button',
         'aria-keyshortcuts': command.keyshortcuts,
+        'aria-describedby': description.id,
         on: { click: (event) => isDisabled(event.currentTarget) || state[command.run]() },
       }, [dom.el('span', { class: 'c4-editor__history-glyph', 'aria-hidden': 'true', text: command.glyph }), command.label]);
-      return { command, button };
+      return { command, button, description };
     });
     return {
       element: dom.el('div', { role: 'group', class: 'c4-editor__group c4-editor__group--history', 'aria-label': 'History' },
-        buttons.map(({ button }) => button)),
+        buttons.flatMap(({ button, description }) => [button, description])),
       update() {
-        buttons.forEach(({ command, button }) => {
+        buttons.forEach(({ command, button, description }) => {
           const available = state[command.can]();
           setDisabled(button, !available);
-          button.title = historyDescription(command, available ? state[command.stepLabel]() : null, available);
+          const text = historyDescription(command, available ? state[command.stepLabel]() : null, available);
+          description.textContent = text;
+          button.title = text;
         });
       },
     };
