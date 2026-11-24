@@ -1117,22 +1117,46 @@
     return { content: body, inner: inner };
   }
 
+  // A figure is read, not edited. ArchUML's compact layout draws a class or component diagram narrower in units of
+  // its smallest text, so a code or interfaces view fits more panes at paragraph size before it has to scroll
+  // (measured on the site's figures in Nov 2026: code views 26–36 % narrower, interfaces views 17–24 %; sequence
+  // diagrams changed by −3 to +2 %, and compact does not optimize deployment diagrams, so those two stay as they are).
+  // The pane is named, not measured, so a prerendered figure and a live one are the same drawing. A view with a stored
+  // layout keeps the drawing its positions were stored against, the editor's.
+  var COMPACT_FIGURE = Object.freeze({ notations: { 'uml-class': true, 'uml-component': true }, directive: 'layout compact 600x700' });
+
+  /** Whether a figure of `viewModel` (`options.compact`) is drawn in compact layout. */
+  function drawsCompact(viewModel, options) {
+    var stored = viewModel.layout && (viewModel.layout.positions.size > 0 || viewModel.layout.routes.length > 0);
+    return Boolean(options && options.compact) && COMPACT_FIGURE.notations[viewModel.notation] === true && !stored;
+  }
+
+  /**
+   * `text` with the compact directive as its last line before `@enduml`, so the lines the renderers number
+   * (`rel:<line>`) keep their numbers and the source map still describes them.
+   */
+  function withCompactLayout(text) {
+    return text.replace(/\n@enduml$/, '\n' + COMPACT_FIGURE.directive + '\n@enduml');
+  }
+
   /**
    * Shows the view's figure in the C4 container and draws the view's ArchUML text into it once, with the ArchUML
    * renderer of its notation, leaving out every stored route whose line no longer joins its two boxes
-   * (`UMLShared.renderSkippingDetachedRoutes`; spec §6 rule 5): such a line keeps the renderer's own route. Returns
-   * `{ uml, svg, skippedRouteIds }`: the `toUml` result drawn, the drawing (null when none), and the ids
+   * (`UMLShared.renderSkippingDetachedRoutes`; spec §6 rule 5): such a line keeps the renderer's own route. With
+   * `options.compact` a code or interfaces view without a stored layout is drawn in compact layout (`drawsCompact`).
+   * Returns `{ uml, svg, skippedRouteIds }`: the `toUml` result drawn, the drawing (null when none), and the ids
    * (`rel:<line>`) of the stored routes left out.
    */
-  function drawFigure(container, viewModel) {
+  function drawFigure(container, viewModel, options) {
     var shared = root.UMLShared;
     var uml = core.toUml(withTechnologyLabels(viewModel));
+    var text = drawsCompact(viewModel, options) ? withCompactLayout(uml.text) : uml.text;
     var parts = figureParts(viewModel);
     shared.prepareDiagramContainer(container, 'c4');
     container.classList.add('uml-c4-diagram-container');
     container.replaceChildren(parts.content);
     var skippedRouteIds = shared.renderSkippingDetachedRoutes(function () {
-      root[DELEGATED_RENDERERS[viewModel.notation]].render(parts.inner, uml.text);
+      root[DELEGATED_RENDERERS[viewModel.notation]].render(parts.inner, text);
     });
     shared.autoFitSVG(container);
     return { uml: uml, svg: parts.inner.querySelector('svg'), skippedRouteIds: skippedRouteIds };
@@ -1177,10 +1201,12 @@
    * when the renderer drew none), the `toUml` result the drawing shows (ids and source map included; its layout block
    * without the dropped bends), and the stored routes left out, as `{ from, to, relation }`. `options` keeps the
    * renderer's call shape; the UML renderers take their colours from the page. The drawing is not named and not marked
-   * for print: `render` does both, and so does the editor's canvas.
+   * for print: `render` does both, and so does the editor's canvas. `render` also asks for `options.compact`: a figure
+   * of a code or interfaces view without a stored layout is drawn in compact layout; the editor's canvas is not, since
+   * its gestures store positions against the plain drawing.
    */
   function renderDelegatedView(container, viewModel, options) {
-    var drawn = drawFigure(container, viewModel);
+    var drawn = drawFigure(container, viewModel, options);
     var dropped = drawn.skippedRouteIds.map(function (routeId) { return routeOfRouteId(drawn.uml, routeId); });
     var uml = dropped.length > 0 ? core.toUml(withTechnologyLabels(withoutRoutes(viewModel, dropped))) : drawn.uml;
     return { svgText: drawn.svg ? drawn.svg.outerHTML : null, uml: uml, droppedRoutes: dropped };
@@ -1239,7 +1265,7 @@
    * the model's `layout:` section keeps for that view's key (spec §6.4 step 5) unless `options.pins` gives others
    * (an editor's move preview). `options.palette` and `options.interactive` are as for `renderView`. A view in UML
    * notation is drawn by `renderDelegatedView`, with the layout its key keeps (an interfaces view with its title,
-   * legend, and notes around it), and a YAML error, an unknown view, or an empty model shows an accessible state instead. A drawn figure is labelled once, here, through
+   * legend, and notes around it; a code or interfaces view without one in compact layout, `COMPACT_FIGURE`), and a YAML error, an unknown view, or an empty model shows an accessible state instead. A drawn figure is labelled once, here, through
    * `UMLShared.applySvgAccessibility(container, 'c4', text, brief)` (spec §3.3 step 2), so a page's describer
    * describes the same text. An interface card is text, not a drawing, so it is not labelled; the embed's
    * `# panels:` directive is written to `data-c4-panels` and chooses the card's panels (spec §6.6 item 7). A drawing
@@ -1264,7 +1290,7 @@
     } else if (viewModel.notation === 'interface-card') {
       card.renderCard(container, viewModel, { panels: panels });
     } else if (DELEGATED_RENDERERS[viewModel.notation]) {
-      svgText = renderDelegatedView(container, viewModel, options).svgText;
+      svgText = renderDelegatedView(container, viewModel, Object.assign({}, options, { compact: true })).svgText;
     } else if (viewModel.notation === 'c4') {
       var pins = (options && options.pins) || design.model.layout.get(viewModel.key);
       svgText = renderView(container, viewModel, Object.assign({}, options, { pins: pins })).svgText;
