@@ -3102,6 +3102,8 @@ Write the model in a fenced `c4` block (or `<pre><code class="language-c4">`). T
 
 In SEBook pages, keep one shared model in `_includes/c4-models/<name>.yml` (it never declares `view:`) and embed a view of it with the `c4-view.html` include, whose parameters are `model` (the file name without `.yml`), `view` (a selector), `caption`, `description`, and `panels`; it writes the fenced block described above. A page that shows C4 figures sets `c4: true` in its front matter so the C4 scripts are loaded with the page; elsewhere the first figure loads them on demand.
 
+A C4 figure never shrinks its labels below the surrounding text. It takes the width of its column when its smallest label stays at least the paragraph size there; otherwise it keeps that size and scrolls sideways inside the figure, which is then a keyboard stop (`data-uml-fit="readable"` on the figure container; other diagram types start fitted to the screen and offer a button to enlarge them). Print fits every figure to the width of the paper.
+
 Every rendered C4 figure keeps its embed text in a `<script type="application/json" data-c4-source>` element inside the figure container, as a JSON string in which each `<` is written as the JSON escape `\u003c`. The drawing's relationship groups also carry a `data-c4-source` attribute (the id of the relationship's source element) and come before that element, so a script that reads the text selects `script[type="application/json"][data-c4-source]` and reads it with `JSON.parse(element.textContent)`; a bare `[data-c4-source]` selector finds a relationship instead.
 
 ### View selectors

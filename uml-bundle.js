@@ -4273,6 +4273,10 @@
     return source ? { type: source.type, text: source.text } : null;
   }
 
+  // Figures of these types fit their pane only at a readable size (`data-uml-fit="readable"`, see
+  // sizeDiagramForReadability): a C4 view's labels carry its notation, so it scrolls rather than shrink them.
+  var READABLE_FIT_TYPES = { c4: true };
+
   function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
     const attributeCaption = (explicitCaption || '').trim();
@@ -4288,6 +4292,7 @@
     var container = document.createElement('div');
     prepareDiagramContainer(container, normalized);
     container.setAttribute('data-uml-type', normalized);
+    if (READABLE_FIT_TYPES[normalized]) container.setAttribute('data-uml-fit', 'readable');
     container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
@@ -5160,9 +5165,11 @@
       diagramViews.delete(container);
       view = null;
     }
-    // Hidden render staging/measurement hosts must never produce controls.
+    // Hidden render staging/measurement hosts must never produce controls, and
+    // fitting would shrink a readable-fit figure below its readable size.
     if (!container.isConnected || !container.clientWidth || !container.querySelector('svg') ||
-        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]')) {
+        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]') ||
+        fitsOnlyReadably(container)) {
       if (view) { view.host.hidden = true; releaseDiagramViewport(view); }
       return;
     }
@@ -5238,6 +5245,15 @@
       })
     : null;
 
+  /**
+   * Whether `container` is (or is drawn inside) a figure that fits its pane
+   * only at a readable size: `data-uml-fit="readable"`, which the figure
+   * wrapper sets for READABLE_FIT_TYPES (and the static build mirrors).
+   */
+  function fitsOnlyReadably(container) {
+    return !!(container.closest && container.closest('[data-uml-fit="readable"]'));
+  }
+
   function sizeDiagramForReadability(container) {
     var svg = container && container.querySelector('svg');
     if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
@@ -5266,6 +5282,16 @@
       : width + 'px';
     if (svg.style.getPropertyValue('--uml-readable-width') !== readableWidth) {
       svg.style.setProperty('--uml-readable-width', readableWidth);
+    }
+    // A readable-fit figure takes its pane's width (100cqi: the figure is the
+    // size container, css/diagram-view.css), but never less than its readable
+    // width and never more than its natural width unless the readable width
+    // needs it. Wider than the pane even then, it scrolls at that width.
+    if (fitsOnlyReadably(container) && isFinite(smallestFont)) {
+      var fitWidth = 'max(' + (width / smallestFont) + 'em, min(' + width + 'px, 100cqi))';
+      if (svg.style.getPropertyValue('--uml-readable-fit-width') !== fitWidth) {
+        svg.style.setProperty('--uml-readable-fit-width', fitWidth);
+      }
     }
     updateDiagramScrollability(container);
     if (diagramScrollObserver) diagramScrollObserver.observe(container);
