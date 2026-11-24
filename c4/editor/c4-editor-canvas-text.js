@@ -28,6 +28,9 @@
   const DESCRIPTION_MIN_ROWS = 2;
   // A line counts as under the pointer within this many CSS px of its drawn text, above and below.
   const LINE_SLACK_PX = 2;
+  // HTML over the drawing whose own double-click is not the drawing's.
+  const CONTROLS_OVER_DRAWING = 'button, a, input, textarea, select, summary, [role="menu"], [data-c4-scope-header], '
+    + '.c4-editor__canvas-rename-holder';
   // The element types that record a technology (spec §4.4; the inspector's TYPE_FIELDS).
   const TECHNOLOGY_TYPES = new Set(['container', 'component']);
 
@@ -74,6 +77,8 @@
       // What lies under the pointer, not the event's target: a press that began a pan captured the pointer, so its
       // double-click is aimed at the canvas region.
       const under = region.ownerDocument.elementsFromPoint(event.clientX, event.clientY);
+      // A control laid over the drawing (the scope header's tray, a field, a menu) keeps its own double-click.
+      if (under.length > 0 && under[0].closest(CONTROLS_OVER_DRAWING)) return false;
       const svg = surface.svg();
       const option = under.find((node) => node.matches('[role="option"][data-c4-option]')
         && surface.optionFor(node.getAttribute('data-c4-option')) === node);
