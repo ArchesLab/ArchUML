@@ -678,7 +678,7 @@
       var bendVerdict = commands.can(bendDrop);
       if (bendVerdict.ok) return commands.apply(bendDrop);
       host.redraw();
-      announce(bendVerdict.message, false);
+      announceRefusal(bendVerdict);
       return bendVerdict;
     }
     // Where a pointer at canvas point `now` puts the moved item: its stored position moved with the pointer, on its

@@ -507,6 +507,15 @@ test('a bend on the realization is layout/inheritance-line and a bend on the dep
     [['EnrollmentPolicy', 'EnrollmentRule', 'collaborator', [[150, 90], [220, 60], [300, 90]]]]);
 });
 
+test('a bend on an inheritance line named by its drawn order (edge-0, as a drag of its segment names it) is layout/inheritance-line', async () => {
+  // The renderer stamps no id on generalization and realization lines, so the drawing names them by their order.
+  const h = harness();
+  const bend = () => operation(h, 'layout.set', { positions: {}, routes: [{ id: 'edge-0', index: 0, points: [{ x: 100, y: 200 }] }], facts: {} });
+
+  assert.equal(h.adapter.can(bend()).code, 'layout/inheritance-line', 'the advice a drag asks for when it is dropped');
+  await assertRefused(h, bend(), 'layout/inheritance-line');
+});
+
 test('moving a box writes its position under its model id', async () => {
   const h = harness({ text: PINNED });
 

@@ -75,6 +75,8 @@
   // The view that draws an element among its siblings, by the type of its parent (C4 spec §5).
   const CHILD_VIEW = { system: 'containers', container: 'components', component: 'code' };
   const LINE_REF = /^rel:(\d+)$/;
+  // A drawn line the renderer stamps no id on, named by its order (spec §4.2: only a dependency carries a route id).
+  const UNSTAMPED_LINE = /^edge-\d+$/;
   const OPEN_ENDS = ['from', 'to'];
   // A refusal the table has no row for: a view deletes one drawn thing at a time (the C4 surface selects one).
   const ONE_AT_A_TIME = { code: 'one-at-a-time', summary: 'Delete one thing at a time',
@@ -571,9 +573,11 @@
 
   /**
    * Why the box or line `ref` holds no layout, `{ code, values }`, or null: generalization and realization lines are
-   * drawn as one tree per parent, and two dependencies in one direction between one pair of boxes share one key.
+   * drawn as one tree per parent, and two dependencies in one direction between one pair of boxes share one key. A
+   * dragged segment of an inheritance tree is named by its drawn order (`edge-N`): the renderer stamps no id on it.
    */
   function layoutRefusal(ref, context) {
+    if (typeof ref === 'string' && UNSTAMPED_LINE.test(ref)) return { code: 'layout/inheritance-line', values: {} };
     if (typeof ref !== 'string' || !LINE_REF.test(ref)) return null;
     const line = lineOf(ref, context);
     if (INHERITANCE.has(line.relation)) return { code: 'layout/inheritance-line', values: {} };
