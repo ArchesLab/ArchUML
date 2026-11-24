@@ -1090,8 +1090,8 @@
       }
       var line = adapter.contents().declarationLine(id, type);
       if (line == null) {
-        // A component that only connectors name gets a declaration that carries the label.
-        if (type === 'component') {
+        // A component that only connectors name gets a declaration that carries the label (a port is not one).
+        if (type === 'component' && adapter.contents().elements.some(function (element) { return element.id === id && element.axis === 'xy'; })) {
           adapter.apply(buildOperation('element.update', { ref: id, changes: { declaration: {
             tool: 'component', name: id, label: newLabel } } }, {}, 'edit:' + id));
         }
