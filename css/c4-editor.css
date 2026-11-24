@@ -1,0 +1,2938 @@
+/*
+ * ArchUML C4 editor: tokens, layout, toolbar, and the shared classes of c4-editor-dom.js (spec §9.1, §9.4).
+ *
+ * Colours come from the --c4-ui-* tokens below, with ArchUML defaults for light and html.dark-mode; a host maps
+ * its own tokens over them (the site in css/c4-editor-theme.css, VS Code from --vscode-*). Sizes are em or
+ * inherited, never rem: on this site 1rem is 10 px. Controls use font: inherit so their text is paragraph-sized.
+ *
+ * One stylesheet for every editor part, in this order: tokens, base, layout, toolbar, the shared classes of
+ * c4-editor-dom.js, and print (the shell: mount and toolbar); then actions (context menus, the anchored relationship
+ * form, form fields), outline, inspector (with the list editor, interface forms, and Uses picker), and panels (with
+ * the YAML-error banner and the novice scaffolds). Later sections build on the classes of earlier ones. Each section
+ * keeps its base, html.dark-mode, and print rules together. Fallbacks inside var() are the defaults the part was
+ * written against; the tokens above define them all, so a host's token map reaches every part.
+ */
+
+/* ---- Tokens ------------------------------------------------------------------------------------- */
+
+.c4-editor {
+  --c4-ui-bg: #ffffff;
+  --c4-ui-surface: #f6f8fa;
+  --c4-ui-text: #1f2328;
+  --c4-ui-text-muted: #4b5563;
+  /* Control borders reach 3:1 against both surfaces (WCAG 1.4.11): 4.8:1 on #fff, 4.5:1 on #f6f8fa. */
+  --c4-ui-border: #6b7280;
+  --c4-ui-divider: #d0d7de;
+  --c4-ui-control-bg: #ffffff;
+  --c4-ui-control-hover-bg: #e4eef8;
+  --c4-ui-accent: #1d4f91;
+  --c4-ui-on-accent: #ffffff;
+  --c4-ui-link: #1d4f91;
+  --c4-ui-focus: #2774ae;
+  --c4-ui-focus-width: 3px;
+  --c4-ui-focus-offset: 2px;
+  --c4-ui-canvas-bg: #ffffff;
+  --c4-ui-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  --c4-ui-backdrop: rgba(0, 0, 0, 0.45);
+  /* Menu items and tabs under the pointer or focus. */
+  --c4-ui-hover: #e4eef8;
+  /* Text fields and selects in forms (borders reach 3:1 against the field and its surroundings). */
+  --c4-ui-field: #ffffff;
+  --c4-ui-field-text: #1f2328;
+  --c4-ui-field-border: #5f6b7c;
+  /* Severity marks; each also has a non-colour cue (a severity word, a bar style). */
+  --c4-ui-error: #a13a2e;
+  --c4-ui-error-surface: #fdf0ee;
+  --c4-ui-warning: #8a5a00;
+  /* Focused controls stop below the site's sticky navbar and above the read-aloud bar (WCAG 2.4.11). */
+  --c4-ui-scroll-margin-top: 96px;
+  --c4-ui-scroll-margin-bottom: 5em;
+  --c4-canvas-height: 28em;
+  /* Focus and selection marks drawn inside the drawing (the canvas overlay section). No html.dark-mode value: the
+     site draws the drawing through invert(1) hue-rotate(180deg) in dark mode, which turns this blue into a light
+     blue, and the colour reaches 3:1 against every element fill and both pages with or without that filter. */
+  --c4-ui-canvas-mark: #2774ae;
+}
+
+html.dark-mode .c4-editor {
+  --c4-ui-bg: #121212;
+  --c4-ui-surface: #1e1e1e;
+  --c4-ui-text: #e6edf3;
+  --c4-ui-text-muted: #b0b8c4;
+  --c4-ui-border: #8b949e;
+  --c4-ui-divider: #3a4048;
+  --c4-ui-control-bg: #252525;
+  --c4-ui-control-hover-bg: #2d3a4a;
+  --c4-ui-accent: #8bb8e8;
+  --c4-ui-on-accent: #0a0a14;
+  --c4-ui-link: #8bb8e8;
+  --c4-ui-focus: #ffd100;
+  --c4-ui-canvas-bg: #121212;
+  --c4-ui-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+  --c4-ui-backdrop: rgba(0, 0, 0, 0.65);
+  --c4-ui-hover: #2d3a4a;
+  --c4-ui-field: #0f1622;
+  --c4-ui-field-text: #e6edf3;
+  --c4-ui-field-border: #8b9bb0;
+  --c4-ui-error: #f08a7e;
+  --c4-ui-error-surface: #2d1714;
+  --c4-ui-warning: #f0c060;
+}
+
+/* Size variants set the canvas height (spec §9.4: modifier classes, never a style attribute). 'fill' follows the base
+   rule below, whose container shorthand it overrides. */
+.c4-editor--compact { --c4-canvas-height: 18em; }
+.c4-editor--regular { --c4-canvas-height: 28em; }
+.c4-editor--tall { --c4-canvas-height: 42em; }
+
+/* ---- Base --------------------------------------------------------------------------------------- */
+
+.c4-editor {
+  container: c4-editor / inline-size;
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5em;
+  box-sizing: border-box;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-bg);
+}
+
+/* Size 'fill': the host gives the editor its height (a tutorial's workspace pane), so the root is a size container
+   and the canvas takes the height below the rows above it (--c4-canvas-top, measured by c4-editor-mount.js), less
+   one gap, and never less than the compact height. The inspector and panels follow below it in the root's scroll. */
+.c4-editor.c4-editor--fill {
+  container-type: size;
+  --c4-canvas-height: max(18em, calc(100cqb - var(--c4-canvas-top, 0px) - 0.5em));
+}
+
+.c4-editor *,
+.c4-editor *::before,
+.c4-editor *::after {
+  box-sizing: border-box;
+}
+
+/* The hidden attribute wins over every display rule below. */
+.c4-editor [hidden] {
+  display: none !important;
+}
+
+/* Paragraph-sized text in every control, strong enough to beat a page's own `button { font-size }` rules. */
+.c4-editor :is(button, input, select, textarea) {
+  font: inherit;
+}
+
+/* The inherited colour is only a default: any class rule below (a primary button, a pressed toggle) overrides it.
+   It comes with the matching background, so a control without a class of its own never pairs the dark theme's
+   light text with the browser's light button face. */
+.c4-editor :where(button, input, select, textarea) {
+  color: inherit;
+  background-color: var(--c4-ui-control-bg);
+}
+
+.c4-editor :is(a, button, input, select, textarea, summary, [tabindex]) {
+  scroll-margin-block: var(--c4-ui-scroll-margin-top) var(--c4-ui-scroll-margin-bottom);
+}
+
+.c4-editor :is(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--c4-ui-focus-width) solid var(--c4-ui-focus);
+  outline-offset: var(--c4-ui-focus-offset);
+}
+
+/* Visually hidden, still read by assistive technology (c4-editor-dom.js: the live region). */
+.c4-editor__sr-only {
+  position: absolute !important;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Layout (spec §9.1): toolbar → outline → canvas → inspector → panels, in DOM order at every width ---- */
+
+.c4-editor__toolbar {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em 1em;
+  min-inline-size: 0;
+  padding: 0.5em;
+  background: var(--c4-ui-surface);
+  border: 1px solid var(--c4-ui-divider);
+  border-radius: 6px;
+}
+
+.c4-editor__region {
+  min-inline-size: 0;
+  background: var(--c4-ui-surface);
+  border: 1px solid var(--c4-ui-divider);
+  border-radius: 6px;
+}
+
+.c4-editor__region--outline { flex: 0 0 13em; }
+.c4-editor__region--inspector { flex: 0 0 18em; }
+.c4-editor__region--panels { flex: 1 1 100%; }
+
+/* The inspector's forms lay out by the inspector's width, not the editor's (container queries in that section). */
+.c4-editor__region--inspector > .c4-editor__region-body {
+  container: c4-inspector / inline-size;
+}
+.c4-editor__region--collapsed { flex-basis: auto; }
+
+.c4-editor__region-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  inline-size: 100%;
+  min-block-size: 24px;
+  padding: 0.3em 0.6em;
+  font-weight: bold;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.c4-editor__region-toggle::before {
+  content: "▾";
+  content: "▾" / "";
+}
+
+.c4-editor__region-toggle[aria-expanded="false"]::before {
+  content: "▸";
+  content: "▸" / "";
+}
+
+.c4-editor__region-toggle:hover {
+  background: var(--c4-ui-control-hover-bg);
+}
+
+.c4-editor__region-body {
+  min-inline-size: 0;
+  padding: 0 0.5em 0.5em;
+}
+
+/* The canvas is the one region that scrolls in both directions; it never pushes the editor wider. */
+.c4-editor__canvas {
+  flex: 1 1 28em;
+  min-inline-size: 0;
+  block-size: var(--c4-canvas-height);
+  overflow: auto;
+  background: var(--c4-ui-canvas-bg);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 6px;
+}
+
+.c4-editor__canvas:focus-visible {
+  outline-offset: calc(-1 * var(--c4-ui-focus-width));
+}
+
+/* In an editable editor the message region comes directly before the canvas and is drawn over the canvas's top edge
+   (UML-view editing spec §7.5; the message region section below). The two share a column, which takes the canvas's
+   place in the editor's rows, so the canvas keeps its box; inside the column the canvas is a block, so its own flex
+   values do not apply there. The canvas keeps a room at its top as tall as the region (--c4-messages-reserve): at its
+   first scroll position a one-line message covers none of the drawing. A longer message makes the room taller, and
+   the canvas scrolls past the extra room, so a message that appears never moves the drawing, yet the drawing can be
+   scrolled out from under it (c4-editor-mount.js measures the extra height and scrolls). The scroll padding keeps a
+   revealed element below the whole region (c4-editor-canvas.js, WCAG 2.4.11). */
+.c4-editor__canvas-column {
+  /* Inside the canvas's border and focus ring, so the ring stays visible while a message is shown. */
+  --c4-messages-inset: calc(1px + var(--c4-ui-focus-width));
+  /* One line of text with a button in it (line-height 1.4, the button's 0.15em padding and 1px borders), plus the
+     region's own 1px borders. */
+  --c4-messages-row: max(28px, calc(1.7em + 4px));
+  /* The region's reach into the canvas, with a gap below it: one row, plus the height a longer message adds to it
+     (--c4-messages-extra, a runtime value c4-editor-mount.js measures; 0 for a message of one line). */
+  --c4-messages-reserve: calc(var(--c4-messages-inset) + var(--c4-messages-row) + var(--c4-messages-extra, 0px) + 0.25em);
+  position: relative;
+  flex: 1 1 28em;
+  min-inline-size: 0;
+}
+
+.c4-editor__canvas-column > .c4-editor__canvas {
+  padding-block-start: var(--c4-messages-reserve);
+  scroll-padding-block-start: var(--c4-messages-reserve);
+}
+
+@media screen {
+  /* While the room is taller than one row, the stage is at least as tall as the canvas's inside plus the extra room,
+     so the canvas can scroll past that room whatever the drawing's height: a short drawing stays where it was too. */
+  .c4-editor__canvas-column.is-message-tall > .c4-editor__canvas > .c4-editor__stage {
+    min-block-size: calc(100% + var(--c4-messages-extra));
+  }
+}
+
+.c4-editor__stage {
+  inline-size: max-content;
+  min-inline-size: 100%;
+  padding: 0.75em;
+}
+
+/* The drawing grows with its SVG instead of scrolling itself: the canvas is the scroll container. The shared
+   ArchUML container rule (css/uml-diagram.css) caps it at 100% and scrolls it; the editor undoes both. */
+.c4-editor .c4-editor__diagram {
+  inline-size: max-content;
+  max-inline-size: none;
+  overflow: visible;
+}
+
+/* Magnification (spec §9.4): the canvas's --c4-zoom scales the width the renderer chose for readable labels. */
+.c4-editor .c4-editor__diagram svg {
+  inline-size: calc(var(--uml-readable-width, 100%) * var(--c4-zoom, 1));
+  block-size: auto;
+  margin: 0;
+}
+
+@media screen {
+  /* Outranks the SEBook narrow-screen rule that caps every SVG at the column width: the canvas scrolls instead. */
+  .c4-editor .c4-editor__diagram svg {
+    max-inline-size: none !important;
+  }
+}
+
+.c4-editor__canvas-message {
+  margin: 0.5em;
+}
+
+/* The YAML-error banner's slot: its banner is one full-width row of the editor, right after the toolbar. */
+.c4-editor__banner-region {
+  display: contents;
+}
+
+.c4-editor__banner-region > .c4-editor__banner {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+/* Scaffolds shown with the drawing (the empty-state guide, the carry-down tray), above it in the canvas. */
+.c4-editor__canvas-guides {
+  padding: 0.75em 0.75em 0;
+}
+
+.c4-editor__canvas-guides:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+/* The outline is never taller than the canvas beside it: its tree scrolls inside the region, so a long model does
+   not push the drawing, the inspector, or the panels down the page. Focus scrolls the tree to the focused item. */
+.c4-editor__region--outline:not(.c4-editor__region--collapsed) {
+  display: flex;
+  flex-direction: column;
+  max-block-size: var(--c4-canvas-height);
+}
+
+.c4-editor__region--outline > .c4-editor__region-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow: auto;
+}
+
+/* Below 60em the inspector and the panels stack under the drawing, each as wide as the editor (spec §9.1, Review
+   Focus 5). Down to 45em the outline keeps its column beside the canvas, so the drawing is in view without
+   scrolling past the outline; collapsed, it keeps only its button's width, and the drawing takes the rest of the
+   row. DOM order is unchanged. */
+@container c4-editor (max-width: 60em) {
+  .c4-editor__toolbar,
+  .c4-editor__region,
+  .c4-editor__canvas,
+  .c4-editor__canvas-column {
+    flex: 1 1 100%;
+  }
+
+  .c4-editor__region--outline {
+    flex: 0 0 13em;
+  }
+
+  .c4-editor__region--outline.c4-editor__region--collapsed {
+    flex: 0 0 auto;
+  }
+
+  .c4-editor__canvas,
+  .c4-editor__canvas-column {
+    flex: 1 1 16em;
+  }
+}
+
+/* Below 45em (a tutorial's workspace column on a laptop) a 13em outline column would leave the drawing narrower
+   than one element box, so everything stacks: the outline is a short scroll box (or, collapsed, one row) above
+   the canvas, which takes the editor's whole width. */
+@container c4-editor (max-width: 45em) {
+  .c4-editor__region--outline,
+  .c4-editor__region--outline.c4-editor__region--collapsed,
+  .c4-editor__canvas,
+  .c4-editor__canvas-column {
+    flex: 1 1 100%;
+  }
+
+  .c4-editor__region--outline:not(.c4-editor__region--collapsed) {
+    max-block-size: 16em;
+  }
+}
+
+/* Full screen: the Fullscreen API's element, or the overlay class where the API is unavailable. */
+.c4-editor:fullscreen {
+  --c4-canvas-height: calc(100vh - 12em);
+  align-content: flex-start;
+  padding: 0.5em;
+  overflow: auto;
+}
+
+.c4-editor--full-screen {
+  --c4-canvas-height: calc(100vh - 12em);
+  position: fixed;
+  inset: 0;
+  /* Above the site's fixed chrome (tutorial.css reaches 1100, the UML editor's popouts 10000). */
+  z-index: 10050;
+  align-content: flex-start;
+  padding: 0.5em;
+  overflow: auto;
+}
+
+/* ---- Toolbar ------------------------------------------------------------------------------------ */
+
+.c4-editor__group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25em 0.4em;
+  min-inline-size: 0;
+}
+
+.c4-editor__levels,
+.c4-editor__palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25em;
+}
+
+.c4-editor__group-label {
+  font-weight: bold;
+}
+
+.c4-editor__button,
+.c4-editor__select {
+  min-block-size: 24px;
+  min-inline-size: 24px;
+  max-inline-size: 100%;
+  padding: 0.15em 0.6em;
+  line-height: 1.4;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-control-bg);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.c4-editor__button:hover {
+  background: var(--c4-ui-control-hover-bg);
+}
+
+/* Pressed toggles: a fill, bold text, and an inner bar, so the state never rests on colour alone (WCAG 1.4.1). */
+.c4-editor__button[aria-pressed="true"] {
+  font-weight: bold;
+  color: var(--c4-ui-on-accent);
+  background: var(--c4-ui-accent);
+  border-color: var(--c4-ui-accent);
+  box-shadow: inset 0 -3px 0 var(--c4-ui-on-accent);
+}
+
+/* Unavailable controls stay focusable (aria-disabled); a dashed border marks them besides the muted text. */
+.c4-editor__button[aria-disabled="true"],
+.c4-editor__menu-item[aria-disabled="true"] {
+  color: var(--c4-ui-text-muted);
+  background: var(--c4-ui-surface);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.c4-editor__button--primary {
+  font-weight: bold;
+  color: var(--c4-ui-on-accent);
+  background: var(--c4-ui-accent);
+  border-color: var(--c4-ui-accent);
+}
+
+.c4-editor__button--primary:hover {
+  color: var(--c4-ui-on-accent);
+  background: var(--c4-ui-accent);
+  text-decoration: underline;
+}
+
+.c4-editor__zoom-button {
+  min-inline-size: 2em;
+  font-weight: bold;
+}
+
+.c4-editor__zoom-readout {
+  display: inline-block;
+  min-inline-size: 3.5em;
+  min-block-size: 24px;
+  text-align: center;
+}
+
+.c4-editor__toolbar-note {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.c4-editor__crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__crumbs > li + li::before {
+  content: "›";
+  content: "›" / "";
+  margin-inline-end: 0.25em;
+  color: var(--c4-ui-text-muted);
+}
+
+/* Breadcrumb links are underlined (a non-colour cue); the current view's crumb is bold instead. */
+.c4-editor__crumb,
+.c4-editor__crumb:visited {
+  display: inline-block;
+  min-block-size: 24px;
+  color: var(--c4-ui-link);
+  text-decoration: underline;
+}
+
+.c4-editor__crumb[aria-current="page"],
+.c4-editor__crumb[aria-current="page"]:visited {
+  font-weight: bold;
+  color: var(--c4-ui-text);
+  text-decoration: none;
+}
+
+/* ---- Menu buttons (Add and More). Their menus are the shared popover menus (c4-editor-dom.js createMenus), styled
+ * with the context menus in the actions section, and placed under the button. ---- */
+
+.c4-editor__menu-wrap {
+  display: inline-flex;
+}
+
+/* "More UML tools (not available here)" after a UML view's palette (UML-view editing spec §5.6): a disclosure button
+   and its list, which takes a row of its own in the toolbar group when open. Each tool is an aria-disabled button with
+   its short reason, marked by the disabled-button rule above (muted text, dashed border). The wrapper lends its two
+   children to the group's flex row. */
+.c4-editor__more-tools {
+  display: contents;
+}
+
+.c4-editor__more-tools-list {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 0.25em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__more-tools[hidden],
+.c4-editor__more-tools-list[hidden] {
+  display: none;
+}
+
+/* The menus stand in for the palette and the layout and file buttons at narrow widths (spec §9.1); the Add menu then
+   lists the unavailable UML tools too. */
+.c4-editor__add-menu,
+.c4-editor__more {
+  display: none;
+}
+
+@container c4-editor (max-width: 48em) {
+  .c4-editor__palette,
+  .c4-editor__more-tools,
+  .c4-editor__overflow {
+    display: none;
+  }
+
+  .c4-editor__add-menu,
+  .c4-editor__more {
+    display: inline-flex;
+  }
+}
+
+/* ---- Shared classes of c4-editor-dom.js: dialogs, popovers ---------------------------------------- */
+
+.c4-editor__dialog {
+  max-inline-size: min(40em, calc(100vw - 2em));
+  max-block-size: calc(100vh - 2em);
+  padding: 1em 1.25em;
+  overflow: auto;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-bg);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 8px;
+  box-shadow: var(--c4-ui-shadow);
+}
+
+.c4-editor__dialog::backdrop {
+  background: var(--c4-ui-backdrop, rgba(0, 0, 0, 0.45));
+}
+
+.c4-editor__dialog-title {
+  margin: 0 0 0.5em;
+  font-size: 1.4em;
+  line-height: 1.25;
+}
+
+.c4-editor__dialog-body > :first-child { margin-block-start: 0; }
+
+.c4-editor__dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5em;
+  margin-block-start: 1em;
+}
+
+.c4-editor__help-keys {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  gap: 0.35em 1em;
+  margin: 0;
+}
+
+.c4-editor__help-keys dt {
+  font-weight: bold;
+}
+
+.c4-editor__help-keys dd {
+  margin: 0;
+}
+
+/* Help's list of refusals (UML-view editing spec §5.6): a sub-heading, then one reason per item. Colours are the
+   dialog's, so light mode, dark mode, and print need no rule of their own. */
+.c4-editor__help-heading {
+  margin: 1.25em 0 0.5em;
+  font-size: 1.2em;
+  line-height: 1.3;
+}
+
+.c4-editor__help-refusals {
+  margin: 0;
+  padding-inline-start: 1.25em;
+}
+
+.c4-editor__help-refusals li {
+  margin-block: 0.4em;
+}
+
+.c4-editor__help-reason {
+  font-weight: bold;
+}
+
+/* Popovers sit where they are inserted, right after their anchor, above the content that follows. */
+.c4-editor__popover {
+  position: absolute;
+  z-index: 20;
+  max-inline-size: min(22em, calc(100vw - 2em));
+  padding: 0.5em 0.75em;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-bg);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 6px;
+  box-shadow: var(--c4-ui-shadow);
+}
+
+.c4-editor__popover > :first-child { margin-block-start: 0; }
+.c4-editor__popover > :last-child { margin-block-end: 0; }
+
+/* ---- Print (spec §9.4): the drawing at its natural size within the page; no editing controls ---------- */
+
+@media print {
+  .c4-editor {
+    display: block;
+  }
+
+  .c4-editor__toolbar,
+  .c4-editor__region-toggle,
+  .c4-editor__region--outline,
+  .c4-editor__region--inspector {
+    display: none !important;
+  }
+
+  /* The panels print what their part marks for print (the Explain text), even when the region is collapsed. */
+  .c4-editor__region--panels > .c4-editor__region-body[hidden] {
+    display: block !important;
+  }
+
+  .c4-editor__region {
+    border: 0;
+    background: transparent;
+  }
+
+  /* Print ignores the screen magnification (an inline custom property, so it needs !important). */
+  .c4-editor__canvas {
+    --c4-zoom: 1 !important;
+    block-size: auto;
+    overflow: visible;
+    border: 0;
+  }
+
+  /* Print has no message region, so no strip is kept for it. */
+  .c4-editor__canvas-column > .c4-editor__canvas {
+    padding-block-start: 0;
+  }
+
+  .c4-editor__stage,
+  .c4-editor .c4-editor__diagram {
+    inline-size: auto;
+    padding: 0;
+  }
+
+  .c4-editor .c4-editor__diagram svg {
+    max-inline-size: 100% !important;
+    break-inside: avoid;
+  }
+}
+
+/* ============================================================================================================
+ * Actions: context menus (popovers), the anchored relationship form, and form fields (c4-editor-actions.js)
+ * JavaScript writes only the measured position of menus and anchored dialogs, --c4-popup-x and --c4-popup-y.
+ * ============================================================================================================ */
+
+/* ---- Menus ---------------------------------------------------------------------------------- */
+
+.c4-editor__menu[popover] {
+  position: fixed;
+  inset: auto;
+  left: var(--c4-popup-x, 0.5em);
+  top: var(--c4-popup-y, 0.5em);
+  box-sizing: border-box;
+  margin: 0;
+  min-width: 12em;
+  max-width: min(26em, calc(100vw - 1em));
+  overflow: visible;
+  padding: 0;
+  border: 1px solid var(--c4-ui-border, #78869a);
+  border-radius: 6px;
+  background: var(--c4-ui-surface, #ffffff);
+  color: var(--c4-ui-text, #172033);
+  box-shadow: 0 8px 24px rgba(10, 20, 35, 0.24);
+  font: inherit;
+  line-height: 1.4;
+}
+
+/* Only the list scrolls; the message below it stays in view. */
+.c4-editor__menu-frame {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 1em);
+}
+
+.c4-editor__menu-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.25em;
+}
+
+.c4-editor__menu-group + .c4-editor__menu-group {
+  margin-top: 0.25em;
+  padding-top: 0.25em;
+  border-top: 1px solid var(--c4-ui-border, #78869a);
+}
+
+.c4-editor__menu-group-label {
+  padding: 0.25em 0.75em;
+  font-size: 0.9em;
+  font-weight: 700;
+}
+
+.c4-editor__menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 1em;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2.4em;
+  padding: 0.35em 0.75em;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__menu-item:hover,
+.c4-editor__menu-item:focus-visible {
+  background: var(--c4-ui-hover, #e6edf5);
+}
+
+.c4-editor__menu-item:focus-visible {
+  outline: 3px solid var(--c4-ui-focus, #005a9c);
+  outline-offset: -3px;
+}
+
+/* An unavailable command stays focusable (it explains itself when chosen); italics are its non-colour cue. */
+.c4-editor__menu-item[aria-disabled="true"] {
+  font-style: italic;
+  cursor: not-allowed;
+}
+
+.c4-editor__menu-item-note {
+  margin-inline-start: auto;
+  font-size: 0.9em;
+}
+
+.c4-editor__menu-message {
+  flex: none;
+  max-width: 24em;
+  margin: 0.25em 0.5em 0.5em;
+  padding: 0.25em 0 0.25em 0.75em;
+  border-inline-start: 0.25em solid var(--c4-ui-error, #a13a2e);
+  font-weight: 600;
+}
+
+/* ---- Dialogs placed beside their anchor -------------------------------------------------------- */
+
+dialog.c4-editor__dialog.c4-editor__dialog--anchored {
+  position: fixed;
+  inset: auto;
+  left: var(--c4-popup-x, 1em);
+  top: var(--c4-popup-y, 1em);
+  box-sizing: border-box;
+  margin: 0;
+  width: min(32em, calc(100vw - 1em));
+  max-height: calc(100vh - 1em);
+  overflow: auto;
+}
+
+/* ---- Form fields --------------------------------------------------------------------------- */
+
+.c4-editor__fields {
+  display: grid;
+  gap: 0.9em;
+}
+
+.c4-editor__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  min-width: 0;
+}
+
+.c4-editor__field-label {
+  font-weight: 700;
+}
+
+.c4-editor__field-hint {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.c4-editor__input,
+.c4-editor__select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2.4em;
+  padding: 0.3em 0.5em;
+  border: 1px solid var(--c4-ui-field-border, #5f6b7c);
+  border-radius: 4px;
+  background: var(--c4-ui-field, #ffffff);
+  color: var(--c4-ui-field-text, #172033);
+  font: inherit;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+/* The toolbar's Scope list keeps its own width; full width is for selects in forms. */
+.c4-editor__toolbar .c4-editor__select {
+  width: auto;
+}
+
+.c4-editor__input:focus-visible,
+.c4-editor__select:focus-visible {
+  outline: 3px solid var(--c4-ui-focus, #005a9c);
+  outline-offset: 2px;
+}
+
+.c4-editor__input[aria-invalid="true"],
+.c4-editor__select[aria-invalid="true"] {
+  border-width: 2px;
+  border-color: var(--c4-ui-error, #a13a2e);
+}
+
+/* Problem text begins with its severity word; the bar beside it repeats the severity without relying on colour. */
+.c4-editor__field-problem {
+  margin: 0;
+  padding-inline-start: 0.6em;
+  border-inline-start: 0.25em solid var(--c4-ui-border, #78869a);
+  font-weight: 600;
+}
+
+.c4-editor__field-problem--error {
+  border-inline-start-color: var(--c4-ui-error, #a13a2e);
+}
+
+.c4-editor__field-problem--warning {
+  border-inline-start-style: double;
+  border-inline-start-color: var(--c4-ui-warning, #8a5a00);
+}
+
+.c4-editor__field-problem--info {
+  border-inline-start-style: dashed;
+}
+
+.c4-editor__relationship-preview {
+  margin: 0.2em 0 0;
+  padding: 0.4em 0.6em;
+  border: 1px dashed var(--c4-ui-border, #78869a);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__relationship-preview-label {
+  font-weight: 700;
+}
+
+.c4-editor__confirm-list {
+  margin: 0.5em 0;
+  padding-inline-start: 1.25em;
+}
+
+/* ---- Dark mode ------------------------------------------------------------------------------ */
+
+html.dark-mode .c4-editor__menu[popover] {
+  border-color: var(--c4-ui-border, #7f91aa);
+  background: var(--c4-ui-surface, #161e2c);
+  color: var(--c4-ui-text, #f2f5fb);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.62);
+}
+
+html.dark-mode .c4-editor__menu-group + .c4-editor__menu-group {
+  border-top-color: var(--c4-ui-border, #7f91aa);
+}
+
+html.dark-mode .c4-editor__menu-item:hover,
+html.dark-mode .c4-editor__menu-item:focus-visible {
+  background: var(--c4-ui-hover, #32435d);
+}
+
+html.dark-mode .c4-editor__menu-item:focus-visible,
+html.dark-mode .c4-editor__input:focus-visible,
+html.dark-mode .c4-editor__select:focus-visible {
+  outline-color: var(--c4-ui-focus, #ffd100);
+}
+
+html.dark-mode .c4-editor__field-problem,
+html.dark-mode .c4-editor__relationship-preview {
+  border-color: var(--c4-ui-border, #7f91aa);
+}
+
+html.dark-mode .c4-editor__input,
+html.dark-mode .c4-editor__select {
+  border-color: var(--c4-ui-field-border, #8b9bb0);
+  background: var(--c4-ui-field, #0f1622);
+  color: var(--c4-ui-field-text, #f2f5fb);
+}
+
+/* After the generic borders above, so the severity colours win. */
+html.dark-mode .c4-editor__menu-message,
+html.dark-mode .c4-editor__field-problem--error,
+html.dark-mode .c4-editor__input[aria-invalid="true"],
+html.dark-mode .c4-editor__select[aria-invalid="true"] {
+  border-color: var(--c4-ui-error, #f08a7e);
+}
+
+html.dark-mode .c4-editor__field-problem--warning {
+  border-inline-start-color: var(--c4-ui-warning, #f0c060);
+}
+
+/* ---- Print: menus and the relationship form are interaction only --------------------------------- */
+
+@media print {
+  .c4-editor__menu[popover],
+  dialog.c4-editor__dialog.c4-editor__dialog--anchored {
+    display: none !important;
+  }
+}
+
+/* ============================================================================================================
+ * Outline: the model tree, its filter, rename in place, and re-parenting by drag (c4-editor-outline.js)
+ * JavaScript writes only the drag ghost's measured position, --c4-outline-ghost-x and -y.
+ * ============================================================================================================ */
+
+.c4-editor__outline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  min-inline-size: 0;
+}
+
+/* ---- Filter ------------------------------------------------------------------------------------ */
+
+.c4-editor__outline-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+
+.c4-editor__outline-filter-label {
+  font-weight: 700;
+}
+
+.c4-editor__outline-filter-input {
+  inline-size: 100%;
+  min-block-size: 24px;
+  padding: 0.25em 0.5em;
+  border: 1px solid var(--c4-ui-border, #6b7280);
+  border-radius: 4px;
+  background: var(--c4-ui-control-bg, #ffffff);
+  color: var(--c4-ui-text, #1f2328);
+  font: inherit;
+}
+
+.c4-editor__outline-empty {
+  margin: 0;
+  color: var(--c4-ui-text-muted, #4b5563);
+}
+
+/* ---- Tree ---------------------------------------------------------------------------------------- */
+
+.c4-editor__outline-tree,
+.c4-editor__outline-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__outline-group {
+  padding-inline-start: 1em;
+}
+
+.c4-editor__outline-item {
+  margin: 0;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 5em);
+}
+
+/* A treeitem holds its whole branch, so the focus ring goes on its own row, not around the branch. */
+.c4-editor .c4-editor__outline-item[role="treeitem"]:focus-visible {
+  outline: none;
+}
+
+.c4-editor .c4-editor__outline-item[role="treeitem"]:focus-visible > .c4-editor__outline-row {
+  outline: var(--c4-ui-focus-width, 3px) solid var(--c4-ui-focus, #2774ae);
+  outline-offset: calc(-1 * var(--c4-ui-focus-width, 3px));
+}
+
+.c4-editor__outline-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25em;
+  min-block-size: 24px;
+  padding: 0.125em 0.25em;
+  border-inline-start: 4px solid transparent;
+  border-radius: 4px;
+  cursor: default;
+  user-select: none;
+  /* A long press starts a drag (or opens the item menu), so iOS must not show its link/copy callout. */
+  -webkit-touch-callout: none;
+}
+
+.c4-editor__outline-row:hover {
+  background: var(--c4-ui-control-hover-bg, #e4eef8);
+}
+
+/* Selection is shown by a bar and bold text, not by colour alone (WCAG 1.4.1). */
+.c4-editor__outline-item[aria-selected="true"] > .c4-editor__outline-row {
+  border-inline-start-color: var(--c4-ui-accent, #1d4f91);
+  font-weight: 700;
+}
+
+.c4-editor__outline-twisty,
+.c4-editor__outline-spacer {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 24px;
+  block-size: 24px;
+}
+
+.c4-editor__outline-twisty {
+  cursor: pointer;
+}
+
+.c4-editor__outline-twisty::before {
+  content: "▸";
+}
+
+.c4-editor__outline-item[aria-expanded="true"] > .c4-editor__outline-row > .c4-editor__outline-twisty::before {
+  content: "▾";
+}
+
+/* A name breaks between words; a word wider than the column breaks with a hyphen where the language allows. */
+.c4-editor__outline-text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+.c4-editor__outline-detail {
+  color: var(--c4-ui-text-muted, #4b5563);
+  font-size: 0.9em;
+  font-weight: 400;
+}
+
+/* The item menu button appears on the hovered, focused, or selected row only, so it adds no permanent clutter. */
+.c4-editor__outline-more {
+  flex: 0 0 auto;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding: 0 0.25em;
+  border: 1px solid var(--c4-ui-border, #6b7280);
+  border-radius: 4px;
+  background: var(--c4-ui-control-bg, #ffffff);
+  color: var(--c4-ui-text, #1f2328);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.c4-editor__outline-row:hover > .c4-editor__outline-more,
+.c4-editor__outline-item:focus > .c4-editor__outline-row > .c4-editor__outline-more,
+.c4-editor__outline-item[aria-selected="true"] > .c4-editor__outline-row > .c4-editor__outline-more,
+.c4-editor__outline-more:focus {
+  visibility: visible;
+}
+
+.c4-editor__outline-more:hover {
+  background: var(--c4-ui-control-hover-bg, #e4eef8);
+}
+
+/* ---- Rename in place --------------------------------------------------------------------------- */
+
+.c4-editor__outline-rename {
+  inline-size: 100%;
+  min-block-size: 24px;
+  padding: 0.125em 0.25em;
+  border: 1px solid var(--c4-ui-border, #6b7280);
+  border-radius: 4px;
+  background: var(--c4-ui-control-bg, #ffffff);
+  color: var(--c4-ui-text, #1f2328);
+  font: inherit;
+  font-weight: 400;
+  user-select: text;
+}
+
+.c4-editor__outline-rename[aria-invalid="true"] {
+  border-width: 2px;
+}
+
+.c4-editor__outline-rename-problem {
+  font-size: 0.9em;
+  font-weight: 400;
+}
+
+/* ---- Drag (spec §9.2: highlighted valid drop targets with a non-colour cue) ----------------------- */
+
+/* The dragged row keeps full-strength text (no opacity: fading the muted detail line drops it below
+ * 4.5:1, WCAG 1.4.3). It is marked by a dotted outline in the muted text colour (non-text 3:1, WCAG 1.4.11),
+ * distinct from the dashed accent outline on drop targets, plus an italic label. */
+.c4-editor__outline-item--dragging > .c4-editor__outline-row {
+  outline: 2px dotted var(--c4-ui-text-muted, #4b5563);
+  outline-offset: -2px;
+  font-style: italic;
+}
+
+.c4-editor__outline-item--drop-target > .c4-editor__outline-row {
+  outline: 2px dashed var(--c4-ui-accent, #1d4f91);
+  outline-offset: -2px;
+}
+
+.c4-editor__outline-item--drop-hover > .c4-editor__outline-row {
+  outline-width: 4px;
+  background: var(--c4-ui-control-hover-bg, #e4eef8);
+}
+
+.c4-editor__outline-ghost {
+  position: fixed;
+  left: var(--c4-outline-ghost-x, 0px);
+  top: var(--c4-outline-ghost-y, 0px);
+  z-index: 10;
+  max-inline-size: 16em;
+  padding: 0.25em 0.5em;
+  border: 1px solid var(--c4-ui-border, #6b7280);
+  border-radius: 4px;
+  background: var(--c4-ui-surface, #f6f8fa);
+  color: var(--c4-ui-text, #1f2328);
+  box-shadow: var(--c4-ui-shadow, 0 4px 12px rgba(0, 0, 0, 0.18));
+  opacity: 0.9;
+  pointer-events: none;
+  /* Beside the pointer, so the name of the row under it stays readable. */
+  translate: 1em 0.75em;
+}
+
+.c4-editor__outline-ghost--measuring {
+  translate: none;
+}
+
+/* ---- Dark mode ------------------------------------------------------------------------------------ */
+
+/* Every colour above is a --c4-ui-* token that c4-editor.css redefines under html.dark-mode; the ghost is only
+   made a little more opaque so it stands out against the dark surface. */
+html.dark-mode .c4-editor__outline-ghost {
+  opacity: 0.95;
+}
+
+/* ---- Print: the outline region is hidden (c4-editor.css); nothing interactive of the part prints ---- */
+
+@media print {
+  .c4-editor__outline-filter,
+  .c4-editor__outline-more,
+  .c4-editor__outline-ghost {
+    display: none !important;
+  }
+}
+
+/* ============================================================================================================
+ * Inspector: element, relationship, and record forms, the list editor, interface forms, and the Uses picker
+ * (c4-editor-inspector.js, c4-editor-lists.js, c4-editor-interfaces.js). JavaScript writes only the dragged
+ * row's measured offset, --c4-drag-offset.
+ * ============================================================================================================ */
+
+/* ---- Inspector -------------------------------------------------------------------------------- */
+
+.c4-editor__inspector {
+  display: grid;
+  gap: 1em;
+  min-inline-size: 0;
+  color: var(--c4-ui-text, #1f2328);
+}
+
+.c4-editor__inspector-form {
+  display: grid;
+  gap: 1em;
+  min-inline-size: 0;
+}
+
+.c4-editor__inspector-title {
+  margin: 0;
+  font-size: 1.3em;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__inspector-subtitle,
+.c4-editor__inspector-empty,
+.c4-editor__inspector-notice {
+  margin: 0;
+}
+
+.c4-editor__inspector-notice {
+  padding: 0.4em 0.6em;
+  border-inline-start: 0.25em solid var(--c4-ui-error, #a13a2e);
+  font-weight: 600;
+}
+
+.c4-editor__inspector-section {
+  display: grid;
+  gap: 0.6em;
+  min-inline-size: 0;
+  padding-block-start: 0.6em;
+  border-block-start: 1px solid var(--c4-ui-divider, #d0d7de);
+}
+
+.c4-editor__inspector-section-title {
+  margin: 0;
+  font-size: 1.2em;
+  line-height: 1.3;
+}
+
+.c4-editor__inspector-disclosure {
+  min-inline-size: 0;
+  padding-block-start: 0.6em;
+  border-block-start: 1px solid var(--c4-ui-divider, #d0d7de);
+}
+
+.c4-editor__inspector-summary {
+  min-block-size: 24px;
+  font-size: 1.2em;
+  font-weight: 700;
+  line-height: 1.3;
+  cursor: pointer;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__inspector-disclosure-body {
+  display: grid;
+  gap: 0.9em;
+  padding-block-start: 0.6em;
+}
+
+.c4-editor__inspector-actions,
+.c4-editor__position-moves,
+.c4-editor__position-coordinates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  align-items: flex-end;
+}
+
+.c4-editor__position-coordinates > .c4-editor__field {
+  flex: 1 1 6em;
+}
+
+.c4-editor__position-state {
+  margin: 0;
+  font-weight: 600;
+}
+
+.c4-editor__inspector .c4-editor__button {
+  min-block-size: 2.4em;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__inspector textarea.c4-editor__input {
+  resize: vertical;
+}
+
+.c4-editor__inspector .c4-editor__input[readonly] {
+  border-style: dashed;
+  background: var(--c4-ui-surface, #f6f8fa);
+}
+
+.c4-editor__lock-note {
+  margin: 0;
+  padding-inline-start: 0.6em;
+  border-inline-start: 0.25em dotted var(--c4-ui-border, #6b7280);
+  font-size: 0.9em;
+}
+
+.c4-editor__checkbox-row {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+}
+
+.c4-editor__checkbox {
+  font: inherit;
+  inline-size: 1.2em;
+  block-size: 1.2em;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  margin: 0;
+  accent-color: var(--c4-ui-accent, #1d4f91);
+}
+
+.c4-editor__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2em 0.75em;
+  margin: 0;
+}
+
+.c4-editor__facts dt {
+  font-weight: 700;
+}
+
+.c4-editor__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__id {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__plain-list {
+  margin: 0;
+  padding-inline-start: 1.25em;
+}
+
+.c4-editor__responsibility {
+  display: grid;
+  grid-template-columns: minmax(6.5em, auto) 1fr;
+  gap: 0.4em;
+  align-items: start;
+}
+
+.c4-editor__list-add.c4-editor__responsibility {
+  grid-template-columns: minmax(6.5em, auto) 1fr auto;
+  align-items: end;
+}
+
+/* The inspector's own width decides (it is 18em beside the canvas, the editor's width when stacked). */
+@container c4-inspector (max-width: 32em) {
+  .c4-editor__responsibility,
+  .c4-editor__list-add.c4-editor__responsibility {
+    grid-template-columns: 1fr;
+  }
+}
+
+.c4-editor__collaborator {
+  display: grid;
+  gap: 0.6em;
+  min-inline-size: 0;
+}
+
+.c4-editor__list-add {
+  display: grid;
+  gap: 0.5em;
+  justify-items: start;
+}
+
+.c4-editor__list-add > .c4-editor__field {
+  justify-self: stretch;
+}
+
+/* Relationships in this view: one button per edge, its ends first and the derivation below. */
+.c4-editor__edge-group {
+  display: grid;
+  gap: 0.3em;
+}
+
+.c4-editor__edge-list {
+  display: grid;
+  gap: 0.4em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__edge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+  align-items: stretch;
+}
+
+.c4-editor__edge-button {
+  flex: 1 1 14em;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__edge-ends {
+  display: block;
+  font-weight: 700;
+}
+
+.c4-editor__edge-detail {
+  display: block;
+  font-size: 0.9em;
+}
+
+/* ---- Supplementary forms: scenarios, deployment, members, records ---------------------------- */
+
+/* A field the form shows only for some choices (the second guard of alt and par). */
+.c4-editor__field[hidden] {
+  display: none;
+}
+
+.c4-editor__field-group {
+  display: grid;
+  gap: 0.5em;
+  min-inline-size: 0;
+}
+
+.c4-editor__checkbox-group {
+  gap: 0.3em;
+}
+
+.c4-editor__step,
+.c4-editor__fragment {
+  display: grid;
+  gap: 0.5em;
+  min-inline-size: 0;
+}
+
+.c4-editor__step-ends,
+.c4-editor__step-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5em;
+}
+
+@container c4-inspector (max-width: 32em) {
+  .c4-editor__step-ends,
+  .c4-editor__step-details {
+    grid-template-columns: 1fr;
+  }
+}
+
+.c4-editor__fragment-operator {
+  margin: 0;
+  font-weight: 700;
+}
+
+/* A branch is indented under its fragment, with a solid rule beside it, so nesting does not rely on colour. */
+.c4-editor__branch {
+  padding-inline-start: 0.75em;
+  border-inline-start: 0.2em solid var(--c4-ui-border, #6b7280);
+}
+
+.c4-editor__node-link {
+  margin-block-end: 0.6em;
+}
+
+/* ---- List editor ------------------------------------------------------------------------------ */
+
+.c4-editor__list {
+  display: grid;
+  gap: 0.5em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__list-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.4em;
+  align-items: start;
+  padding: 0.3em;
+  border: 1px solid var(--c4-ui-divider, #d0d7de);
+  border-radius: 4px;
+  background: var(--c4-ui-bg, #ffffff);
+}
+
+.c4-editor__list-content {
+  grid-column: 2;
+  min-inline-size: 0;
+}
+
+.c4-editor__list-handle {
+  grid-column: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 24px;
+  min-block-size: 2.4em;
+  color: var(--c4-ui-text-muted, #4b5563);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.c4-editor__list-menu {
+  grid-column: 3;
+  min-inline-size: 2.4em;
+  font-weight: 700;
+}
+
+/* While dragged, the row follows the pointer above the others; its dashed outline is the non-colour cue. */
+.c4-editor__list-row--dragging {
+  position: relative;
+  z-index: 1;
+  transform: translateY(var(--c4-drag-offset, 0));
+  outline: 2px dashed var(--c4-ui-focus, #2774ae);
+  box-shadow: var(--c4-ui-shadow, 0 4px 12px rgba(0, 0, 0, 0.18));
+  cursor: grabbing;
+}
+
+/* The place the row would land: a thick bar on the side it would go to. */
+.c4-editor__list-row--drop-before {
+  box-shadow: inset 0 0.25em 0 var(--c4-ui-focus, #2774ae);
+}
+
+.c4-editor__list-row--drop-after {
+  box-shadow: inset 0 -0.25em 0 var(--c4-ui-focus, #2774ae);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .c4-editor__list-row--drop-before,
+  .c4-editor__list-row--drop-after {
+    transition: box-shadow 0.1s ease-out;
+  }
+}
+
+/* ---- Interfaces section and interface form (c4-editor-interfaces.js, spec §9.5) -------------------- */
+
+.c4-editor__interface-row,
+.c4-editor__interface-field,
+.c4-editor__interface-error,
+.c4-editor__interface-example,
+.c4-editor__payload {
+  display: grid;
+  gap: 0.5em;
+  min-inline-size: 0;
+}
+
+.c4-editor__interface-open {
+  justify-self: start;
+  font-weight: 700;
+}
+
+.c4-editor__interface-summary,
+.c4-editor__breadcrumb,
+.c4-editor__example-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__breadcrumb {
+  font-size: 0.9em;
+}
+
+/* The tablist: the selected tab is bold with a thick underline, so selection does not rely on colour. */
+.c4-editor__interface-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25em;
+  border-block-end: 1px solid var(--c4-ui-divider, #d0d7de);
+}
+
+.c4-editor__interface-tab {
+  min-block-size: 2.4em;
+  min-inline-size: 24px;
+  padding: 0.3em 0.8em;
+  border: 1px solid transparent;
+  border-block-end: 0.25em solid transparent;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__interface-tab[aria-selected="true"] {
+  border-color: var(--c4-ui-divider, #d0d7de);
+  border-block-end-color: var(--c4-ui-accent, #1d4f91);
+  font-weight: 700;
+}
+
+.c4-editor__interface-tab:focus-visible {
+  outline: 3px solid var(--c4-ui-focus, #005a9c);
+  outline-offset: 2px;
+}
+
+.c4-editor__interface-panel {
+  display: grid;
+  gap: 1em;
+  min-inline-size: 0;
+}
+
+.c4-editor__interface-panel[hidden] {
+  display: none;
+}
+
+.c4-editor__meaning-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em 1.5em;
+}
+
+.c4-editor__meaning-owner {
+  margin: 0.4em 0 0;
+  font-size: 1.1em;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__meaning-row {
+  display: grid;
+  gap: 0.5em;
+  min-inline-size: 0;
+  padding: 0.5em 0.6em;
+  border: 1px solid var(--c4-ui-divider, #d0d7de);
+  border-radius: 4px;
+}
+
+.c4-editor__meaning-name {
+  margin: 0;
+  font-family: var(--c4-ui-code-font, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__realizes-owner {
+  display: grid;
+  gap: 0.3em;
+  padding-inline-start: 0.6em;
+  border-inline-start: 0.2em solid var(--c4-ui-divider, #d0d7de);
+}
+
+.c4-editor__realizes-owner-name {
+  margin: 0;
+  font-weight: 700;
+}
+
+/* ---- Definition terms (c4-editor-scaffolds.js createDefinitionTerm, spec §9.3): a term whose definition opens as
+ * a popover on hover, focus, or click. It reads as a defined word (a dotted underline), not as a command. ---- */
+
+.c4-editor__terms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25em 0.75em;
+  margin: 0;
+}
+
+.c4-editor__term {
+  min-block-size: 24px;
+  min-inline-size: 24px;
+  padding: 0.1em 0.2em;
+  border: 0;
+  background: transparent;
+  color: var(--c4-ui-text, #1f2328);
+  font: inherit;
+  text-decoration: underline dotted;
+  text-decoration-thickness: 0.1em;
+  text-underline-offset: 0.2em;
+  cursor: help;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__term:hover {
+  background: var(--c4-ui-hover, #e4eef8);
+}
+
+html.dark-mode .c4-editor__term {
+  color: var(--c4-ui-text, #e6edf3);
+}
+
+html.dark-mode .c4-editor__term:hover {
+  background: var(--c4-ui-hover, #2d3a4a);
+}
+
+/* Print: the inspector, and with it every term, does not print (see the inspector's print rule below). */
+
+/* ---- Uses picker (c4-editor-interfaces.js createUsesPicker; also placed in the anchored relationship form) ---- */
+
+.c4-editor__uses {
+  display: grid;
+  gap: 0.6em;
+  min-inline-size: 0;
+}
+
+.c4-editor__uses-group,
+.c4-editor__uses-interface {
+  display: grid;
+  gap: 0.4em;
+  min-inline-size: 0;
+  margin: 0;
+}
+
+.c4-editor__uses-group {
+  padding: 0.5em 0.6em;
+  border: 1px solid var(--c4-ui-divider, #d0d7de);
+  border-radius: 4px;
+}
+
+.c4-editor__uses-interface {
+  padding: 0 0 0 0.6em;
+  border: 0;
+  border-inline-start: 0.2em solid var(--c4-ui-divider, #d0d7de);
+}
+
+.c4-editor__uses-legend,
+.c4-editor__uses-interface-name {
+  padding: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__uses-entries,
+.c4-editor__uses-derived {
+  display: grid;
+  gap: 0.3em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__uses-entries .c4-editor__field-label {
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__uses-derived li {
+  overflow-wrap: anywhere;
+}
+
+/* ---- Dark mode -------------------------------------------------------------------------------- */
+
+html.dark-mode .c4-editor__inspector {
+  color: var(--c4-ui-text, #e6edf3);
+}
+
+html.dark-mode .c4-editor__inspector-section,
+html.dark-mode .c4-editor__inspector-disclosure {
+  border-block-start-color: var(--c4-ui-divider, #3a4048);
+}
+
+html.dark-mode .c4-editor__inspector .c4-editor__input[readonly] {
+  background: var(--c4-ui-surface, #1e1e1e);
+}
+
+html.dark-mode .c4-editor__list-row {
+  border-color: var(--c4-ui-divider, #3a4048);
+  background: var(--c4-ui-bg, #121212);
+}
+
+html.dark-mode .c4-editor__list-handle {
+  color: var(--c4-ui-text-muted, #b0b8c4);
+}
+
+html.dark-mode .c4-editor__lock-note,
+html.dark-mode .c4-editor__branch {
+  border-inline-start-color: var(--c4-ui-border, #8b949e);
+}
+
+html.dark-mode .c4-editor__list-row--dragging {
+  outline-color: var(--c4-ui-focus, #ffd100);
+  box-shadow: var(--c4-ui-shadow, 0 4px 12px rgba(0, 0, 0, 0.6));
+}
+
+html.dark-mode .c4-editor__list-row--drop-before {
+  box-shadow: inset 0 0.25em 0 var(--c4-ui-focus, #ffd100);
+}
+
+html.dark-mode .c4-editor__list-row--drop-after {
+  box-shadow: inset 0 -0.25em 0 var(--c4-ui-focus, #ffd100);
+}
+
+html.dark-mode .c4-editor__inspector-notice {
+  border-inline-start-color: var(--c4-ui-error, #ff9b8f);
+}
+
+html.dark-mode .c4-editor__interface-tabs,
+html.dark-mode .c4-editor__meaning-row,
+html.dark-mode .c4-editor__realizes-owner,
+html.dark-mode .c4-editor__uses-group,
+html.dark-mode .c4-editor__uses-interface {
+  border-color: var(--c4-ui-divider, #3a4048);
+}
+
+html.dark-mode .c4-editor__interface-tab[aria-selected="true"] {
+  border-color: var(--c4-ui-divider, #3a4048);
+  border-block-end-color: var(--c4-ui-accent, #8cc8ff);
+}
+
+html.dark-mode .c4-editor__interface-tab:focus-visible {
+  outline-color: var(--c4-ui-focus, #ffd100);
+}
+
+/* ---- Print: the inspector is an editing control, so it does not print (spec §9.4) ---------------- */
+
+@media print {
+  .c4-editor__inspector {
+    display: none !important;
+  }
+}
+
+/* ============================================================================================================
+ * Panels and scaffolds: Problems, Review, Explain, YAML, the YAML-error banner, the empty-state guide, the
+ * carry-down tray, and the trace badge (c4-editor-panels.js, c4-editor-scaffolds.js). Print shows the Explain
+ * panel whatever tab is active.
+ * ============================================================================================================ */
+
+/* ---- Focus and scrolling (every focusable of these parts) ----------------------------------- */
+
+.c4-editor__panels :is(button, textarea, [tabindex]),
+.c4-editor__banner button,
+.c4-editor__tray :is(button, [tabindex]) {
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 80px);
+}
+
+.c4-editor__tab:focus-visible,
+.c4-editor__panel:focus-visible,
+.c4-editor__source-text:focus-visible,
+.c4-editor__banner button:focus-visible,
+.c4-editor__tray button:focus-visible {
+  outline: 3px solid var(--c4-ui-focus, #005a9c);
+  outline-offset: 2px;
+}
+
+/* ---- Tabs (the selected tab is bold with a thick underline, not only a colour) -------------- */
+
+.c4-editor__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25em;
+  border-bottom: 1px solid var(--c4-ui-border, #78869a);
+}
+
+.c4-editor__tab {
+  min-height: 2.4em;
+  padding: 0.35em 0.9em;
+  border: 1px solid transparent;
+  border-bottom: 0.2em solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--c4-ui-text, #172033);
+  font: inherit;
+  cursor: pointer;
+}
+
+.c4-editor__tab:hover {
+  background: var(--c4-ui-hover, #e6edf5);
+}
+
+.c4-editor__tab[aria-selected="true"] {
+  border-color: var(--c4-ui-border, #78869a);
+  border-bottom-color: var(--c4-ui-accent, #005a9c);
+  background: var(--c4-ui-surface, #ffffff);
+  font-weight: 700;
+}
+
+.c4-editor__tab-count {
+  font-weight: 700;
+}
+
+.c4-editor__panel {
+  padding: 0.75em 0.25em;
+  color: var(--c4-ui-text, #172033);
+}
+
+.c4-editor__panel p {
+  margin: 0 0 0.5em;
+}
+
+.c4-editor__panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.c4-editor__panels .c4-editor__group-label {
+  margin: 0.75em 0 0.25em;
+  font-weight: 700;
+}
+
+.c4-editor__panel .c4-editor__group-label:first-child {
+  margin-top: 0;
+}
+
+/* ---- Problems (the severity word starts every row; the stripe only repeats it) -------------- */
+
+.c4-editor__problem-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__problem {
+  margin: 0 0 0.5em;
+  padding: 0.4em 0.6em;
+  border-inline-start: 0.25em solid var(--c4-ui-border, #78869a);
+}
+
+.c4-editor__problem--error {
+  border-inline-start-color: var(--c4-ui-error, #a13a2e);
+}
+
+.c4-editor__problem--warning {
+  border-inline-start-color: var(--c4-ui-warning, #8a5a00);
+}
+
+.c4-editor__panel .c4-editor__problem p {
+  margin: 0;
+}
+
+.c4-editor__problem-message {
+  font-weight: 600;
+}
+
+.c4-editor__problem-hint,
+.c4-editor__problem-place {
+  font-size: 0.9em;
+}
+
+.c4-editor__problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin-top: 0.35em;
+}
+
+/* ---- Review and Explain --------------------------------------------------------------------- */
+
+.c4-editor__prompt-list,
+.c4-editor__explain-list,
+.c4-editor__marker-list {
+  margin: 0;
+  padding-inline-start: 1.25em;
+}
+
+.c4-editor__prompt-list li + li,
+.c4-editor__explain-list li + li {
+  margin-top: 0.25em;
+}
+
+/* ---- YAML source (the textarea fallback; a host editor fills .c4-editor__source itself) ------ */
+
+.c4-editor__source {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+}
+
+.c4-editor__source-label {
+  font-weight: 700;
+}
+
+.c4-editor__source-text {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 20em;
+  padding: 0.5em;
+  border: 1px solid var(--c4-ui-field-border, #5f6b7c);
+  border-radius: 4px;
+  background: var(--c4-ui-field, #ffffff);
+  color: var(--c4-ui-field-text, #172033);
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+/* An unreadable YAML text: a thicker border repeats what the error marker below the field says. */
+.c4-editor__source-text[aria-invalid="true"] {
+  border: 2px solid var(--c4-ui-error, #a13a2e);
+}
+
+/* ---- YAML-error banner ---------------------------------------------------------------------- */
+
+.c4-editor__banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em 1em;
+  margin: 0 0 0.5em;
+  padding: 0.6em 0.8em;
+  border: 2px solid var(--c4-ui-error, #a13a2e);
+  border-inline-start-width: 0.4em;
+  border-radius: 6px;
+  background: var(--c4-ui-error-surface, #fdf0ee);
+  color: var(--c4-ui-text, #172033);
+}
+
+.c4-editor__banner-text {
+  flex: 1 1 20em;
+  margin: 0;
+}
+
+/* ---- Empty-state guide ---------------------------------------------------------------------- */
+
+.c4-editor__guide {
+  box-sizing: border-box;
+  max-width: 34em;
+  margin: 1em auto;
+  padding: 0.75em 1em;
+  border: 1px dashed var(--c4-ui-border, #78869a);
+  border-radius: 6px;
+  background: var(--c4-ui-surface, #ffffff);
+  color: var(--c4-ui-text, #172033);
+}
+
+.c4-editor__guide-label {
+  margin: 0 0 0.35em;
+  font-size: 1.1em;
+  font-weight: 700;
+}
+
+.c4-editor__guide-steps {
+  margin: 0;
+  padding-inline-start: 1.5em;
+}
+
+.c4-editor__guide-steps li + li {
+  margin-top: 0.25em;
+}
+
+/* ---- Carry-down tray (a linked responsibility: thick dashed outline and a text badge) ------- */
+
+.c4-editor__tray {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5em;
+}
+
+.c4-editor__tray-list {
+  display: grid;
+  gap: 0.5em;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.c4-editor__tray-item {
+  padding: 0.5em 0.75em;
+  border: 1px solid var(--c4-ui-border, #78869a);
+  border-radius: 6px;
+  background: var(--c4-ui-surface, #ffffff);
+  color: var(--c4-ui-text, #172033);
+}
+
+.c4-editor__tray-item p {
+  margin: 0;
+}
+
+.c4-editor__tray-count {
+  font-size: 0.9em;
+}
+
+.c4-editor__tray-item--linked {
+  border: 3px dashed var(--c4-ui-accent, #005a9c);
+}
+
+.c4-editor__badge {
+  display: inline-block;
+  margin: 0.25em 0;
+  padding: 0.1em 0.5em;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.9em;
+  font-weight: 700;
+}
+
+.c4-editor__menu-anchor {
+  position: relative;
+  margin-top: 0.35em;
+}
+
+.c4-editor__tray-menu {
+  position: absolute;
+  z-index: 10;
+  inset-block-start: 100%;
+  inset-inline-start: 0;
+  box-sizing: border-box;
+  min-width: 14em;
+  max-width: min(26em, calc(100vw - 1em));
+  margin: 0.25em 0 0;
+  padding: 0.25em;
+  list-style: none;
+  border: 1px solid var(--c4-ui-border, #78869a);
+  border-radius: 6px;
+  background: var(--c4-ui-surface, #ffffff);
+  color: var(--c4-ui-text, #172033);
+  box-shadow: 0 8px 24px rgba(10, 20, 35, 0.24);
+}
+
+.c4-editor__tray-menu-item {
+  display: flex;
+  align-items: center;
+  min-height: 2.4em;
+  padding: 0.35em 0.75em;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.c4-editor__tray-menu-item:hover,
+.c4-editor__tray-menu-item:focus {
+  background: var(--c4-ui-hover, #e6edf5);
+}
+
+/* Menu items take focus from code, so the ring follows :focus, not only :focus-visible. */
+.c4-editor__tray-menu-item:focus {
+  outline: 3px solid var(--c4-ui-focus, #005a9c);
+  outline-offset: -3px;
+}
+
+/* ---- Dark mode ------------------------------------------------------------------------------ */
+
+html.dark-mode .c4-editor__tab:focus-visible,
+html.dark-mode .c4-editor__panel:focus-visible,
+html.dark-mode .c4-editor__source-text:focus-visible,
+html.dark-mode .c4-editor__banner button:focus-visible,
+html.dark-mode .c4-editor__tray button:focus-visible,
+html.dark-mode .c4-editor__tray-menu-item:focus {
+  outline-color: var(--c4-ui-focus, #ffd100);
+}
+
+html.dark-mode .c4-editor__tabs {
+  border-bottom-color: var(--c4-ui-border, #7f91aa);
+}
+
+html.dark-mode .c4-editor__tab {
+  color: var(--c4-ui-text, #f2f5fb);
+}
+
+html.dark-mode .c4-editor__tab:hover,
+html.dark-mode .c4-editor__tray-menu-item:hover,
+html.dark-mode .c4-editor__tray-menu-item:focus {
+  background: var(--c4-ui-hover, #32435d);
+}
+
+html.dark-mode .c4-editor__tab[aria-selected="true"] {
+  border-color: var(--c4-ui-border, #7f91aa);
+  border-bottom-color: var(--c4-ui-accent, #8cc4ff);
+  background: var(--c4-ui-surface, #161e2c);
+}
+
+html.dark-mode .c4-editor__panel {
+  color: var(--c4-ui-text, #f2f5fb);
+}
+
+html.dark-mode .c4-editor__problem {
+  border-inline-start-color: var(--c4-ui-border, #7f91aa);
+}
+
+html.dark-mode .c4-editor__problem--error {
+  border-inline-start-color: var(--c4-ui-error, #f08a7e);
+}
+
+html.dark-mode .c4-editor__problem--warning {
+  border-inline-start-color: var(--c4-ui-warning, #f0c060);
+}
+
+html.dark-mode .c4-editor__source-text {
+  border-color: var(--c4-ui-field-border, #8b9bb0);
+  background: var(--c4-ui-field, #0f1622);
+  color: var(--c4-ui-field-text, #f2f5fb);
+}
+
+html.dark-mode .c4-editor__source-text[aria-invalid="true"] {
+  border-color: var(--c4-ui-error, #f08a7e);
+}
+
+html.dark-mode .c4-editor__banner {
+  border-color: var(--c4-ui-error, #f08a7e);
+  background: var(--c4-ui-error-surface, #2d1714);
+  color: var(--c4-ui-text, #f2f5fb);
+}
+
+html.dark-mode .c4-editor__guide,
+html.dark-mode .c4-editor__tray-item,
+html.dark-mode .c4-editor__tray-menu {
+  border-color: var(--c4-ui-border, #7f91aa);
+  background: var(--c4-ui-surface, #161e2c);
+  color: var(--c4-ui-text, #f2f5fb);
+}
+
+html.dark-mode .c4-editor__tray-item--linked {
+  border-color: var(--c4-ui-accent, #8cc4ff);
+}
+
+html.dark-mode .c4-editor__tray-menu {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.62);
+}
+
+/* ---- Print: the description once, in the light palette; no tabs, banner, tray, or guide ------ */
+
+@media print {
+  .c4-editor__tabs,
+  .c4-editor__panel:not(.c4-editor__panel--explain),
+  .c4-editor__banner-region,
+  .c4-editor__tray,
+  .c4-editor__guide,
+  .c4-editor__panel--explain button {
+    display: none;
+  }
+
+  .c4-editor__panel--explain,
+  .c4-editor__panel--explain[hidden] {
+    display: block;
+    padding: 0;
+    background: #ffffff;
+    color: #111111;
+  }
+
+  /* The Explain text prints even while another tab hides it: this outranks the base `[hidden]` rule. */
+  .c4-editor .c4-editor__panel--explain[hidden] {
+    display: block !important;
+  }
+}
+
+/* ============================================================================================================
+ * Canvas overlay: the listbox of elements over the drawing, and the connect handles (c4-editor-overlay.js).
+ * The options are transparent hit targets; the canvas marks them with is-focused and is-selected. The dashed stroke
+ * always means focus and the light tint always means selection, so the three states differ without colour: focus
+ * alone is dashed, selection without focus is solid with the tint, and the focused selection is dashed with the
+ * tint. Selection follows focus (spec §9.1), so the dashed ring leaves a selection when focus moves to the
+ * inspector. The strokes stay 2 px at every magnification. The marks are drawn inside the SVG, so the site's dark-mode filter
+ * reaches them too (see --c4-ui-canvas-mark).
+ * ============================================================================================================ */
+
+.c4-editor__option {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Over a UML drawing that an editing session works on, the options are the listbox of the keyboard and of assistive
+   technology only: every press goes through them to the session's hit targets in the drawing (UML-view editing spec
+   §7.3, c4-editor-overlay.js attachUml). Their marks stay as above. */
+.c4-editor__options--pointer-through .c4-editor__option {
+  pointer-events: none;
+}
+
+/* The stroke replaces the outline of the shared focus rule, which browsers draw unevenly around SVG shapes. */
+.c4-editor .c4-editor__option:focus-visible,
+.c4-editor .c4-editor__option.is-focused {
+  outline: none;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  stroke-dasharray: 6 3;
+}
+
+.c4-editor .c4-editor__option.is-selected {
+  fill: var(--c4-ui-canvas-mark);
+  fill-opacity: 0.12;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  stroke-dasharray: none;
+}
+
+/* The focused selection keeps the tint and takes the focus pattern; this outranks the two rules above. */
+.c4-editor .c4-editor__option.is-selected:focus-visible,
+.c4-editor .c4-editor__option.is-selected.is-focused {
+  stroke-dasharray: 6 3;
+}
+
+/* Connect handles appear on hover and selection; the canvas adds is-visible. Hidden handles take no pointer. */
+.c4-editor__handle {
+  visibility: hidden;
+  fill: #ffffff;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__handle.is-visible {
+  visibility: visible;
+}
+
+/* ---- Print: the drawing without focus, selection, or handles ---------------------------------------- */
+
+@media print {
+  .c4-editor .c4-editor__option,
+  .c4-editor .c4-editor__option:focus-visible,
+  .c4-editor .c4-editor__option.is-selected,
+  .c4-editor .c4-editor__option.is-focused,
+  .c4-editor .c4-editor__option.is-selected:focus-visible,
+  .c4-editor .c4-editor__option.is-selected.is-focused {
+    fill: transparent;
+    stroke: none;
+  }
+
+  .c4-editor__handles {
+    display: none;
+  }
+}
+
+/* ============================================================================================================
+ * The diagram editor's hit layer over an edited UML-notation view (c4-editor-uml-canvas.js; UML-view editing spec §7.3,
+ * §7.8). js/ArchUML/css/diagram-editor.css draws the layer through --uml-edit-* properties; the C4 editor maps them here.
+ * The layer's boxes and segments are the pointer's targets only: they draw nothing, because the listbox's options
+ * above them draw focus and selection in the C4 grammar (the overlay section). A segment's target is 24 CSS px wide at
+ * every magnification (WCAG 2.5.8; its stroke does not scale), and a box's at least 24 × 24 CSS px (the module sizes it).
+ * The marks the module draws in the drawing (target marks, bend numbers) take --c4-ui-canvas-mark. The drawing sits
+ * under the site's dark-mode invert filter, so dark mode maps the light values back, as for --c4-ui-canvas-mark; the
+ * module's own dark defaults would be inverted twice. Print hides the whole layer.
+ * ============================================================================================================ */
+
+.c4-editor {
+  --uml-edit-hitbox-fill: transparent;
+  --uml-edit-hitbox-stroke: transparent;
+  --uml-edit-hitbox-hover-fill: transparent;
+  --uml-edit-hitbox-hover-stroke: transparent;
+  --uml-edit-hitbox-selected-fill: transparent;
+  --uml-edit-hitbox-selected-stroke: transparent;
+  --uml-edit-edge-stroke: transparent;
+  --uml-edit-edge-stroke-width: 24;
+  --uml-edit-edge-active-stroke: transparent;
+  --uml-edit-edge-selected-stroke: transparent;
+  --uml-edit-target-possible-stroke: #1b6e34;
+  --uml-edit-target-not-possible-stroke: #a1262b;
+  --uml-edit-target-sign-fill: #ffffff;
+  --uml-edit-bend-number-fill: #ffffff;
+  --uml-edit-bend-number-stroke: var(--c4-ui-canvas-mark);
+  --uml-edit-bend-number-text: #1a3656;
+}
+
+html.dark-mode .c4-editor {
+  --uml-edit-target-possible-stroke: #1b6e34;
+  --uml-edit-target-not-possible-stroke: #a1262b;
+  --uml-edit-target-sign-fill: #ffffff;
+  --uml-edit-bend-number-fill: #ffffff;
+  --uml-edit-bend-number-text: #1a3656;
+}
+
+/* The hit targets take every press over their area, also where they draw nothing. */
+.c4-editor .uml-pg-edit-layer.is-host .uml-pg-edit-hitbox {
+  pointer-events: all;
+}
+
+/* The drawing measured for automatic layout (autoLayout), out of sight and out of the way. */
+.c4-editor__auto-layout {
+  position: absolute;
+  inset: 0 auto auto 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@media print {
+  .c4-editor .uml-pg-edit-layer,
+  .c4-editor__auto-layout {
+    display: none;
+  }
+}
+
+/* ============================================================================================================
+ * Canvas navigation (c4-editor-canvas.js, c4-editor-pointer.js): panning and pinching on the drawing, the zoom
+ * badges of elements with a view inside them, and the empty scope's "Add the first …" note. The badges are drawn
+ * inside the SVG like the overlay's marks, so the site's dark-mode filter reaches them too (see
+ * --c4-ui-canvas-mark); the empty-scope note is HTML and uses the --c4-ui-* tokens of both themes.
+ * ============================================================================================================ */
+
+/* Empty canvas pans with a drag (spec §9.2); the pointer shows it. */
+.c4-editor__stage {
+  cursor: grab;
+}
+
+.c4-editor__canvas.is-panning .c4-editor__stage {
+  cursor: grabbing;
+}
+
+.c4-editor__option {
+  cursor: default;
+}
+
+@media screen {
+  /* The canvas handles one-finger panning and two-finger pinching on the drawing itself (pointer events). */
+  .c4-editor .c4-editor__diagram svg {
+    touch-action: none;
+  }
+}
+
+/* The zoom badge: a 24-unit square with a magnifying glass; a click shows the inside, as Enter does. */
+.c4-editor__zoom-badge {
+  cursor: pointer;
+}
+
+.c4-editor__zoom-badge-face {
+  fill: #ffffff;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__zoom-badge-glyph {
+  fill: none;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__zoom-badge:hover .c4-editor__zoom-badge-face {
+  stroke-width: 3px;
+}
+
+/* A scope without children: its note and the "Add the first …" button, above the drawing. */
+.c4-editor__empty-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em 1em;
+  margin-block-end: 0.75em;
+  padding: 0.5em 0.75em;
+  /* Revealed as one group when its button takes focus, so the note stays clear of the navbar too. */
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 5em);
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-surface);
+  border: 1px dashed var(--c4-ui-border);
+  border-radius: 6px;
+}
+
+.c4-editor__empty-scope-note {
+  margin: 0;
+}
+
+@media print {
+  .c4-editor__badges,
+  .c4-editor__empty-scope .c4-editor__button {
+    display: none;
+  }
+
+  .c4-editor__empty-scope {
+    color: #111111;
+    background: #ffffff;
+    border-color: #555555;
+  }
+}
+
+/* ============================================================================================================
+ * Canvas editing (c4-editor-canvas-editing.js, c4-editor-drag.js): drag feedback, the Move and Add relationship
+ * modes, the "⋯" button, the palette ghost, and the rename field. Marks drawn inside the SVG (ghost, guides, the
+ * connect line, drop targets, the "⋯" button) use --c4-ui-canvas-mark, which the site's dark-mode filter turns into a
+ * light blue like the overlay's focus marks; the HTML parts use the --c4-ui-* tokens of both themes. JavaScript writes
+ * only measured positions: --c4-rename-x/-y/-width and --c4-drag-x/-y.
+ * Non-colour cues (WCAG 1.4.1): valid drop targets get a thick dashed outline and the one under the pointer a thicker
+ * solid one; the ghost and guides are dashed; the drop zone is a dashed outline that turns solid and thicker.
+ * ============================================================================================================ */
+
+/* The rename field is positioned over the drawing, inside the stage. */
+.c4-editor__stage {
+  position: relative;
+}
+
+/* ---- Drop targets (the options of valid targets during a connect drag or the Add relationship mode) ---------- */
+
+.c4-editor .c4-editor__option.is-drop-target {
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 3px;
+  stroke-dasharray: 8 4;
+}
+
+.c4-editor .c4-editor__option.is-drop-hover {
+  fill: var(--c4-ui-canvas-mark);
+  fill-opacity: 0.16;
+  stroke-width: 5px;
+  stroke-dasharray: none;
+}
+
+/* ---- Ghost, guides, and the line of a new relationship (never in the way of the pointer) --------------------- */
+
+.c4-editor__drag-layer {
+  pointer-events: none;
+}
+
+.c4-editor__ghost {
+  fill: var(--c4-ui-canvas-mark);
+  fill-opacity: 0.08;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  stroke-dasharray: 6 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__align-guide,
+.c4-editor__connect-line {
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__align-guide {
+  stroke-dasharray: 2 3;
+}
+
+.c4-editor__connect-line {
+  stroke-dasharray: 8 4;
+}
+
+/* ---- Pointers in the modes ------------------------------------------------------------------------------------ */
+
+.c4-editor__canvas.is-moving .c4-editor__stage,
+.c4-editor__canvas.is-connecting .c4-editor__stage,
+.c4-editor__canvas.is-connecting .c4-editor__option {
+  cursor: crosshair;
+}
+
+.c4-editor__option--box,
+.c4-editor__handle {
+  cursor: grab;
+}
+
+/* ---- The "⋯" button: shown with the connect handle on the selected and the hovered element ------------------ */
+
+.c4-editor__more-button {
+  visibility: hidden;
+  cursor: pointer;
+}
+
+.c4-editor__more-button.is-visible {
+  visibility: visible;
+}
+
+.c4-editor__more-button-face {
+  fill: #ffffff;
+  stroke: var(--c4-ui-canvas-mark);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.c4-editor__more-button-dot {
+  fill: var(--c4-ui-canvas-mark);
+}
+
+.c4-editor__more-button:hover .c4-editor__more-button-face {
+  stroke-width: 3px;
+}
+
+/* ---- Palette and carry-down drags: the drop zone and the ghost beside the pointer -------------------------- */
+
+.c4-editor__canvas.is-drop-zone {
+  outline: 3px dashed var(--c4-ui-focus);
+  outline-offset: -3px;
+}
+
+.c4-editor__canvas.is-drop-zone.is-drop-hover {
+  outline-width: 5px;
+  outline-style: solid;
+}
+
+.c4-editor__drag-ghost {
+  position: fixed;
+  left: var(--c4-drag-x, 0px);
+  top: var(--c4-drag-y, 0px);
+  z-index: 10060;
+  padding: 0.25em 0.6em;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-surface);
+  border: 2px dashed var(--c4-ui-border);
+  border-radius: 4px;
+  box-shadow: var(--c4-ui-shadow);
+  pointer-events: none;
+  /* Beside the pointer, so what lies under it stays visible. */
+  translate: 0.75em 0.75em;
+}
+
+/* ---- Rename in place: a field over the element's name ------------------------------------------------------ */
+
+.c4-editor__canvas-rename-holder {
+  position: absolute;
+  left: var(--c4-rename-x, 0px);
+  top: var(--c4-rename-y, 0px);
+  z-index: 5;
+  inline-size: var(--c4-rename-width, 12em);
+  max-inline-size: calc(100% - var(--c4-rename-x, 0px));
+}
+
+.c4-editor__canvas-rename {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 24px;
+  padding: 0.2em 0.4em;
+  color: var(--c4-ui-field-text);
+  background: var(--c4-ui-field);
+  border: 2px solid var(--c4-ui-field-border);
+  border-radius: 4px;
+  font: inherit;
+  scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 5em);
+}
+
+.c4-editor__canvas-rename:focus-visible {
+  outline: var(--c4-ui-focus-width) solid var(--c4-ui-focus);
+  outline-offset: var(--c4-ui-focus-offset);
+}
+
+.c4-editor__canvas-rename[aria-invalid="true"] {
+  border-color: var(--c4-ui-error);
+  border-width: 3px;
+}
+
+.c4-editor__canvas-rename-problem {
+  margin: 0.25em 0 0;
+  padding: 0.25em 0.5em;
+  color: var(--c4-ui-error);
+  background: var(--c4-ui-error-surface);
+  border-inline-start: 0.25em solid var(--c4-ui-error);
+  font-weight: 600;
+}
+
+/* The instruction under an in-place editor of a UML-notation view (c4-editor-uml-interaction.js; UML-view editing
+   spec §7.4: "Enter saves, Escape cancels."), tied to the field with aria-describedby. Secondary text: 0.9em. */
+.c4-editor__canvas-rename-hint {
+  margin: 0.25em 0 0;
+  padding: 0.2em 0.5em;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-surface);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* ---- The "⋯" button of a selected line in a UML-notation view (c4-editor-uml-interaction.js; spec §7.4) --------
+   HTML over the drawing, outside the dark-mode filter, so it takes the --c4-ui-* tokens of each theme. It is
+   24 × 24 CSS px at every magnification (WCAG 2.5.8): its size does not follow the drawing's scale, only its place,
+   which the script measures (--c4-more-x, --c4-more-y). One click opens the line's menu (Shift+F10 is the keyboard's
+   way, so it is no tab stop). */
+.c4-editor__uml-more {
+  position: absolute;
+  left: var(--c4-more-x, 0px);
+  top: var(--c4-more-y, 0px);
+  z-index: 4;
+  box-sizing: border-box;
+  inline-size: 24px;
+  block-size: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-control-bg);
+  border: 2px solid var(--c4-ui-border);
+  border-radius: 5px;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.c4-editor__uml-more:hover {
+  background: var(--c4-ui-control-hover-bg);
+}
+
+.c4-editor__uml-more:focus-visible {
+  outline: var(--c4-ui-focus-width) solid var(--c4-ui-focus);
+  outline-offset: var(--c4-ui-focus-offset);
+}
+
+/* Dark mode: every colour above is a --c4-ui-* token that html.dark-mode .c4-editor redefines, or a mark drawn inside
+   the SVG under the site's dark-mode filter; the "⋯" face is white for the same reason as the zoom badge's. */
+
+/* ---- Print: no interaction marks or fields --------------------------------------------------------------- */
+
+@media print {
+  .c4-editor__drag-layer,
+  .c4-editor__more-button,
+  .c4-editor__uml-more,
+  .c4-editor__drag-ghost,
+  .c4-editor__canvas-rename-holder {
+    display: none;
+  }
+
+  .c4-editor .c4-editor__option.is-drop-target,
+  .c4-editor .c4-editor__option.is-drop-hover {
+    fill: transparent;
+    stroke: none;
+  }
+
+  .c4-editor__canvas.is-drop-zone {
+    outline: none;
+  }
+}
+
+/* ============================================================================================================
+ * The scope's header (c4-editor-canvas.js) and the carry-down tray in it (c4-editor-scaffolds.js, spec §9.2, §9.3).
+ * The header rests on the top edge of the view's scope boundary; JavaScript writes only its measured place
+ * (--c4-scope-x, --c4-scope-y, --c4-scope-width). Its open tray drops over the inside of the boundary, and while a
+ * tray item is dragged (.is-refining) the open panel steps aside so every part of the scope stays a visible target;
+ * the ghost beside the pointer carries the item's text. Focus moving onto the drawing closes the tray (the script's
+ * job), so a focused part is never under the panel (WCAG 2.4.11). Colours are --c4-ui-* tokens, which html.dark-mode .c4-editor
+ * redefines, so the dark theme needs no rules of its own here.
+ * ============================================================================================================ */
+
+.c4-editor__scope-header.is-anchored {
+  position: absolute;
+  left: var(--c4-scope-x, 0px);
+  top: var(--c4-scope-y, 0px);
+  z-index: 4;
+  cursor: auto;
+}
+
+/* Without a drawn boundary the header heads the stage, in flow. */
+.c4-editor__scope-header:not(.is-anchored):has(.c4-editor__tray-toggle) {
+  margin-block-end: 0.75em;
+}
+
+.c4-editor__scope-header .c4-editor__tray-toggle {
+  background: var(--c4-ui-control-bg);
+}
+
+.c4-editor__scope-header.is-anchored .c4-editor__tray {
+  position: relative;
+}
+
+.c4-editor__tray-panel {
+  display: grid;
+  gap: 0.5em;
+  inline-size: 100%;
+}
+
+.c4-editor__tray-panel[hidden] {
+  display: none;
+}
+
+.c4-editor__scope-header.is-anchored .c4-editor__tray-panel {
+  position: absolute;
+  inset-block-start: calc(100% + 0.25em);
+  inset-inline-start: 0;
+  box-sizing: border-box;
+  inline-size: max(20em, var(--c4-scope-width, 20em));
+  max-inline-size: calc(100vw - 2em);
+  /* No scrolling of its own, so the Refine into… menus are never clipped; the canvas region scrolls to it. */
+  padding: 0.5em;
+  color: var(--c4-ui-text);
+  background: var(--c4-ui-surface);
+  border: 1px solid var(--c4-ui-border);
+  border-radius: 6px;
+  box-shadow: var(--c4-ui-shadow);
+}
+
+.c4-editor__tray-hint {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.c4-editor__tray-hint[hidden] {
+  display: none;
+}
+
+/* An item drags from anywhere outside its button: a grab cursor, no text selection, and no touch scrolling. */
+.c4-editor__scope-header .c4-editor__tray-item {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.c4-editor__scope-header .c4-editor__tray-item button {
+  cursor: pointer;
+}
+
+.c4-editor__canvas.is-refining .c4-editor__tray-panel {
+  visibility: hidden;
+}
+
+@media print {
+  .c4-editor__scope-header {
+    display: none;
+  }
+}
+
+/* ============================================================================================================
+ * Interface views (spec §9.1 Toolbar, §9.4 print, §9.5 "Interface views on the canvas"; c4-editor-toolbar.js,
+ * c4-editor-card.js, c4-editor-panels.js). The toolbar's Interfaces group uses the toolbar's own button styles. On the
+ * interface card, which the renderer writes and colours, the editor adds an "Edit <operation>" button per operation
+ * and marks the selected operation's blocks with a thicker dashed outline than focus and the shared text badge
+ * (.c4-editor__badge, which takes the card's text colour), so selection never rests on colour. Print shows the card
+ * without these editing marks, and leaves out the Explain panel, which would repeat the card's text.
+ * ============================================================================================================ */
+
+.c4-editor__card-edit {
+  display: block;
+  margin-block-start: 0.5em;
+}
+
+.c4-editor__card-block--selected {
+  outline: 4px dashed var(--c4-ui-focus, #2774ae);
+  outline-offset: 4px;
+}
+
+.c4-editor__selected-badge {
+  margin-block-end: 0.5em;
+}
+
+@media print {
+  .c4-editor__card-edit,
+  .c4-editor__selected-badge {
+    display: none !important;
+  }
+
+  .c4-editor__card-block--selected {
+    outline: none;
+  }
+
+  /* Outranks the Explain panel's print rule above (same weight, later in the file). */
+  .c4-editor.c4-editor--card-view .c4-editor__panel--explain,
+  .c4-editor.c4-editor--card-view .c4-editor__panel--explain[hidden] {
+    display: none !important;
+  }
+}
+
+/* ============================================================================================================
+ * The message region (c4-editor-messages.js, UML-view editing spec §7.5): one row drawn over the top edge of the
+ * canvas, in the room the canvas keeps free for it (the layout section), so a message that appears never moves the
+ * drawing. It is as tall as one line of text with a button in it; a longer message wraps and the row grows down over
+ * the drawing, which stays where it is, while the canvas's room grows with it, so the drawing can be scrolled out from
+ * under the message and a focused element is revealed below it. Empty, it draws nothing. Its text lets presses
+ * through to the drawing beneath; only its buttons take them. A refusal begins with its label "Not done:" and a
+ * crossed-circle icon, and its side bar takes the error colour; the words and the icon carry the state, not the colour
+ * (WCAG 1.4.1). Text and buttons are paragraph-sized (the buttons are .c4-editor__button). Every colour is a --c4-ui-*
+ * token, which html.dark-mode redefines and the site's theme maps, so dark mode needs no rule of its own here. Print
+ * hides it.
+ * ============================================================================================================ */
+
+.c4-editor__messages {
+  position: absolute;
+  inset-block-start: var(--c4-messages-inset);
+  inset-inline: var(--c4-messages-inset);
+  /* Above the drawing's own layers (the rename field 5, the scope's header 4), below popovers and menus. */
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25em 0.5em;
+  /* The text and the buttons (font: inherit) take this line-height whatever the page's is, so the row's height is
+     the strip's (--c4-messages-row) whether it is empty or shows a one-line message with its buttons. */
+  line-height: 1.4;
+  min-block-size: var(--c4-messages-row);
+  padding: 0 0.5em;
+  border: 1px solid transparent;
+  border-inline-start-width: 0.3em;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.c4-editor__messages button {
+  pointer-events: auto;
+}
+
+.c4-editor__messages--instruction,
+.c4-editor__messages--result,
+.c4-editor__messages--notice,
+.c4-editor__messages--refusal {
+  background: var(--c4-ui-surface);
+  border-color: var(--c4-ui-divider);
+  border-inline-start-color: var(--c4-ui-border);
+  box-shadow: var(--c4-ui-shadow);
+}
+
+.c4-editor__messages--refusal {
+  border-inline-start-color: var(--c4-ui-error);
+}
+
+/* As wide as its text: a short message keeps its buttons on its line; a long one takes the line and they wrap below,
+   at the line's end. */
+.c4-editor__message {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.c4-editor__message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25em 0.5em;
+  margin-inline-start: auto;
+}
+
+.c4-editor__message-label {
+  font-weight: bold;
+  color: var(--c4-ui-error);
+  white-space: nowrap;
+}
+
+.c4-editor__message-icon {
+  inline-size: 1em;
+  block-size: 1em;
+  margin-inline-end: 0.3em;
+  vertical-align: -0.15em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+}
+
+@media print {
+  .c4-editor__messages {
+    display: none !important;
+  }
+}

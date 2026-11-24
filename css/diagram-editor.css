@@ -1,0 +1,547 @@
+/*
+ * The diagram editor's own presentation (js/ArchUML/diagram-editor/; UML-view editing spec §2.2, §7.8; plan Task 24):
+ * the hit layer over a drawing and its states, the extend handle, the smart guides and drop indicators, the marquee,
+ * the in-place editors, the relation chooser, and the context menu.
+ *
+ * The loader (_includes/diagram-editor-scripts.html) links this file before the module's scripts. Every colour, line
+ * width, and dash pattern is read through a --uml-edit-* custom property whose fallback is the value the UML editor
+ * shows in light mode. This file declares none of them: a host maps them on its editor's root, with its dark-mode and
+ * print values beside the mapping (the UML editor in css/tutorial-uml-editor.css, under #uml-playground-wrap). So the
+ * host's mapping wins wherever this file sits in the cascade, and a second link to it on one page changes nothing.
+ * The rules came from css/tutorial-uml-editor.css with the same selectors; each html.dark-mode rule became the host's
+ * dark mapping of these properties. The bend numbers are new here, so their dark-mode defaults sit beside their rules,
+ * read through the same properties, and a host's mapping still wins.
+ *
+ * Text sizes are relative (em), so popups read at the size of the text around the editor. Print hides the in-place
+ * editors, the context menu, the bend numbers, the target marks, and the "⋯" button.
+ */
+
+/* Marquee selection rectangle — drawn as a top-level overlay so the canvas
+   pan/zoom transform doesn't distort it. Shift+drag on empty canvas. */
+.uml-pg-marquee-box {
+  position: fixed;
+  z-index: 10000;
+  border: var(--uml-edit-marquee-border-width, 1px) dashed var(--uml-edit-marquee-border, #2774AE);
+  background: var(--uml-edit-marquee-fill, rgba(39, 116, 174, 0.12));
+  pointer-events: none;
+  /* Pure overlay decoration — not focusable, not announced. */
+}
+
+/* Inline rename overlay */
+.uml-pg-inline-input {
+  position: fixed;
+  z-index: 10000;
+  font: inherit;
+  font-size: 1em;
+  padding: 4px 8px;
+  border: var(--uml-edit-inline-border-width, 2px) solid var(--uml-edit-inline-border, #2774AE);
+  border-radius: 3px;
+  background: var(--uml-edit-inline-bg, #fff);
+  color: var(--uml-edit-inline-text, #1a1a2e);
+  box-shadow: 0 2px 8px var(--uml-edit-inline-shadow, rgba(39, 116, 174, 0.4));
+  outline: none;
+  box-sizing: border-box;
+}
+
+/* A relation's label edited in place has a fixed size; the editor places it.
+   The same in dark mode; print hides in-place editors (@media print below). */
+.uml-pg-inline-input.is-relation-label {
+  width: 180px;
+  min-height: 32px;
+}
+
+.uml-pg-edit-hitbox {
+  fill: var(--uml-edit-hitbox-fill, rgba(39, 116, 174, 0.04));
+  stroke: var(--uml-edit-hitbox-stroke, rgba(39, 116, 174, 0.72));
+  stroke-width: var(--uml-edit-hitbox-stroke-width, 1.5);
+  stroke-dasharray: var(--uml-edit-hitbox-dash, 5 4);
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+  transition: fill 0.12s ease-out, stroke 0.12s ease-out, stroke-width 0.12s ease-out;
+}
+
+.uml-pg-edit-a11y-target {
+  fill: var(--uml-edit-target-fill, transparent);
+  stroke: var(--uml-edit-target-stroke, transparent);
+  stroke-width: var(--uml-edit-target-stroke-width, 1);
+  pointer-events: all;
+  cursor: move;
+}
+
+.uml-pg-edit-a11y-target:focus-visible {
+  fill: var(--uml-edit-target-focus-fill, rgba(39, 116, 174, 0.10));
+  stroke: var(--uml-edit-target-focus-stroke, #2774AE);
+  stroke-width: var(--uml-edit-target-focus-stroke-width, 2);
+  stroke-dasharray: var(--uml-edit-target-focus-dash, none);
+  outline: none;
+}
+
+.uml-pg-edit-hitbox:hover {
+  fill: var(--uml-edit-hitbox-hover-fill, rgba(39, 116, 174, 0.10));
+  stroke: var(--uml-edit-hitbox-hover-stroke, rgba(39, 116, 174, 0.95));
+}
+
+/* Smart-guide alignment lines shown while dragging — drawn in the edit layer
+   when the dragged element aligns with another's centre or edge. */
+.uml-pg-guide-line {
+  stroke: var(--uml-edit-guide-stroke, #ff6f00);
+  stroke-width: var(--uml-edit-guide-stroke-width, 1.5);
+  stroke-dasharray: var(--uml-edit-guide-dash, 3 3);
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* The number of each bend of the one selected line (spec §3.11; mount's bendNumbers), so "Move bend 2…" can be
+   matched to the drawing: a disc with the number, at the paragraph size of the text around the editor. It is no
+   pointer target and no tab stop. Its dark-mode defaults are the rules after it: a light number on a dark disc
+   (12.0:1), for a host that draws its edit layer as it is. A host that inverts its drawing in dark mode maps the
+   light values back (the UML editor in css/tutorial-uml-editor.css). Print hides it (@media print below), and the
+   print controller takes dark-mode off the page. */
+.uml-pg-bend-number {
+  pointer-events: none;
+}
+
+.uml-pg-bend-number-disc {
+  r: 0.8em;
+  fill: var(--uml-edit-bend-number-fill, #fff);
+  stroke: var(--uml-edit-bend-number-stroke, #2774AE);
+  stroke-width: var(--uml-edit-bend-number-stroke-width, 2);
+  vector-effect: non-scaling-stroke;
+}
+
+.uml-pg-bend-number-text {
+  font: inherit;
+  font-size: 1em;
+  font-weight: 700;
+  fill: var(--uml-edit-bend-number-text, #1a3656);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+html.dark-mode .uml-pg-bend-number-disc {
+  fill: var(--uml-edit-bend-number-fill, #1f2c3c);
+  stroke: var(--uml-edit-bend-number-stroke, #7cc4ff);
+}
+
+html.dark-mode .uml-pg-bend-number-text {
+  fill: var(--uml-edit-bend-number-text, #e3eef9);
+}
+
+/* Target marks (spec §7.4; plan Task 38): while a gesture with an open end runs, each candidate the adapter advised on
+   is marked over its box. A possible target has a thick dashed outline; a target that is not possible has a thin solid
+   outline and a struck-through circle on its top-right corner, so the two differ by shape and not only by colour. Each
+   outline keeps at least 3:1 against the drawing (light: 6.3:1 and 7.4:1 on white). A mark is drawing, not content:
+   aria-hidden, no pointer target, no tab stop. Its dark-mode defaults are the rules after it, for a host that draws its
+   edit layer as it is; a host that inverts its drawing in dark mode maps the light values back. Print hides the marks
+   (@media print below). */
+.uml-pg-target-mark {
+  pointer-events: none;
+}
+
+.uml-pg-target-mark-outline {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.uml-pg-target-mark.is-possible .uml-pg-target-mark-outline {
+  stroke: var(--uml-edit-target-possible-stroke, #1b6e34);
+  stroke-width: var(--uml-edit-target-possible-stroke-width, 3);
+  stroke-dasharray: var(--uml-edit-target-possible-dash, 7 4);
+}
+
+.uml-pg-target-mark.is-not-possible .uml-pg-target-mark-outline,
+.uml-pg-target-mark-sign {
+  stroke: var(--uml-edit-target-not-possible-stroke, #a1262b);
+  stroke-width: var(--uml-edit-target-not-possible-stroke-width, 1.5);
+  stroke-dasharray: none;
+}
+
+.uml-pg-target-mark-sign {
+  fill: var(--uml-edit-target-sign-fill, #fff);
+  vector-effect: non-scaling-stroke;
+}
+
+html.dark-mode .uml-pg-target-mark.is-possible .uml-pg-target-mark-outline {
+  stroke: var(--uml-edit-target-possible-stroke, #7ddc95);
+}
+
+html.dark-mode .uml-pg-target-mark.is-not-possible .uml-pg-target-mark-outline,
+html.dark-mode .uml-pg-target-mark-sign {
+  stroke: var(--uml-edit-target-not-possible-stroke, #ff9b9b);
+}
+
+html.dark-mode .uml-pg-target-mark-sign {
+  fill: var(--uml-edit-target-sign-fill, #1f2c3c);
+}
+
+/* The "⋯" button of the one selected element or line (spec §3.11): it opens the item's menu with one click. The
+   surface sizes it to 26 CSS px at every zoom and places it clear of every hit target. Its box keeps 3:1 against the
+   drawing (4.9:1 light), its dots 4.5:1 against the box; focus thickens the box's outline. Its dark-mode defaults
+   are the rules after it, for a host that draws its edit layer as it is; a host that inverts its drawing in dark mode
+   maps the light values back (the UML editor in css/tutorial-uml-editor.css). Print hides it (@media print below);
+   the exported drawing leaves out the whole edit layer. */
+.uml-pg-action-button {
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.uml-pg-action-button:focus {
+  outline: none;
+}
+
+.uml-pg-action-button-box {
+  fill: var(--uml-edit-action-button-fill, #fff);
+  stroke: var(--uml-edit-action-button-stroke, #2774AE);
+  stroke-width: var(--uml-edit-action-button-stroke-width, 1.5);
+  vector-effect: non-scaling-stroke;
+}
+
+.uml-pg-action-button-dot {
+  fill: var(--uml-edit-action-button-dot, #1a3656);
+}
+
+.uml-pg-action-button:hover .uml-pg-action-button-box {
+  fill: var(--uml-edit-action-button-hover-fill, #e8f1fa);
+}
+
+.uml-pg-action-button:focus-visible .uml-pg-action-button-box {
+  stroke: var(--uml-edit-action-button-focus-stroke, #1a3656);
+  stroke-width: var(--uml-edit-action-button-focus-stroke-width, 3);
+}
+
+html.dark-mode .uml-pg-action-button-box {
+  fill: var(--uml-edit-action-button-fill, #1f2c3c);
+  stroke: var(--uml-edit-action-button-stroke, #7cc4ff);
+}
+
+html.dark-mode .uml-pg-action-button-dot {
+  fill: var(--uml-edit-action-button-dot, #e3eef9);
+}
+
+html.dark-mode .uml-pg-action-button:hover .uml-pg-action-button-box {
+  fill: var(--uml-edit-action-button-hover-fill, #2a3b50);
+}
+
+html.dark-mode .uml-pg-action-button:focus-visible .uml-pg-action-button-box {
+  stroke: var(--uml-edit-action-button-focus-stroke, #e3eef9);
+}
+
+/* Right-click context menu — uses the existing chooser look so users see one
+   consistent floating-menu pattern across the editor. */
+.uml-pg-context-menu {
+  position: fixed;
+  z-index: 10000;
+  background: var(--uml-edit-menu-bg, #fff);
+  border: var(--uml-edit-menu-border-width, 1px) solid var(--uml-edit-menu-border, #97afca);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--uml-edit-menu-shadow, rgba(0, 0, 0, 0.18));
+  padding: 4px;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.uml-pg-context-menu button {
+  font: inherit;
+  font-size: 1em;
+  padding: 6px 10px;
+  text-align: left;
+  background: var(--uml-edit-menu-item-bg, #fff);
+  color: var(--uml-edit-menu-item-text, #1a3656);
+  border: var(--uml-edit-menu-item-border-width, 1px) solid var(--uml-edit-menu-item-border, transparent);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.uml-pg-context-menu button:hover,
+.uml-pg-context-menu button:focus-visible {
+  background: var(--uml-edit-menu-item-active-bg, #eef4fb);
+  border-color: var(--uml-edit-menu-item-active-border, #2774AE);
+  outline: none;
+}
+
+.uml-pg-context-menu hr {
+  border: none;
+  border-top: var(--uml-edit-menu-rule-width, 1px) solid var(--uml-edit-menu-rule, #d7e0ec);
+  margin: 4px 6px;
+}
+
+.uml-pg-context-menu button.is-danger {
+  color: var(--uml-edit-menu-danger-text, #842622);
+}
+
+/* A danger item in focus and under the pointer: two properties each, so a host can give the two states different
+   colours (the UML editor's dark mode does). Under the pointer wins when both apply. */
+.uml-pg-context-menu button.is-danger:focus-visible {
+  background: var(--uml-edit-menu-danger-focus-bg, #fbe9e7);
+  border-color: var(--uml-edit-menu-danger-focus-border, #842622);
+}
+
+.uml-pg-context-menu button.is-danger:hover {
+  background: var(--uml-edit-menu-danger-hover-bg, #fbe9e7);
+  border-color: var(--uml-edit-menu-danger-hover-border, #842622);
+}
+
+.uml-pg-context-menu .uml-pg-context-key {
+  margin-left: auto;
+  color: var(--uml-edit-menu-key-text, #596b84);
+  font-size: 0.9em;
+  font-family: 'Cascadia Code', 'Fira Mono', 'Menlo', 'Consolas', monospace;
+}
+
+.uml-pg-edit-hitbox.is-selected {
+  fill: var(--uml-edit-hitbox-selected-fill, rgba(39, 116, 174, 0.10));
+  stroke: var(--uml-edit-hitbox-selected-stroke, #2774AE);
+  stroke-width: var(--uml-edit-hitbox-selected-stroke-width, 2);
+  stroke-dasharray: var(--uml-edit-hitbox-selected-dash, none);
+}
+
+.uml-pg-edit-hitbox.is-port {
+  fill: var(--uml-edit-port-fill, rgba(39, 174, 96, 0.08));
+  stroke: var(--uml-edit-port-stroke, rgba(39, 174, 96, 0.78));
+}
+
+.uml-pg-edit-hitbox.is-port.is-selected {
+  fill: var(--uml-edit-port-selected-fill, rgba(39, 174, 96, 0.16));
+  stroke: var(--uml-edit-port-selected-stroke, #27ae60);
+}
+
+.uml-pg-edit-hitbox.is-label {
+  fill: var(--uml-edit-label-fill, rgba(243, 156, 18, 0.08));
+  stroke: var(--uml-edit-label-stroke, rgba(210, 126, 8, 0.78));
+}
+
+.uml-pg-edit-hitbox.is-label.is-selected {
+  fill: var(--uml-edit-label-selected-fill, rgba(243, 156, 18, 0.16));
+  stroke: var(--uml-edit-label-selected-stroke, #d27e08);
+}
+
+/* "+" extend handle on hover */
+.uml-pg-extend-handle {
+  fill: var(--uml-edit-extend-handle-fill, #2774AE);
+  stroke: var(--uml-edit-extend-handle-stroke, #fff);
+  stroke-width: var(--uml-edit-extend-handle-stroke-width, 2);
+  cursor: crosshair;
+  opacity: 0;
+  pointer-events: all;
+  transition: opacity 0.12s;
+}
+
+.uml-pg-extend-handle.is-visible,
+.uml-pg-edit-hitbox:hover ~ .uml-pg-extend-handle,
+.uml-pg-edit-hitbox:focus ~ .uml-pg-extend-handle {
+  opacity: 1;
+}
+
+.uml-pg-extend-handle-plus {
+  fill: var(--uml-edit-extend-plus-fill, #fff);
+  pointer-events: none;
+  font-size: 16px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* The plus sign shows with its handle (hover or focus on the box or the handle).
+   The same in dark mode and print. */
+.uml-pg-extend-handle-plus.is-visible {
+  opacity: 1;
+}
+
+.uml-pg-extend-line {
+  stroke: var(--uml-edit-extend-line-stroke, #2774AE);
+  stroke-width: var(--uml-edit-extend-line-stroke-width, 2);
+  stroke-dasharray: var(--uml-edit-extend-line-dash, 6 4);
+  fill: none;
+  pointer-events: none;
+}
+
+/* Drop-position indicator shown while dragging a fragment to a new vertical
+   slot. Drawn the full width of the SVG viewport. */
+.uml-pg-frag-drop-indicator {
+  stroke: var(--uml-edit-drop-indicator-stroke, #2774AE);
+  stroke-width: var(--uml-edit-drop-indicator-stroke-width, 3);
+  stroke-dasharray: var(--uml-edit-drop-indicator-dash, 6 4);
+  pointer-events: none;
+}
+
+/* Activation bars (sequence execution specifications). The body hitbox drags
+   the whole bar; the top/bottom grips change when the object becomes / stops
+   being active. Shares the blue editing accent but adds resize grips so the
+   adjust-when-active affordance reads clearly. */
+.uml-pg-activation-hitbox {
+  fill: var(--uml-edit-activation-fill, rgba(39, 116, 174, 0.06));
+  stroke: var(--uml-edit-activation-stroke, rgba(39, 116, 174, 0.6));
+  stroke-width: var(--uml-edit-activation-stroke-width, 1.5);
+  stroke-dasharray: var(--uml-edit-activation-dash, 4 3);
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+  transition: fill 0.12s ease-out, stroke 0.12s ease-out;
+}
+
+.uml-pg-activation-hitbox:hover {
+  fill: var(--uml-edit-activation-hover-fill, rgba(39, 116, 174, 0.14));
+  stroke: var(--uml-edit-activation-hover-stroke, rgba(39, 116, 174, 0.95));
+}
+
+.uml-pg-activation-hitbox.is-selected {
+  fill: var(--uml-edit-activation-selected-fill, rgba(39, 116, 174, 0.18));
+  stroke: var(--uml-edit-activation-selected-stroke, #2774AE);
+  stroke-width: var(--uml-edit-activation-selected-stroke-width, 2);
+  stroke-dasharray: var(--uml-edit-activation-selected-dash, none);
+}
+
+/* Top / bottom resize grips. Faintly visible at rest so the resize affordance
+   is discoverable; full strength on hover or when the bar is selected. */
+.uml-pg-activation-handle {
+  fill: var(--uml-edit-activation-handle-fill, #2774AE);
+  stroke: var(--uml-edit-activation-handle-stroke, #fff);
+  stroke-width: var(--uml-edit-activation-handle-stroke-width, 1.5);
+  rx: 2;
+  ry: 2;
+  cursor: ns-resize;
+  opacity: 0.5;
+  pointer-events: all;
+  vector-effect: non-scaling-stroke;
+  transition: opacity 0.12s ease-out;
+}
+
+.uml-pg-activation-handle:hover,
+.uml-pg-activation-handle.is-selected,
+.uml-pg-activation-hitbox:hover ~ .uml-pg-activation-handle,
+.uml-pg-activation-hitbox.is-selected ~ .uml-pg-activation-handle {
+  opacity: 1;
+}
+
+/* Full-width snap guide shown while dragging an edge or sweeping a new bar. */
+.uml-pg-activation-guide {
+  stroke: var(--uml-edit-activation-guide-stroke, #2774AE);
+  stroke-width: var(--uml-edit-activation-guide-stroke-width, 2);
+  stroke-dasharray: var(--uml-edit-activation-guide-dash, 4 4);
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+/* Honour reduced-motion: the affordance fades are decorative. */
+@media (prefers-reduced-motion: reduce) {
+  .uml-pg-activation-hitbox,
+  .uml-pg-activation-handle {
+    transition: none;
+  }
+}
+
+/* Relation chooser popup */
+.uml-pg-relation-chooser {
+  position: fixed;
+  z-index: 10000;
+  background: var(--uml-edit-chooser-bg, #fff);
+  border: var(--uml-edit-chooser-border-width, 1px) solid var(--uml-edit-chooser-border, #97afca);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--uml-edit-chooser-shadow, rgba(0, 0, 0, 0.18));
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+/* The title's rule is its bottom border; the colour of the other three sides is a property of its own, so a host can
+   colour all four (the UML editor's dark mode does), as a whole border-color did. */
+.uml-pg-relation-chooser-title {
+  font-size: 1em;
+  font-weight: 700;
+  color: var(--uml-edit-chooser-title-text, #1a3656);
+  padding: 4px 8px 6px;
+  border-color: var(--uml-edit-chooser-title-sides, currentcolor);
+  border-bottom: var(--uml-edit-chooser-title-rule-width, 1px) solid var(--uml-edit-chooser-title-rule, #d7e0ec);
+  margin-bottom: 4px;
+}
+
+.uml-pg-relation-chooser button {
+  font: inherit;
+  font-size: 1em;
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--uml-edit-chooser-item-bg, #fff);
+  color: var(--uml-edit-chooser-item-text, #1a3656);
+  border: var(--uml-edit-chooser-item-border-width, 1px) solid var(--uml-edit-chooser-item-border, transparent);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.uml-pg-relation-chooser button:hover,
+.uml-pg-relation-chooser button:focus-visible {
+  background: var(--uml-edit-chooser-item-active-bg, #eef4fb);
+  border-color: var(--uml-edit-chooser-item-active-border, #2774AE);
+  outline: none;
+}
+
+.uml-pg-relation-chooser button:focus-visible {
+  outline: var(--uml-edit-chooser-focus-width, 2px) solid var(--uml-edit-chooser-focus, #2774AE);
+  outline-offset: 1px;
+}
+
+/* Accent glyph (element/relation symbol) shown before each menu-item label.
+   Blue accent in light mode; a host's dark mapping flips it to the same
+   lighter blue the chooser uses for its hover border, so the glyph stays
+   legible against the dark button surface. min-width keeps the labels
+   aligned in a column regardless of glyph width. */
+.uml-pg-relation-chooser button .uml-pg-chooser-glyph {
+  color: var(--uml-edit-chooser-glyph, #2774AE);
+  font-weight: 700;
+  min-width: 1.4em;
+}
+
+/* Edge hitbox overlay: a thick click/drag target on each editable route
+ * segment. It stays transparent by default so the underlying transition
+ * stroke is visually clean — otherwise on state diagrams the translucent
+ * blue bars read as UML fork/join synchronisation bars and clutter the
+ * canvas. Hover / focus reveal a subtle highlight as an affordance, and
+ * selection paints the segment a moderate blue so the picked edge is
+ * obvious without dominating the diagram. */
+.uml-pg-edge-hitbox {
+  fill: none;
+  stroke: var(--uml-edit-edge-stroke, transparent);
+  stroke-width: var(--uml-edit-edge-stroke-width, 11);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  cursor: grab;
+  pointer-events: stroke;
+  transition: stroke 120ms ease;
+}
+
+.uml-pg-edge-hitbox:hover,
+.uml-pg-edge-hitbox:focus-visible {
+  stroke: var(--uml-edit-edge-active-stroke, rgba(39, 116, 174, 0.32));
+}
+
+.uml-pg-edge-hitbox.is-selected {
+  stroke: var(--uml-edit-edge-selected-stroke, rgba(39, 116, 174, 0.6));
+}
+
+/* Highlight pending source element when relation tool is mid-pick */
+.uml-pg-edit-hitbox.is-relation-source {
+  fill: var(--uml-edit-relation-source-fill, rgba(155, 89, 182, 0.18));
+  stroke: var(--uml-edit-relation-source-stroke, #6b3a8c);
+  stroke-width: var(--uml-edit-relation-source-stroke-width, 2.5);
+  stroke-dasharray: var(--uml-edit-relation-source-dash, none);
+}
+
+@media print {
+  .uml-pg-context-menu,
+  .uml-pg-inline-input,
+  .uml-pg-bend-number,
+  .uml-pg-target-mark,
+  .uml-pg-action-button { display: none !important; }
+}

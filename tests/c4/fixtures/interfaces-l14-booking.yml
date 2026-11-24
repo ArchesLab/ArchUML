@@ -1,0 +1,27 @@
+schema: c4-design/1
+name: Flight Booking
+systems:
+  gds:
+    name: Global Distribution System
+    description: Lets booking systems and airlines exchange flights and bookings.
+    provides:
+      flight-booking:
+        name: Flight Booking API
+        style: rest
+        operations:
+          create-booking:
+            syntax: POST /createBooking
+            input:
+              flightNumber:
+                type: str
+                meaning: The flight number using the code of the operating airline
+              date:
+                type: dateTime
+                meaning: The date of the departing flight according to the time zone of the departure airport
+              seat:
+                type: str
+                meaning: Seat number (same label as on the plane)
+              paymentReference: PaymentMethod
+              travelerName:
+                type: str
+                meaning: Full name of the person traveling in ASCII

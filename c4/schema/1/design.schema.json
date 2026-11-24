@@ -1,0 +1,1894 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tobiasduerschmid.github.io/js/ArchUML/c4/schema/1/design.schema.json",
+  "title": "C4 design model (c4-design/1)",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "$ref": "#/definitions/text"
+    },
+    "name": {
+      "$ref": "#/definitions/text"
+    },
+    "description": {
+      "$ref": "#/definitions/text"
+    },
+    "status": {
+      "enum": [
+        "sketch",
+        "proposed",
+        "accepted",
+        "implemented"
+      ]
+    },
+    "enterprise": {
+      "$ref": "#/definitions/text"
+    },
+    "view": {
+      "$ref": "#/definitions/text"
+    },
+    "requirements": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/requirement"
+        }
+      },
+      "additionalProperties": false
+    },
+    "groups": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/group"
+        }
+      },
+      "additionalProperties": false
+    },
+    "people": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/person"
+        }
+      },
+      "additionalProperties": false
+    },
+    "systems": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/system"
+        }
+      },
+      "additionalProperties": false
+    },
+    "scenarios": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/scenario"
+        }
+      },
+      "additionalProperties": false
+    },
+    "deployment": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/environment"
+        }
+      },
+      "additionalProperties": false
+    },
+    "vocabulary": {
+      "type": "object",
+      "patternProperties": {
+        ".+": {
+          "$ref": "#/definitions/text"
+        }
+      },
+      "additionalProperties": false
+    },
+    "decisions": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/decision"
+        }
+      },
+      "additionalProperties": false
+    },
+    "views": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z][A-Za-z0-9_-]*$": {
+          "$ref": "#/definitions/view"
+        }
+      },
+      "additionalProperties": false
+    },
+    "checks": {
+      "type": "object",
+      "properties": {
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule": {
+                "$ref": "#/definitions/text"
+              },
+              "element": {
+                "$ref": "#/definitions/text"
+              },
+              "because": {
+                "$ref": "#/definitions/text"
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "layout": {
+      "type": "object",
+      "patternProperties": {
+        "^\\s*[cC][oO][dD][eE]\\s+[oO][fF]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$": {
+          "type": "object",
+          "properties": {
+            "positions": {
+              "type": "object",
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_-]*$": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            "routes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "to": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "relation": {
+                    "enum": [
+                      "collaborator"
+                    ]
+                  },
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/number"
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "minItems": 2
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to",
+                  "relation",
+                  "points"
+                ]
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "^\\s*[dD][eE][pP][lL][oO][yY][mM][eE][nN][tT]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$": {
+          "type": "object",
+          "properties": {
+            "positions": {
+              "type": "object",
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_-]*$": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            "routes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "to": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "relation": {
+                    "enum": [
+                      "link",
+                      "derived"
+                    ]
+                  },
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/number"
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "minItems": 2
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to",
+                  "relation",
+                  "points"
+                ]
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "^\\s*[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]\\s+[oO][fF]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$": {
+          "type": "object",
+          "properties": {
+            "positions": {
+              "type": "object",
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_-]*$": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "^\\s*[dD][yY][nN][aA][mM][iI][cC]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$": {
+          "type": "object",
+          "properties": {
+            "lifelines": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "^\\s*(?!(?:[lL][aA][nN][dD][sS][cC][aA][pP][eE]|[cC][oO][nN][tT][eE][xX][tT]|[cC][oO][nN][tT][aA][iI][nN][eE][rR][sS]|[cC][oO][mM][pP][oO][nN][eE][nN][tT][sS]|[cC][oO][dD][eE]|[dD][yY][nN][aA][mM][iI][cC]|[dD][eE][pP][lL][oO][yY][mM][eE][nN][tT]|[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[iI][nN][tT][eE][rR][fF][aA][cC][eE])(?![A-Za-z0-9_-]))[A-Za-z][A-Za-z0-9_-]*(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$": {
+          "anyOf": [
+            {
+              "type": "object",
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_-]*$": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "positions": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^[A-Za-z][A-Za-z0-9_-]*$": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/number"
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "routes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "from": {
+                        "$ref": "#/definitions/text"
+                      },
+                      "to": {
+                        "$ref": "#/definitions/text"
+                      },
+                      "relation": {
+                        "enum": [
+                          "collaborator",
+                          "link",
+                          "derived"
+                        ]
+                      },
+                      "points": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/number"
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "minItems": 2
+                      }
+                    },
+                    "patternProperties": {
+                      "^x-": {}
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "from",
+                      "to",
+                      "relation",
+                      "points"
+                    ]
+                  }
+                },
+                "lifelines": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "^(?!(?:\\s*[cC][oO][dD][eE]\\s+[oO][fF]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$)|(?:\\s*[dD][eE][pP][lL][oO][yY][mM][eE][nN][tT]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$)|(?:\\s*[dD][yY][nN][aA][mM][iI][cC]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$)|(?:\\s*[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]\\s+[oO][fF]\\s+\\S+(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$)|(?:\\s*(?!(?:[lL][aA][nN][dD][sS][cC][aA][pP][eE]|[cC][oO][nN][tT][eE][xX][tT]|[cC][oO][nN][tT][aA][iI][nN][eE][rR][sS]|[cC][oO][mM][pP][oO][nN][eE][nN][tT][sS]|[cC][oO][dD][eE]|[dD][yY][nN][aA][mM][iI][cC]|[dD][eE][pP][lL][oO][yY][mM][eE][nN][tT]|[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[iI][nN][tT][eE][rR][fF][aA][cC][eE])(?![A-Za-z0-9_-]))[A-Za-z][A-Za-z0-9_-]*(?:\\s+[wW][iI][tT][hH]\\s+(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS])(?:\\s*,\\s*(?:[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]|[pP][aA][tT][tT][eE][rR][nN][sS]|[sS][tT][yY][lL][eE][sS]|[tT][aA][cC][tT][iI][cC][sS]))*)?\\s*$))": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "patternProperties": {
+    "^x-": {}
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "text": {
+      "type": [
+        "string",
+        "number",
+        "boolean"
+      ]
+    },
+    "boolean": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "enum": [
+            "true",
+            "false"
+          ]
+        }
+      ]
+    },
+    "integer": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        }
+      ]
+    },
+    "number": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+        }
+      ]
+    },
+    "collaborator": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "description": {
+              "$ref": "#/definitions/text"
+            },
+            "technology": {
+              "$ref": "#/definitions/text"
+            },
+            "connector": {
+              "enum": [
+                "call",
+                "message",
+                "event",
+                "stream",
+                "shared-data"
+              ]
+            },
+            "responsibility": {
+              "$ref": "#/definitions/text"
+            },
+            "uses": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            },
+            "choices": {
+              "$ref": "#/definitions/choices"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "responsibility": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "know": {
+              "$ref": "#/definitions/text"
+            },
+            "do": {
+              "$ref": "#/definitions/text"
+            },
+            "decide": {
+              "$ref": "#/definitions/text"
+            },
+            "id": {
+              "$ref": "#/definitions/text"
+            },
+            "refines": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            },
+            "requirements": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "choices": {
+      "type": "object",
+      "properties": {
+        "technology": {
+          "type": "object",
+          "properties": {
+            "chosen": {
+              "$ref": "#/definitions/text"
+            },
+            "alternatives": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            },
+            "because": {
+              "$ref": "#/definitions/text"
+            },
+            "decision": {
+              "$ref": "#/definitions/text"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "styles": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "layers",
+              "pipes-and-filters",
+              "publish-subscribe",
+              "client-server",
+              "microservices",
+              "event-driven"
+            ]
+          }
+        },
+        "patterns": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/text"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "pattern": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "role": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "instance": {
+                    "$ref": "#/definitions/text"
+                  },
+                  "decision": {
+                    "$ref": "#/definitions/text"
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "tactics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "person": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/collaborator"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "source": {
+          "$ref": "#/definitions/text"
+        },
+        "external": {
+          "$ref": "#/definitions/boolean"
+        },
+        "in_enterprise": {
+          "$ref": "#/definitions/boolean"
+        },
+        "group": {
+          "$ref": "#/definitions/text"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/collaborator"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "source": {
+          "$ref": "#/definitions/text"
+        },
+        "external": {
+          "$ref": "#/definitions/boolean"
+        },
+        "in_enterprise": {
+          "$ref": "#/definitions/boolean"
+        },
+        "group": {
+          "$ref": "#/definitions/text"
+        },
+        "responsibilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/responsibility"
+          }
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "provides": {
+          "$ref": "#/definitions/provides"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "quality": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "choices": {
+          "$ref": "#/definitions/choices"
+        },
+        "groups": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/group"
+            }
+          },
+          "additionalProperties": false
+        },
+        "containers": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/container"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "container": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/collaborator"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "source": {
+          "$ref": "#/definitions/text"
+        },
+        "group": {
+          "$ref": "#/definitions/text"
+        },
+        "kind": {
+          "enum": [
+            "application",
+            "browser_app",
+            "mobile_app",
+            "desktop_app",
+            "function",
+            "database",
+            "file_store",
+            "queue",
+            "topic"
+          ]
+        },
+        "technology": {
+          "$ref": "#/definitions/text"
+        },
+        "responsibilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/responsibility"
+          }
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "provides": {
+          "$ref": "#/definitions/provides"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "quality": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "choices": {
+          "$ref": "#/definitions/choices"
+        },
+        "stereotypes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "information_holder",
+              "structurer",
+              "service_provider",
+              "coordinator",
+              "controller",
+              "interfacer"
+            ]
+          }
+        },
+        "groups": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/group"
+            }
+          },
+          "additionalProperties": false
+        },
+        "components": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/component"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "component": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/collaborator"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "source": {
+          "$ref": "#/definitions/text"
+        },
+        "group": {
+          "$ref": "#/definitions/text"
+        },
+        "technology": {
+          "$ref": "#/definitions/text"
+        },
+        "responsibilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/responsibility"
+          }
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "provides": {
+          "$ref": "#/definitions/provides"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "quality": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "choices": {
+          "$ref": "#/definitions/choices"
+        },
+        "stereotypes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "information_holder",
+              "structurer",
+              "service_provider",
+              "coordinator",
+              "controller",
+              "interfacer"
+            ]
+          }
+        },
+        "code": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/code"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "code": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/collaborator"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "source": {
+          "$ref": "#/definitions/text"
+        },
+        "kind": {
+          "enum": [
+            "class",
+            "interface",
+            "abstract_class",
+            "enum",
+            "function",
+            "module"
+          ]
+        },
+        "responsibilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/responsibility"
+          }
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "provides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "quality": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "choices": {
+          "$ref": "#/definitions/choices"
+        },
+        "stereotypes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "information_holder",
+              "structurer",
+              "service_provider",
+              "coordinator",
+              "controller",
+              "interfacer"
+            ]
+          }
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "extends": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/text"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            }
+          ]
+        },
+        "implements": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/text"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            }
+          ]
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "branch": {
+      "type": "object",
+      "properties": {
+        "when": {
+          "$ref": "#/definitions/text"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/step"
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "step": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/definitions/text"
+            },
+            "to": {
+              "$ref": "#/definitions/text"
+            },
+            "description": {
+              "$ref": "#/definitions/text"
+            },
+            "technology": {
+              "$ref": "#/definitions/text"
+            },
+            "connector": {
+              "enum": [
+                "call",
+                "message",
+                "event",
+                "stream",
+                "shared-data"
+              ]
+            },
+            "responsibility": {
+              "$ref": "#/definitions/text"
+            },
+            "uses": {
+              "$ref": "#/definitions/text"
+            },
+            "alt": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/branch"
+              }
+            },
+            "par": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/branch"
+              }
+            },
+            "opt": {
+              "$ref": "#/definitions/branch"
+            },
+            "loop": {
+              "$ref": "#/definitions/branch"
+            },
+            "break": {
+              "$ref": "#/definitions/branch"
+            }
+          },
+          "patternProperties": {
+            "^x-": {},
+            ".+->.+": {
+              "$ref": "#/definitions/text"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/step"
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "kind": {
+          "enum": [
+            "device",
+            "environment",
+            "infrastructure"
+          ]
+        },
+        "technology": {
+          "$ref": "#/definitions/text"
+        },
+        "instances": {
+          "$ref": "#/definitions/integer"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "nodes": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/node"
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "collaborators": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "description": {
+                      "$ref": "#/definitions/text"
+                    },
+                    "technology": {
+                      "$ref": "#/definitions/text"
+                    }
+                  },
+                  "patternProperties": {
+                    "^x-": {}
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "nodes": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/node"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "decision": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "$ref": "#/definitions/text"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "accepted",
+            "superseded",
+            "rejected"
+          ]
+        },
+        "context": {
+          "$ref": "#/definitions/text"
+        },
+        "decision": {
+          "$ref": "#/definitions/text"
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "consequences": {
+          "$ref": "#/definitions/text"
+        },
+        "affects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        "supersedes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/text"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            }
+          ]
+        },
+        "date": {
+          "$ref": "#/definitions/text"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "requirement": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "$ref": "#/definitions/text"
+            },
+            "kind": {
+              "enum": [
+                "functional",
+                "quality",
+                "constraint"
+              ]
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "view": {
+      "if": {
+        "required": [
+          "view"
+        ],
+        "properties": {
+          "view": {
+            "type": "string",
+            "pattern": "^\\s*[iI][nN][tT][eE][rR][fF][aA][cC][eE][sS]\\s+[oO][fF]\\s"
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "$ref": "#/definitions/text"
+          },
+          "title": {
+            "$ref": "#/definitions/text"
+          },
+          "description": {
+            "$ref": "#/definitions/text"
+          },
+          "show_title": {
+            "$ref": "#/definitions/boolean"
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/text"
+            }
+          },
+          "direction": {
+            "enum": [
+              "down",
+              "right"
+            ]
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "else": {
+        "if": {
+          "required": [
+            "view"
+          ],
+          "properties": {
+            "view": {
+              "type": "string",
+              "pattern": "^\\s*[iI][nN][tT][eE][rR][fF][aA][cC][eE]\\s"
+            }
+          }
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/definitions/text"
+            },
+            "title": {
+              "$ref": "#/definitions/text"
+            },
+            "description": {
+              "$ref": "#/definitions/text"
+            },
+            "show_title": {
+              "$ref": "#/definitions/boolean"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "else": {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/definitions/text"
+            },
+            "title": {
+              "$ref": "#/definitions/text"
+            },
+            "description": {
+              "$ref": "#/definitions/text"
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            },
+            "exclude": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            },
+            "direction": {
+              "enum": [
+                "down",
+                "right"
+              ]
+            },
+            "annotations": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "interfaces",
+                  "patterns",
+                  "styles",
+                  "tactics"
+                ]
+              }
+            },
+            "show_title": {
+              "$ref": "#/definitions/boolean"
+            },
+            "derived": {
+              "$ref": "#/definitions/boolean"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "provides": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/text"
+          }
+        },
+        {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/interface"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "interface": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/text"
+        },
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "style": {
+          "enum": [
+            "rest",
+            "rpc",
+            "graphql",
+            "soap",
+            "message",
+            "event",
+            "stream",
+            "library",
+            "file"
+          ]
+        },
+        "technology": {
+          "$ref": "#/definitions/text"
+        },
+        "version": {
+          "$ref": "#/definitions/text"
+        },
+        "restrictions": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/text"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/text"
+              }
+            }
+          ]
+        },
+        "errors": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/error"
+            }
+          },
+          "additionalProperties": false
+        },
+        "operations": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/operation"
+            }
+          },
+          "additionalProperties": false
+        },
+        "types": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9_]*$": {
+              "$ref": "#/definitions/typeDefinition"
+            }
+          },
+          "additionalProperties": false
+        },
+        "vocabulary": {
+          "type": "object",
+          "patternProperties": {
+            ".+": {
+              "$ref": "#/definitions/text"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "syntax": {
+              "$ref": "#/definitions/text"
+            },
+            "input": {
+              "$ref": "#/definitions/typeUse"
+            },
+            "output": {
+              "$ref": "#/definitions/typeUse"
+            },
+            "purpose": {
+              "$ref": "#/definitions/text"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            },
+            "restrictions": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            },
+            "errors": {
+              "type": "object",
+              "patternProperties": {
+                "^[A-Za-z][A-Za-z0-9_-]*$": {
+                  "$ref": "#/definitions/error"
+                }
+              },
+              "additionalProperties": false
+            },
+            "examples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/example"
+              }
+            },
+            "realizes": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "typeUse": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/field"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "typeDefinition": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "$ref": "#/definitions/text"
+        },
+        "fields": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_-]*$": {
+              "$ref": "#/definitions/field"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "field": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "$ref": "#/definitions/text"
+            },
+            "meaning": {
+              "$ref": "#/definitions/text"
+            },
+            "unit": {
+              "$ref": "#/definitions/text"
+            },
+            "format": {
+              "$ref": "#/definitions/text"
+            },
+            "required": {
+              "$ref": "#/definitions/boolean"
+            },
+            "values": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    ".+": {
+                      "$ref": "#/definitions/text"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "constraints": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/text"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/text"
+                  }
+                }
+              ]
+            },
+            "example": {}
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "when": {
+              "$ref": "#/definitions/text"
+            },
+            "code": {
+              "$ref": "#/definitions/text"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "example": {
+      "type": "object",
+      "properties": {
+        "input": {},
+        "output": {},
+        "note": {
+          "$ref": "#/definitions/text"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "input"
+          ]
+        },
+        {
+          "required": [
+            "output"
+          ]
+        },
+        {
+          "required": [
+            "note"
+          ]
+        }
+      ]
+    }
+  }
+}

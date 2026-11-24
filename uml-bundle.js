@@ -2742,6 +2742,16 @@
     el.setAttribute('transform', prior ? prior + ' ' + next : next);
   }
 
+  // Nodes that are not part of the drawn diagram, so the route and obstacle
+  // collectors and the decoration mover never read them: definitions, the UML
+  // editor's hit layer, and any subtree a host marks with data-layout-ignore
+  // (an overlay it draws over the diagram, such as a listbox of targets).
+  var OUTSIDE_LAYOUT_SELECTOR = 'defs,.uml-pg-edit-layer,[data-layout-ignore]';
+
+  function isOutsideLayout(el) {
+    return !!el.closest(OUTSIDE_LAYOUT_SELECTOR);
+  }
+
   function moveRouteDecorations(svg, routeEl, oldPoints, newPoints) {
     if (!svg || !oldPoints || !newPoints || oldPoints.length < 2 || newPoints.length < 2) return;
     var oldStart = oldPoints[0];
@@ -2758,7 +2768,7 @@
 
     if (routeId) {
       var routeOwned = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
-        if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+        if (el === routeEl || isOutsideLayout(el)) return false;
         return routeAttribute(el, 'data-layout-route-id') === routeId;
       });
       for (var ri = 0; ri < routeOwned.length; ri++) {
@@ -2791,7 +2801,7 @@
     }
 
     var candidates = Array.prototype.slice.call(svg.querySelectorAll('polygon,polyline,path,circle,line,text')).filter(function(el) {
-      if (el === routeEl || el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+      if (el === routeEl || isOutsideLayout(el)) return false;
       if (explicitlyMoved.indexOf(el) >= 0) return false;
       var b = boxToSvgSpace(el, safeElementBBox(el));
       if (!b) return false;
@@ -2847,7 +2857,7 @@
 
   function collectRouteObstacleBoxes(svg) {
     return Array.prototype.slice.call(svg.querySelectorAll('rect,ellipse,circle,polygon,path')).filter(function(el) {
-      if (el.closest('defs') || el.closest('.uml-pg-edit-layer')) return false;
+      if (isOutsideLayout(el)) return false;
       var tag = el.tagName.toLowerCase();
       if (tag === 'path' && (el.getAttribute('fill') || 'none') === 'none') return false;
       var b = safeElementBBox(el);
@@ -2860,8 +2870,7 @@
     if (!svg) return [];
     var obstacles = collectRouteObstacleBoxes(svg);
     var candidates = Array.prototype.slice.call(svg.querySelectorAll('line,polyline,path,rect')).filter(function(el) {
-      return !el.closest('defs') &&
-        !el.closest('.uml-pg-edit-layer') &&
+      return !isOutsideLayout(el) &&
         routeAttribute(el, 'data-layout-route-decorative') !== 'true';
     });
     var routes = [];
@@ -3004,6 +3013,58 @@
     return changed;
   }
 
+  // ─── Stored routes that no longer join their boxes (opt-in) ─────
+  //
+  // A stored route is detached when its first point is not on the border of
+  // its source box or its last point is not on the border of its target box,
+  // because a box moved or changed size after the route was saved. By default
+  // applyLayoutRoutes applies every stored route. Inside
+  // renderSkippingDetachedRoutes(draw) it leaves each detached route out, so
+  // its line keeps the route the renderer drew, and the call returns the ids
+  // of the routes it left out. Callers that drop stale bends (the C4 editor's
+  // delegated UML views) thus draw once instead of drawing twice.
+
+  // How far a route's end may lie from a side of its box and still lie on it:
+  // the tolerance classEdgeForPoint / deploymentEdgeForPoint use.
+  var ROUTE_END_BORDER_TOLERANCE = 1.5;
+
+  // The ids applyLayoutRoutes left out during renderSkippingDetachedRoutes;
+  // null outside it (every stored route is applied).
+  var skippedDetachedRouteIds = null;
+
+  function renderSkippingDetachedRoutes(draw) {
+    var outer = skippedDetachedRouteIds;
+    var skipped = [];
+    skippedDetachedRouteIds = skipped;
+    try {
+      draw();
+    } finally {
+      skippedDetachedRouteIds = outer;
+    }
+    return skipped;
+  }
+
+  function pointLiesOnBoxBorder(point, box) {
+    var tol = ROUTE_END_BORDER_TOLERANCE;
+    var near = function(value, edge) { return Math.abs(value - edge) <= tol; };
+    var between = function(value, low, high) { return value >= low - tol && value <= high + tol; };
+    var right = box.x + box.width;
+    var bottom = box.y + box.height;
+    return (between(point.x, box.x, right) && (near(point.y, box.y) || near(point.y, bottom))) ||
+      (between(point.y, box.y, bottom) && (near(point.x, box.x) || near(point.x, right)));
+  }
+
+  // Whether `points` (SVG user space), drawn as `route` (a collectEditableRoutes
+  // entry), would start on its source box's border and end on its target's.
+  // The points are measured as the route's element will hold them.
+  function storedRouteJoinsItsBoxes(svg, route, points) {
+    var sourceBox = route.source ? renderedLayoutBox(svg, route.source) : null;
+    var targetBox = route.target ? renderedLayoutBox(svg, route.target) : null;
+    if (!sourceBox || !targetBox) return false;
+    var drawn = pointsToSvgSpace(route.element, pointsFromSvgSpace(route.element, points));
+    return pointLiesOnBoxBorder(drawn[0], sourceBox) && pointLiesOnBoxBorder(drawn[drawn.length - 1], targetBox);
+  }
+
   function applyLayoutRoutes(container, layoutMetadata) {
     if (!container || !layoutMetadata || !layoutMetadata.routes) return;
     var svg = container.querySelector('svg');
@@ -3026,6 +3087,10 @@
         if (isFinite(idx) && routes[idx]) targetRoute = routes[idx];
       }
       if (!targetRoute) continue;
+      if (skippedDetachedRouteIds && !storedRouteJoinsItsBoxes(svg, targetRoute, route.points)) {
+        skippedDetachedRouteIds.push(id);
+        continue;
+      }
       moveRouteDecorations(svg, targetRoute.element, targetRoute.points, route.points);
       targetRoute.element = setRoutePointsForElement(targetRoute.element, route.points) || targetRoute.element;
     }
@@ -4072,7 +4137,8 @@
     'folder-tree': 'uml-folder-tree-diagram-container',
     venn: 'uml-venn-diagram-container',
     er: 'uml-er-diagram-container',
-    crc: 'uml-crc-diagram-container'
+    crc: 'uml-crc-diagram-container',
+    c4: 'uml-c4-diagram-container'
   };
 
   // A drawing compact layout could not make overlap-free says so on its
@@ -4111,7 +4177,8 @@
     'folder-tree': 'Folder tree diagram',
     venn: 'Venn diagram',
     er: 'Entity-relationship diagram',
-    crc: 'Class-responsibility-collaborator cards'
+    crc: 'Class-responsibility-collaborator cards',
+    c4: 'C4 model diagram'
   };
 
   function normalizeDiagramType(type) {
@@ -4206,6 +4273,10 @@
     return source ? { type: source.type, text: source.text } : null;
   }
 
+  // Figures of these types fit their pane only at a readable size (`data-uml-fit="readable"`, see
+  // sizeDiagramForReadability): a C4 view's labels carry its notation, so it scrolls rather than shrink them.
+  var READABLE_FIT_TYPES = { c4: true };
+
   function createArchUmlFigure(type, text, explicitCaption) {
     var captionInfo = extractArchUmlCaption(text, type);
     const attributeCaption = (explicitCaption || '').trim();
@@ -4221,6 +4292,7 @@
     var container = document.createElement('div');
     prepareDiagramContainer(container, normalized);
     container.setAttribute('data-uml-type', normalized);
+    if (READABLE_FIT_TYPES[normalized]) container.setAttribute('data-uml-fit', 'readable');
     container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
@@ -4257,7 +4329,8 @@
     '.uml-folder-tree-diagram-container,' +
     '.uml-venn-diagram-container,' +
     '.uml-er-diagram-container,' +
-    '.uml-crc-diagram-container';
+    '.uml-crc-diagram-container,' +
+    '.uml-c4-diagram-container';
   var refitQueued = false;
   var settleTimer = null;
   var settlePasses = 0;
@@ -5092,9 +5165,11 @@
       diagramViews.delete(container);
       view = null;
     }
-    // Hidden render staging/measurement hosts must never produce controls.
+    // Hidden render staging/measurement hosts must never produce controls, and
+    // fitting would shrink a readable-fit figure below its readable size.
     if (!container.isConnected || !container.clientWidth || !container.querySelector('svg') ||
-        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]')) {
+        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]') ||
+        fitsOnlyReadably(container)) {
       if (view) { view.host.hidden = true; releaseDiagramViewport(view); }
       return;
     }
@@ -5170,6 +5245,15 @@
       })
     : null;
 
+  /**
+   * Whether `container` is (or is drawn inside) a figure that fits its pane
+   * only at a readable size: `data-uml-fit="readable"`, which the figure
+   * wrapper sets for READABLE_FIT_TYPES (and the static build mirrors).
+   */
+  function fitsOnlyReadably(container) {
+    return !!(container.closest && container.closest('[data-uml-fit="readable"]'));
+  }
+
   function sizeDiagramForReadability(container) {
     var svg = container && container.querySelector('svg');
     if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
@@ -5198,6 +5282,16 @@
       : width + 'px';
     if (svg.style.getPropertyValue('--uml-readable-width') !== readableWidth) {
       svg.style.setProperty('--uml-readable-width', readableWidth);
+    }
+    // A readable-fit figure takes its pane's width (100cqi: the figure is the
+    // size container, css/diagram-view.css), but never less than its readable
+    // width and never more than its natural width unless the readable width
+    // needs it. Wider than the pane even then, it scrolls at that width.
+    if (fitsOnlyReadably(container) && isFinite(smallestFont)) {
+      var fitWidth = 'max(' + (width / smallestFont) + 'em, min(' + width + 'px, 100cqi))';
+      if (svg.style.getPropertyValue('--uml-readable-fit-width') !== fitWidth) {
+        svg.style.setProperty('--uml-readable-fit-width', fitWidth);
+      }
     }
     updateDiagramScrollability(container);
     if (diagramScrollObserver) diagramScrollObserver.observe(container);
@@ -7021,6 +7115,7 @@
     layoutRoutePointsToString: layoutRoutePointsToString,
     applyRenderedPositions: applyRenderedPositions,
     applyLayoutRoutes: applyLayoutRoutes,
+    renderSkippingDetachedRoutes: renderSkippingDetachedRoutes,
     renderedLayoutBox: renderedLayoutBox,
     renderedSvgBox: renderedBox,
     parseHighlightColor: parseHighlightColor,
@@ -7174,6 +7269,7 @@
         venn:       function () { return window.UMLVennDiagram; },
         er:         function () { return window.UMLERDiagram; },
         crc:        function () { return window.UMLCRCDiagram; },
+        c4:         function () { return window.UMLC4Diagram; },
       };
 
       // 1. Process data-uml-type attributes
@@ -7216,6 +7312,7 @@
         venn:       'pre > code.diagram-venn, pre > code.language-venn',
         er:         'pre > code.diagram-er, pre > code.language-er',
         crc:        'pre > code.diagram-crc, pre > code.language-crc',
+        c4:         'pre > code.diagram-c4, pre > code.language-c4',
       };
       for (var key in RENDERERS) {
         var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
@@ -17346,6 +17443,13 @@
   // An unquoted title excludes arrow characters, so `box -> b` stays a message.
   var BOX_START_RE = /^box(?:\s+(?:"([^"]*)"|([^"<>#:\s][^"<>#:]*?)))?(?:\s*<<\s*(.+?)\s*>>)?\s*$/i;
 
+  // `layout wrap <width>` breaks head names and message labels between words so
+  // that no line is wider than <width> units (a longer single word keeps its
+  // own line). A narrower drawing keeps its text larger when it is scaled to
+  // fit a column or a printed page.
+  var WRAP_DIRECTIVE_RE = /^layout\s+wrap\s+(\d+)\s*$/i;
+  var MIN_WRAP_WIDTH = 40;
+
   function parse(text) {
     var lines = text.split('\n');
     var participants = [];      // { id, label, box? }
@@ -17356,11 +17460,17 @@
     var openBox = null;         // index into boxes while a box is open
     var shadowEnabled = true;
     var layoutPreference = null;
+    var wrapWidth = null;       // `layout wrap <width>`: widest line of a head name or message label
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
       if (!line || line === '@startuml' || line === '@enduml') continue;
 
+      var wrapMatch = WRAP_DIRECTIVE_RE.exec(line);
+      if (wrapMatch) {
+        wrapWidth = Math.max(MIN_WRAP_WIDTH, parseInt(wrapMatch[1], 10));
+        continue;
+      }
       var layoutDirective = UMLShared.parseLayoutDirective(line);
       if (layoutDirective) {
         if (layoutDirective.shadowEnabled !== null && layoutDirective.shadowEnabled !== undefined) {
@@ -17565,6 +17675,7 @@
       boxes: boxes,
       shadowEnabled: shadowEnabled,
       layoutPreference: layoutPreference,
+      wrapWidth: wrapWidth,
     };
   }
 
@@ -17640,6 +17751,65 @@
       return { text: id + ': ' + label, isInstance: true };
     }
     return { text: label, isInstance: false };
+  }
+
+  // ─── Wrapped text (`layout wrap <width>`) ──────────────────────────
+
+  // Baseline distance between the lines of a wrapped message label.
+  var MESSAGE_LINE_STEP = 16;
+  // Share of the default lifeline gap kept between the heads of a wrapped diagram.
+  var WRAPPED_GAP_FACTOR = 0.8;
+
+  // `text` broken between words into lines at most `wrapWidth` units wide; a
+  // word wider than that keeps a line of its own. One line without a width.
+  function wrapLines(text, wrapWidth, bold, fontSize) {
+    if (!wrapWidth || !text) return [text];
+    var lines = [];
+    var line = '';
+    var words = text.split(/\s+/);
+    for (var i = 0; i < words.length; i++) {
+      var candidate = line ? line + ' ' + words[i] : words[i];
+      if (!line || UMLShared.textWidth(candidate, bold, fontSize) <= wrapWidth) {
+        line = candidate;
+      } else {
+        lines.push(line);
+        line = words[i];
+      }
+    }
+    lines.push(line);
+    return lines;
+  }
+
+  function widestLine(lines, bold, fontSize) {
+    var widest = 0;
+    for (var i = 0; i < lines.length; i++) widest = Math.max(widest, UMLShared.textWidth(lines[i], bold, fontSize));
+    return widest;
+  }
+
+  // The lines of a lifeline head's name.
+  function headLines(part, wrapWidth) {
+    return wrapLines(participantDisplay(part).text, wrapWidth, true, CFG.fontSizeBold);
+  }
+
+  // The lines of a message's label; none for an unlabelled message.
+  function messageLines(message, wrapWidth) {
+    return message.label ? wrapLines(message.label, wrapWidth, false, CFG.fontSize) : [];
+  }
+
+  // Width of a message label as drawn: its widest wrapped line (or the whole
+  // label when `lines` is absent or one line) and any direction cue.
+  function messageLabelWidth(message, lines) {
+    if (!lines || lines.length <= 1) return UMLShared.labelDirectionTextWidth(message.label, message.labelDirection, CFG.fontSize);
+    return widestLine(lines, false, CFG.fontSize) + (message.labelDirection ? 18 : 0);
+  }
+
+  // One <text> element whose first line sits at `y`; further lines are tspans
+  // `step` apart. `attrs` follows the position attributes verbatim.
+  function textLinesSvg(lines, x, y, step, attrs) {
+    var body = lines.length === 1 ? UMLShared.escapeXml(lines[0]) : lines.map(function (line, index) {
+      return '<tspan x="' + x + '"' + (index ? ' dy="' + step + '"' : '') + '>' + UMLShared.escapeXml(line) + '</tspan>';
+    }).join('');
+    return '<text x="' + x + '" y="' + y + '"' + attrs + '>' + body + '</text>';
   }
 
   // ─── Organization lanes ───────────────────────────────────────────
@@ -17867,8 +18037,10 @@
       actorNameDy: UMLShared.ACTOR_H + CFG.fontSizeBold + 2 };
   }
 
-  function compactHeadGeometry(participants) {
-    var rectH = COMPACT.headPadY * 2 + CFG.lineHeight;
+  // `extraHeadH`: the room the further lines of the longest wrapped name take.
+  function compactHeadGeometry(participants, extraHeadH) {
+    extraHeadH = extraHeadH || 0;
+    var rectH = COMPACT.headPadY * 2 + CFG.lineHeight + extraHeadH;
     var rectBaseline = rectH / 2 + CFG.fontSize * 0.35;
     var actorBaseline = UMLShared.ACTOR_H + COMPACT.actorNameGap;
     var baseline = 0;
@@ -17879,7 +18051,7 @@
     for (var j = 0; j < participants.length; j++) {
       var isActor = participants[j].isActor;
       top.push(baseline - (isActor ? actorBaseline : rectBaseline));
-      height.push(isActor ? actorBaseline + COMPACT.actorNameDescent : rectH);
+      height.push(isActor ? actorBaseline + COMPACT.actorNameDescent + extraHeadH : rectH);
       bandH = Math.max(bandH, top[j] + height[j]);
     }
     return { top: top, height: height, bandH: bandH, createdH: rectH, actorNameDy: actorBaseline };
@@ -17931,10 +18103,6 @@
     if (toIdx === gap + 1) rightInset = (creates ? partWidths[toIdx] / 2 : allowance.left[toIdx]) + COMPACT.arrowPad;
     if (toIdx === gap) leftInset = (creates ? partWidths[toIdx] / 2 : allowance.right[toIdx]) + COMPACT.arrowPad;
     return { leftInset: leftInset, rightInset: rightInset };
-  }
-
-  function messageLabelWidth(m) {
-    return UMLShared.labelDirectionTextWidth(m.label, m.labelDirection, CFG.fontSize);
   }
 
   function noteRect(m) {
@@ -18119,25 +18287,37 @@
       : CFG.firstMessageGapY;
 
     // ── Measure participant boxes ──
+    var wrapWidth = parsed.wrapWidth || null;
+    var headTexts = [];
+    var headLineCount = 1;
     var partWidths = [];
     var partMaxW = 0;
     for (var pi = 0; pi < participants.length; pi++) {
       var part = participants[pi];
-      var displayText = participantDisplay(part).text;
-      var pw = UMLShared.textWidth(displayText, true, CFG.fontSizeBold) + spacing.participantPadX * 2;
+      headTexts.push(headLines(part, wrapWidth));
+      headLineCount = Math.max(headLineCount, headTexts[pi].length);
+      var pw = widestLine(headTexts[pi], true, CFG.fontSizeBold) + spacing.participantPadX * 2;
       pw = Math.max(pw, spacing.participantMinW);
       partWidths.push(pw);
       partMaxW = Math.max(partMaxW, pw);
     }
-    var partH = CFG.participantPadY * 2 + CFG.lineHeight;
+    var extraHeadH = (headLineCount - 1) * CFG.lineHeight;
+    var partH = CFG.participantPadY * 2 + CFG.lineHeight + extraHeadH;
     // Expand partH if any actors present (stick figures are taller)
     for (var api = 0; api < participants.length; api++) {
       if (participants[api].isActor) {
-        partH = Math.max(partH, UMLShared.ACTOR_H + CFG.fontSizeBold + 8);
+        partH = Math.max(partH, UMLShared.ACTOR_H + CFG.fontSizeBold + 8 + extraHeadH);
         break;
       }
     }
-    var heads = compact ? compactHeadGeometry(participants) : uniformHeadGeometry(participants, partH);
+    var messageTexts = messages.map(function (message) {
+      return message.type === 'message' ? messageLines(message, wrapWidth) : [];
+    });
+    // A wrapped label's further lines need room: above a message's arrow, below a self-call's loop.
+    function extraLabelH(index) {
+      return Math.max(0, messageTexts[index].length - 1) * MESSAGE_LINE_STEP;
+    }
+    var heads = compact ? compactHeadGeometry(participants, extraHeadH) : uniformHeadGeometry(participants, partH);
     partH = heads.bandH;
     var createdHeadH = heads.createdH;
     var allowance = compact ? barAllowances(participants, messages) : null;
@@ -18157,8 +18337,10 @@
     // participant boxes and the full widths of any intermediate boxes count
     // toward that span; whatever is left must be covered by gaps.
     var labelSideMargin = 16;
+    // Wrapped labels stack instead of spreading, so the gaps they do not widen below can be narrower.
+    var defaultGap = wrapWidth ? Math.round(spacing.participantGap * WRAPPED_GAP_FACTOR) : spacing.participantGap;
     var gapMin = new Array(Math.max(0, participants.length - 1));
-    for (var gi0 = 0; gi0 < gapMin.length; gi0++) gapMin[gi0] = spacing.participantGap;
+    for (var gi0 = 0; gi0 < gapMin.length; gi0++) gapMin[gi0] = defaultGap;
 
     function findPIdxByIdName(id) {
       for (var pp = 0; pp < participants.length; pp++) {
@@ -18184,7 +18366,7 @@
       var bIdx = findPIdxByIdName(mm.to);
       if (aIdx < 0 || bIdx < 0) continue;
       var lo = Math.min(aIdx, bIdx), hi = Math.max(aIdx, bIdx);
-      var labelW = UMLShared.labelDirectionTextWidth(mm.label, mm.labelDirection, CFG.fontSize);
+      var labelW = messageLabelWidth(mm, messageTexts[mli]);
       var requiredSpan = labelW + labelSideMargin * 2;
       var intermediateW = 0;
       for (var ki = lo + 1; ki < hi; ki++) intermediateW += partWidths[ki];
@@ -18318,10 +18500,11 @@
 
       if (msg.type === 'message') {
         if (compact) curY = compactRowY(msg, mi);
+        if (msg.from !== msg.to) curY += extraLabelH(mi);
         lastMsgY = curY;
         lastEventY = curY;
         msgYs.push(curY);
-        curY += messageGapY;
+        curY += messageGapY + (msg.from === msg.to ? extraLabelH(mi) : 0);
         var createsHead = Object.prototype.hasOwnProperty.call(createYs, msg.to) && lastMsgY <= createYs[msg.to] + createdHeadH;
         if (createsHead) {
           // The creation arrow enters the header center. The following
@@ -18546,7 +18729,7 @@
       var sm = messages[smi];
       if (sm.type === 'message' && sm.from === sm.to && (sm.label || sm.labelDirection)) {
         var smIdx = findPIdxByName(sm.from);
-        var selfLabelW = UMLShared.labelDirectionTextWidth(sm.label, sm.labelDirection, CFG.fontSize);
+        var selfLabelW = messageLabelWidth(sm, messageTexts[smi]);
         var selfRightEdge = partX[smIdx] + halfAct + CFG.activationOffset + selfW + 6 + selfLabelW + CFG.svgPad;
         if (selfRightEdge > totalW) {
           totalW = selfRightEdge;
@@ -18829,7 +19012,7 @@
         getEdgeX(selfIndex, selfY + selfMessageH, 'right', 'target', selfMessage.msgType)
       ) + selfW;
       return loopRight + ((selfMessage.label || selfMessage.labelDirection)
-        ? 6 + UMLShared.labelDirectionTextWidth(selfMessage.label, selfMessage.labelDirection, CFG.fontSize)
+        ? 6 + messageLabelWidth(selfMessage, messageTexts[messageIndex])
         : 0);
     }
 
@@ -19031,7 +19214,8 @@
               { x: selfSendX, y: my }, { x: selfLoopX, y: my },
               { x: selfLoopX, y: my + selfMessageH }, { x: selfReceiveX, y: my + selfMessageH }
             ]);
-            recordLabel(sequenceMessageRouteId(m), UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
+            recordLabel(sequenceMessageRouteId(m), messageTexts[mi2].length > 1 ? messageTexts[mi2]
+              : UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
               selfLoopX + 6, my + 4, 'start', m.labelDirection);
           }
           svg.push('<polyline points="' + selfSendX + ',' + my + ' ' + selfLoopX + ',' + my + ' ' +
@@ -19042,16 +19226,20 @@
           if (m.label || m.labelDirection) {
             var selfLabelX = selfLoopX + 6;
             var selfLabelY = my + 4;
-            pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), selfLabelX, selfLabelY, 'start', colors);
+            var selfLines = messageTexts[mi2];
+            var selfPlacementLines = selfLines.length ? selfLines : [UMLShared.labelDirectionPlacementText(m.label, m.labelDirection)];
+            for (var sli = 0; sli < selfPlacementLines.length; sli++) {
+              pushLaneLabelBackdrop(svg, lanes, selfPlacementLines[sli], selfLabelX, selfLabelY + sli * MESSAGE_LINE_STEP, 'start', colors);
+            }
             if (m.label) {
-              svg.push('<text x="' + selfLabelX + '" y="' + selfLabelY +
-                '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              svg.push(textLinesSvg(selfLines, selfLabelX, selfLabelY, MESSAGE_LINE_STEP,
+                ' font-size="' + CFG.fontSize + '" fill="' + colors.text +
                 '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
-                selfRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
+                selfRouteAttrs));
             }
             UMLShared.pushLabelDirectionTriangle(
               svg,
-              m.label,
+              selfLines.length > 1 ? selfLines[0] : m.label,
               m.labelDirection,
               { x: selfLabelX, y: selfLabelY, anchor: 'start' },
               [
@@ -19063,7 +19251,9 @@
               colors,
               { fontSize: CFG.fontSize }
             );
-            pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), selfLabelX, selfLabelY, 'start');
+            for (var slo = 0; slo < selfPlacementLines.length; slo++) {
+              pushSequenceLabelObstacle(selfPlacementLines[slo], selfLabelX, selfLabelY + slo * MESSAGE_LINE_STEP, 'start');
+            }
           }
         } else {
           // Line
@@ -19086,27 +19276,36 @@
           if (m.label || m.labelDirection) {
             var labelX = compact ? compactLabelX(mi2, fromIdx, toIdx, createsTarget) : (x1 + x2) / 2;
             var labelY = my - 6;
+            var labelLines = messageTexts[mi2];
+            var placementLines = labelLines.length ? labelLines : [UMLShared.labelDirectionPlacementText(m.label, m.labelDirection)];
+            // The last line sits just above the arrow; earlier lines stack upward.
+            var firstLabelY = labelY - (placementLines.length - 1) * MESSAGE_LINE_STEP;
             if (scene) {
-              recordLabel(sequenceMessageRouteId(m), UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
-                labelX, labelY, 'middle', m.labelDirection);
+              recordLabel(sequenceMessageRouteId(m), labelLines.length > 1 ? labelLines
+                : UMLShared.labelDirectionPlacementText(m.label, m.labelDirection),
+                labelX, firstLabelY, 'middle', m.labelDirection);
             }
-            pushLaneLabelBackdrop(svg, lanes, UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), labelX, labelY, 'middle', colors);
+            for (var pli = 0; pli < placementLines.length; pli++) {
+              pushLaneLabelBackdrop(svg, lanes, placementLines[pli], labelX, firstLabelY + pli * MESSAGE_LINE_STEP, 'middle', colors);
+            }
             if (m.label) {
-              svg.push('<text x="' + labelX + '" y="' + labelY +
-                '" text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              svg.push(textLinesSvg(labelLines, labelX, firstLabelY, MESSAGE_LINE_STEP,
+                ' text-anchor="middle" font-size="' + CFG.fontSize + '" fill="' + colors.text +
                 '" stroke="' + colors.fill + '" stroke-width="3" stroke-opacity="0.85" paint-order="stroke"' +
-                messageRouteAttrs + '>' + UMLShared.escapeXml(m.label) + '</text>');
+                messageRouteAttrs));
             }
             UMLShared.pushLabelDirectionTriangle(
               svg,
-              m.label,
+              labelLines.length > 1 ? labelLines[labelLines.length - 1] : m.label,
               m.labelDirection,
               { x: labelX, y: labelY, anchor: 'middle' },
               [{ x: x1, y: my }, { x: x2, y: my }],
               colors,
               { fontSize: CFG.fontSize }
             );
-            pushSequenceLabelObstacle(UMLShared.labelDirectionPlacementText(m.label, m.labelDirection), labelX, labelY, 'middle');
+            for (var plo = 0; plo < placementLines.length; plo++) {
+              pushSequenceLabelObstacle(placementLines[plo], labelX, firstLabelY + plo * MESSAGE_LINE_STEP, 'middle');
+            }
           }
         }
       } else if (m.type === 'create') {
@@ -19127,11 +19326,11 @@
         pushSequenceRectObstacle(cpx, my, partWidths[cIdx], createdHeadH);
         if (scene) scene.addNode({ id: 'head:' + cpart.id, x: cpx, y: my, width: partWidths[cIdx], height: createdHeadH, kind: 'head', parent: frameOf[mi2] });
         var cDisp = participantDisplay(cpart);
-        var cTextY = my + createdHeadH / 2 + CFG.fontSize * 0.35;
-        svg.push('<text x="' + partX[cIdx] + '" y="' + cTextY +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
-          (cDisp.isInstance ? ' text-decoration="underline"' : '') + '>' +
-          UMLShared.escapeXml(cDisp.text) + '</text>');
+        var cLines = headTexts[cIdx];
+        var cTextY = my + createdHeadH / 2 - (cLines.length - 1) * CFG.lineHeight / 2 + CFG.fontSize * 0.35;
+        svg.push(textLinesSvg(cLines, partX[cIdx], cTextY, CFG.lineHeight,
+          ' text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
+          (cDisp.isInstance ? ' text-decoration="underline"' : '')));
       } else if (m.type === 'destroy') {
         // Draw X mark on the participant
         var dIdx = 0;
@@ -19311,7 +19510,7 @@
     }
 
     // ── Draw participant boxes (top, skip created participants) ──
-    drawParticipantBoxes(svg, participants, partX, partWidths, heads, headTop, colors, createYs);
+    drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, heads, headTop, colors, createYs);
     if (scene) recordHeads();
 
     // ── Guard conditions on top of everything ──
@@ -19356,9 +19555,20 @@
       return { x: left, y: baseline - fontSize * 0.95, width: w, height: fontSize * 1.2 };
     }
 
+    // `text` is one line, or the lines of a wrapped label whose first line
+    // sits at `baseline` and the rest MESSAGE_LINE_STEP apart below it.
     function recordLabel(owner, text, x, baseline, anchor, hasDirection) {
-      if (!text) return;
-      var rect = textRect(text, x, baseline, anchor, CFG.fontSize, false, hasDirection ? 18 : 0);
+      var lines = Array.isArray(text) ? text.filter(Boolean) : (text ? [text] : []);
+      if (!lines.length) return;
+      var rect = null;
+      for (var li = 0; li < lines.length; li++) {
+        var lineRect = textRect(lines[li], x, baseline + li * MESSAGE_LINE_STEP, anchor, CFG.fontSize, false, hasDirection ? 18 : 0);
+        rect = rect ? {
+          x: Math.min(rect.x, lineRect.x), y: Math.min(rect.y, lineRect.y),
+          width: Math.max(rect.x + rect.width, lineRect.x + lineRect.width) - Math.min(rect.x, lineRect.x),
+          height: Math.max(rect.y + rect.height, lineRect.y + lineRect.height) - Math.min(rect.y, lineRect.y)
+        } : lineRect;
+      }
       scene.addLabel({ id: 'label:' + owner, owner: owner, kind: 'message', x: rect.x, y: rect.y, width: rect.width, height: rect.height });
       scene.noteFont(CFG.fontSize);
     }
@@ -19430,8 +19640,9 @@
   }
 
   // `heads` gives each head's offset from the head row's top `headTop` and
-  // its height (see uniformHeadGeometry / compactHeadGeometry).
-  function drawParticipantBoxes(svg, participants, partX, partWidths, heads, headTop, colors, createYs) {
+  // its height (see uniformHeadGeometry / compactHeadGeometry); `headTexts`
+  // gives each head's name as wrapped lines.
+  function drawParticipantBoxes(svg, participants, headTexts, partX, partWidths, heads, headTop, colors, createYs) {
     for (var i = 0; i < participants.length; i++) {
       // Skip participants that are created mid-diagram (drawn inline)
       if (createYs && Object.prototype.hasOwnProperty.call(createYs, participants[i].id)) continue;
@@ -19439,19 +19650,17 @@
       var y = headTop + heads.top[i];
       var partH = heads.height[i];
       var part = participants[i];
-      var disp = participantDisplay(part);
-      var displayText = disp.text;
-      var isInstance = disp.isInstance;
+      var lines = headTexts[i];
+      var isInstance = participantDisplay(part).isInstance;
+      var textAttrs = ' text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
+        (isInstance ? ' text-decoration="underline"' : '');
 
       var partFills = UMLShared.highlightFills(colors, part.highlight, part.texture);
       if (part.isActor) {
         // Stick figure actor
         UMLShared.drawActorStickFigure(svg, partX[i], y + 2, colors, CFG.strokeWidth, part.highlight);
         var actorTextY = y + heads.actorNameDy;
-        svg.push('<text x="' + partX[i] + '" y="' + actorTextY +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
-          (isInstance ? ' text-decoration="underline"' : '') + '>' +
-          UMLShared.escapeXml(displayText) + '</text>');
+        svg.push(textLinesSvg(lines, partX[i], actorTextY, CFG.lineHeight, textAttrs));
       } else {
         // Rectangle participant
         svg.push('<rect filter="url(#uml-node-shadow)" x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
@@ -19460,11 +19669,8 @@
           svg.push('<rect x="' + px + '" y="' + y + '" width="' + partWidths[i] + '" height="' + partH +
             '" fill="' + partFills.textureUrl + '" stroke="none"/>');
         }
-        var textY = y + partH / 2 + CFG.fontSize * 0.35;
-        svg.push('<text x="' + partX[i] + '" y="' + textY +
-          '" text-anchor="middle" font-weight="bold" font-size="' + CFG.fontSizeBold + '" fill="' + colors.text + '"' +
-          (isInstance ? ' text-decoration="underline"' : '') + '>' +
-          UMLShared.escapeXml(displayText) + '</text>');
+        var textY = y + partH / 2 - (lines.length - 1) * CFG.lineHeight / 2 + CFG.fontSize * 0.35;
+        svg.push(textLinesSvg(lines, partX[i], textY, CFG.lineHeight, textAttrs));
       }
     }
   }
@@ -22115,6 +22321,17 @@
     ifaceStick: 20,   // length of line from component edge to interface symbol center
     labelMaxWidth: 180, // a connector label wraps (at spaces and slashes) beyond this
   };
+  // A joined ball and socket sits beside a component interface: no farther
+  // from a box than an unjoined symbol on its stick. Penalties added to a
+  // candidate spot rank a floating spot below an unlabelled one (its
+  // interface name fits nowhere beside it), and both below any labelled spot
+  // beside a box.
+  var JOINED_SYMBOL_MAX_BOX_GAP = CFG.ifaceStick + CFG.ifaceSocketRadius;
+  var JOINED_SYMBOL_UNLABELLED_PENALTY = 100000;
+  var JOINED_SYMBOL_FLOATING_PENALTY = 200000;
+  var JOINED_SYMBOL_SCAN_STEP = 8;
+  var COMPONENT_LABEL_FRACTIONS = [0.5, 0.35, 0.65, 0.22, 0.78];
+  var COMPONENT_LABEL_SCAN_FRACTIONS = [0.1, 0.9, 0.06, 0.94, 0.14, 0.86, 0.18, 0.82, 0.28, 0.72, 0.42, 0.58];
   var COMPONENT_DASH_ATTR = ' stroke-dasharray="8,4"';
 
   // A component's header. With a stereotype, UML 2.5.1 (9.2.4) centers the
@@ -22159,6 +22376,12 @@
   }
 
   // ─── Parser ───────────────────────────────────────────────────────
+
+  // `layout ports facing`, on a line of its own: once a saved position places
+  // a component, the ball and the socket of each assembly turn to the sides of
+  // their two boxes that face each other (facingPortPlan). It changes neither
+  // the direction nor the layout preference.
+  var PORTS_FACING_DIRECTIVE_RE = /^layout\s+ports\s+facing\s*$/i;
 
   function stripComponentDashedStyle(line) {
     var m = line.match(/\s+dashed(\s*\{?\s*)$/i);
@@ -22255,7 +22478,9 @@
     var orderConstraints = []; // hidden PlantUML edges used only for layout order
 
     var direction = 'LR'; // Component diagrams default to left-to-right
+    var directionLocked = false; // `layout vertical|horizontal` overrides the container's shape
     var layoutPreference = null;
+    var portsFacing = false;
     var packageScope = UMLShared.createPackageScope();
     // `layout compact` asks for the compact drawing even when a direction
     // line follows it, because compact may override the direction (see
@@ -22320,11 +22545,16 @@
       }
       if (/^\S+\s+[.=-]*\[[^\]]*\][.=-]*\S*[.=-]\s+\S+/.test(line)) continue;
 
+      if (PORTS_FACING_DIRECTIVE_RE.test(line)) {
+        portsFacing = true;
+        continue;
+      }
       // Layout directive
       var layoutDirective = UMLShared.parseLayoutDirective(line);
       if (layoutDirective) {
         if (layoutDirective.direction) {
           direction = layoutDirective.direction;
+          directionLocked = true;
           layoutPreference = null;
         } else {
           layoutPreference = layoutDirective.layoutPreference;
@@ -22351,7 +22581,8 @@
       //   component [BracketName]             → id=BracketName, label=BracketName
       //   component [BracketName] as Alias    → id=Alias, label=BracketName
       //   component "Display" as Alias        → id=Alias, label=Display
-      // Any of the above may be followed by `{` to open a port block.
+      // Any of the above may be followed by `{` to open a port block (its
+      // `<<stereotype>>` was stripped above).
       var compMatch = compLine.match(
         /^component\s+(?:\[([^\]]+)\]|"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?\s*(\{)?\s*$/
       );
@@ -22557,7 +22788,9 @@
       notes: notes,
       packages: packageScope.packages,
       direction: direction,
+      directionLocked: directionLocked,
       layoutPreference: layoutPreference,
+      portsFacing: portsFacing,
       compactLayout: compactLayout,
       pane: pane,
       displayNameMap: displayNameMap,
@@ -22567,6 +22800,94 @@
 
   // ─── Layout ───────────────────────────────────────────────────────
 
+  // `layout vertical`: a fixed top-to-bottom stack in declaration order.
+  function isExplicitVerticalLayout(parsed) {
+    return !!parsed.directionLocked && parsed.direction === 'TB';
+  }
+
+  // An explicit vertical stack keeps every interface port on the left side of
+  // its box, so its assemblies share one lane beside the column instead of a
+  // staircase. The box is sized for that side and the ports are placed there.
+  function isLeftStackedInterfacePort(parsed, port) {
+    return !!port.kind && isExplicitVerticalLayout(parsed);
+  }
+
+  // 'component.alias' → the kind of that port: 'provide', 'require', or none.
+  function componentPortKinds(parsed) {
+    var kinds = {};
+    parsed.components.forEach(function(comp) {
+      comp.ports.forEach(function(port) { kinds[comp.name + '.' + port.alias] = port.kind; });
+    });
+    return kinds;
+  }
+
+  // An assembly that joins a provided interface to a required one, drawn as a
+  // ball in a socket. `kinds` is componentPortKinds of the diagram.
+  function isBallAndSocket(conn, kinds) {
+    var pair = [kinds[conn.from + '.' + conn.fromPort], kinds[conn.to + '.' + conn.toPort]].sort().join('+');
+    return conn.type === 'assembly' && pair === 'provide+require';
+  }
+
+  // In an explicit vertical stack, a ball-and-socket assembly between two
+  // neighbours of the stack runs straight down between them: its provide and
+  // require ports sit on the sides of the two boxes that face each other (the
+  // bottom of the upper box, the top of the lower one), at one x. A port joins
+  // that way only when every connector at it is such an assembly with the
+  // same neighbour; every other interface port stays on the left side.
+  // Returns `{ 'component.alias': { side, partner } }`.
+  function facingStackPorts(parsed) {
+    var facing = {};
+    if (!isExplicitVerticalLayout(parsed)) return facing;
+    var names = parsed.components.map(function(comp) { return comp.name; });
+    var kinds = componentPortKinds(parsed);
+    var votes = {};
+    function vote(key, side, partner) {
+      var earlier = votes[key];
+      votes[key] = earlier === undefined || (earlier && earlier.side === side && earlier.partner === partner)
+        ? (side ? { side: side, partner: partner } : null)
+        : null;
+    }
+    parsed.connectors.forEach(function(conn) {
+      if (!conn.fromPort && !conn.toPort) return;
+      var fromKey = conn.from + '.' + conn.fromPort;
+      var toKey = conn.to + '.' + conn.toPort;
+      var step = names.indexOf(conn.to) - names.indexOf(conn.from);
+      var joinsNeighbours = isBallAndSocket(conn, kinds) && Math.abs(step) === 1;
+      if (conn.fromPort) vote(fromKey, joinsNeighbours ? (step > 0 ? 'bottom' : 'top') : null, conn.to);
+      if (conn.toPort) vote(toKey, joinsNeighbours ? (step > 0 ? 'top' : 'bottom') : null, conn.from);
+    });
+    Object.keys(votes).forEach(function(key) { if (votes[key]) facing[key] = votes[key]; });
+    return facing;
+  }
+
+  // The ends of a connector as the layout ranks them. Under an explicit
+  // `layout vertical|horizontal`, the declaration order of the components is
+  // their rank order, whichever way the connector points, so the drawing does
+  // not depend on the host's shape (static prerender and live render agree).
+  function componentRankEnds(parsed, from, to) {
+    if (!parsed.directionLocked) return { source: from, target: to };
+    var names = parsed.components.map(function(comp) { return comp.name; });
+    return names.indexOf(from) <= names.indexOf(to)
+      ? { source: from, target: to }
+      : { source: to, target: from };
+  }
+
+  // Without `layout ports facing`, or with it but without a saved position of
+  // a component, the drawing is the automatic layout. With both, a second pass
+  // keeps every box where the first pass and the saved positions put it, sizes
+  // the boxes again, and places the ports on the sides facingPortPlan gives.
+  //
+  // Options (compact only): `positions` ({name: {x, y}}) places the
+  // components there instead of where the layered placement puts them, and
+  // ports and back-edge lanes follow those positions; `containerAspect`
+  // replaces the container's aspect the layered placement shapes for (null:
+  // keep the authored direction).
+  function computeLayout(parsed, options) {
+    var automatic = layoutComponents(parsed, null, options);
+    var plan = facingPortPlan(parsed, automatic);
+    return plan ? layoutComponents(parsed, plan, options) : automatic;
+  }
+
   function placeAtGivenPositions(entries, positions) {
     Object.keys(positions).forEach(function(name) {
       if (!entries[name]) return;
@@ -22575,12 +22896,83 @@
     });
   }
 
-  // Options (compact only): `positions` ({name: {x, y}}) places the
-  // components there instead of where the layered placement puts them, and
-  // ports and back-edge lanes follow those positions; `containerAspect`
-  // replaces the container's aspect the layered placement shapes for (null:
-  // keep the authored direction).
-  function computeLayout(parsed, options) {
+  var COMPONENT_PORT_SIDES = ['left', 'right', 'top', 'bottom'];
+
+  // The side of `rect` that faces `other`: across the gap between them; the
+  // larger gap when they are apart both ways, and the diagram's `direction`
+  // ('TB' or 'LR') when those two gaps are equal. Null when the two boxes
+  // overlap or touch, so no gap separates them.
+  function sideFacing(rect, other, direction) {
+    var gapX = Math.max(other.x - (rect.x + rect.width), rect.x - (other.x + other.width));
+    var gapY = Math.max(other.y - (rect.y + rect.height), rect.y - (other.y + other.height));
+    if (gapX <= 0 && gapY <= 0) return null;
+    var equalGaps = Math.abs(gapX - gapY) < 1e-6;
+    var vertical = gapX <= 0 || (gapY > 0 && (equalGaps ? direction === 'TB' : gapY > gapX));
+    if (vertical) return other.y > rect.y ? 'bottom' : 'top';
+    return other.x > rect.x ? 'right' : 'left';
+  }
+
+  // `layout ports facing` acts once the layout block or an inline @pos gives a
+  // component a position (spec §6). Then each box stands at its saved position,
+  // or where the `automatic` layout put it, and the ball and the socket of each
+  // assembly turn to the sides of their boxes that face each other. A port in
+  // several assemblies faces the partner of its first one. A port with a saved
+  // position of its own, a port outside every assembly, a plain port, and the
+  // ports of two boxes that overlap keep their automatic side. Returns null
+  // when the directive does not act, else the second pass's input: `positions`
+  // and `sides` by box and by 'component.alias', and `facing`, the turned
+  // ports as `{ side, partner }`, as facingStackPorts gives stack neighbours.
+  function facingPortPlan(parsed, automatic) {
+    if (!parsed.portsFacing) return null;
+    var entries = automatic.entries;
+    var names = Object.keys(entries);
+    var positions = {};
+    var pinned = false;
+    names.forEach(function(name) {
+      var saved = UMLShared.findLayoutPosition(parsed.layout, name);
+      if (saved) pinned = true;
+      positions[name] = {
+        x: saved && saved.x !== undefined ? saved.x : entries[name].x,
+        y: saved && saved.y !== undefined ? saved.y : entries[name].y
+      };
+    });
+    if (!pinned) return null;
+
+    var sides = {};
+    names.forEach(function(name) {
+      COMPONENT_PORT_SIDES.forEach(function(side) {
+        entries[name][side + 'Ports'].forEach(function(alias) { sides[name + '.' + alias] = side; });
+      });
+    });
+    var kinds = componentPortKinds(parsed);
+    function rectOf(name) {
+      return { x: positions[name].x, y: positions[name].y, width: entries[name].box.width, height: entries[name].box.height };
+    }
+    var direction = parsed.directionLocked ? parsed.direction : automatic.direction;
+    var facing = {};
+    var decided = {};
+    function turn(name, alias, partner) {
+      var key = name + '.' + alias;
+      if (decided[key]) return;
+      decided[key] = true;
+      if (partner === name || UMLShared.findLayoutPosition(parsed.layout, key)) return;
+      var side = sideFacing(rectOf(name), rectOf(partner), direction);
+      if (!side) return;
+      sides[key] = side;
+      facing[key] = { side: side, partner: partner };
+    }
+    parsed.connectors.forEach(function(conn) {
+      if (!isBallAndSocket(conn, kinds)) return;
+      turn(conn.from, conn.fromPort, conn.to);
+      turn(conn.to, conn.toPort, conn.from);
+    });
+    return { positions: positions, sides: sides, facing: facing, direction: direction };
+  }
+
+  // One layout pass. `pins` is null for the automatic layout, or the plan of
+  // `layout ports facing` for its second pass (facingPortPlan); `options` as
+  // computeLayout's.
+  function layoutComponents(parsed, pins, options) {
     var components = parsed.components;
     var connectors = parsed.connectors;
     var givenPositions = options && options.positions;
@@ -22600,16 +22992,25 @@
     var entries = {};
     var layoutNodes = [];
     var layoutEdges = [];
+    var facingPorts = pins ? pins.facing : facingStackPorts(parsed);
 
     for (var i = 0; i < components.length; i++) {
       var c = components[i];
-      var leftPorts = [], rightPorts = [];
+      var leftPorts = [], rightPorts = [], topPorts = [], bottomPorts = [];
+      var portsOnSide = { left: leftPorts, right: rightPorts, top: topPorts, bottom: bottomPorts };
       var portOrderIndex = {};
       for (var pi = 0; pi < c.ports.length; pi++) {
         var port = c.ports[pi];
         var alias = port.alias;
         portOrderIndex[alias] = pi;
-        if (port.direction === 'in') {
+        var facingPort = facingPorts[c.name + '.' + alias];
+        if (pins) {
+          portsOnSide[pins.sides[c.name + '.' + alias]].push(alias);
+        } else if (facingPort) {
+          (facingPort.side === 'top' ? topPorts : bottomPorts).push(alias);
+        } else if (isLeftStackedInterfacePort(parsed, port)) {
+          leftPorts.push(alias);
+        } else if (port.direction === 'in') {
           leftPorts.push(alias);
         } else if (port.direction === 'out') {
           rightPorts.push(alias);
@@ -22677,6 +23078,8 @@
         x: 0, y: 0,
         leftPorts: leftPorts,
         rightPorts: rightPorts,
+        topPorts: topPorts,
+        bottomPorts: bottomPorts,
         portOrderIndex: portOrderIndex,
         portPositions: {},
         hasPorts: hasPorts,
@@ -22687,7 +23090,8 @@
 
     for (var ci = 0; ci < connectors.length; ci++) {
       var conn = connectors[ci];
-      layoutEdges.push({ source: conn.from, target: conn.to, type: conn.type, data: conn });
+      var rankEnds = componentRankEnds(parsed, conn.from, conn.to);
+      layoutEdges.push({ source: rankEnds.source, target: rankEnds.target, type: conn.type, data: conn });
     }
     var orderConstraints = parsed.orderConstraints || [];
     for (var oci0 = 0; oci0 < orderConstraints.length; oci0++) {
@@ -22712,7 +23116,12 @@
 
     function componentConnectorDisplayLabel(conn) {
       if (!conn) return '';
-      if (conn.label) return conn.label;
+      return conn.label || joinedInterfaceName(conn);
+    }
+
+    // The interface name a ball-and-socket assembly shows: the name both of
+    // its joined provide/require ports carry ('' otherwise).
+    function joinedInterfaceName(conn) {
       if (!conn.fromPort || !conn.toPort) return '';
 
       var fromPort = componentPortDefs[conn.from + '.' + conn.fromPort];
@@ -22780,6 +23189,15 @@
 
     // Per-connector label sizes for the budgetGaps stage.
     var compLineHeight = CFG.fontSize + 4;
+        // In an explicit vertical stack, a joined assembly's labels sit beside its
+    // lane in the gap between the rows: every wrapped line of its label, and
+    // the interface name of the ball and socket.
+    function stackedLabelHeight(conn) {
+      var height = conn.label
+        ? componentLabelMetrics(conn.label, CFG.fontSize, CFG.labelMaxWidth).lines.length * compLineHeight
+        : 0;
+      return height + (joinedInterfaceName(conn) ? compLineHeight : 0);
+    }
     var compEdgeSizes = [];
     for (var ceri = 0; ceri < connectors.length; ceri++) {
       var crel = connectors[ceri];
@@ -22788,10 +23206,11 @@
       var lw = crelLabel
         ? componentLabelMetrics(crelLabel, CFG.fontSize, CFG.labelMaxWidth).width
         : 0;
+      var crelEnds = componentRankEnds(parsed, crel.from, crel.to);
       compEdgeSizes.push({
-        source: crel.from, target: crel.to,
+        source: crelEnds.source, target: crelEnds.target,
         labelWidth: lw,
-        labelHeight: crelLabel ? compLineHeight : 0,
+        labelHeight: isExplicitVerticalLayout(parsed) ? stackedLabelHeight(crel) : (crelLabel ? compLineHeight : 0),
         markerExtent: CFG.ifaceStick + CFG.ifaceSocketRadius,
         padding: 12
       });
@@ -22801,6 +23220,7 @@
       gapX: effectiveGapX,
       gapY: effectiveGapY,
       direction: parsed.direction || 'LR',
+      directionLocked: !!parsed.directionLocked,
       layoutPreference: parsed.layoutPreference === 'compact' ? null : (parsed.layoutPreference || null),
       containerAspect: options && 'containerAspect' in options ? options.containerAspect : parsed._containerAspect,
       labelFontSize: CFG.fontSize,
@@ -22851,8 +23271,9 @@
       for (var cci = 0; cci < connectors.length; cci++) {
         var cc = connectors[cci];
         if (!entries[cc.from] || !entries[cc.to] || cc.from === cc.to) continue;
-        outCounts[cc.from] = (outCounts[cc.from] || 0) + 1;
-        inCounts[cc.to] = (inCounts[cc.to] || 0) + 1;
+        var ccEnds = componentRankEnds(parsed, cc.from, cc.to);
+        outCounts[ccEnds.source] = (outCounts[ccEnds.source] || 0) + 1;
+        inCounts[ccEnds.target] = (inCounts[ccEnds.target] || 0) + 1;
       }
 
       var columnItems = [];
@@ -22894,8 +23315,9 @@
         var score = 0;
         for (var si = 0; si < connectors.length; si++) {
           var conn = connectors[si];
-          var fromCol = colIndex[conn.from];
-          var toCol = colIndex[conn.to];
+          var connEnds = componentRankEnds(parsed, conn.from, conn.to);
+          var fromCol = colIndex[connEnds.source];
+          var toCol = colIndex[connEnds.target];
           if (fromCol === undefined || toCol === undefined) continue;
           var span = Math.abs(toCol - fromCol);
           if (conn.from !== conn.to) score += span;
@@ -23157,6 +23579,17 @@
     applyHiddenOrderRankLayout();
     if (givenPositions) placeAtGivenPositions(entries, givenPositions);
 
+    // The second pass of `layout ports facing` sizes the boxes for their turned
+    // ports, then puts every box back where the first pass and the saved
+    // positions put it: the placement above only measured the new sizes.
+    if (pins) {
+      for (var pinnedName in entries) {
+        entries[pinnedName].x = pins.positions[pinnedName].x;
+        entries[pinnedName].y = pins.positions[pinnedName].y;
+      }
+      actualDirection = pins.direction;
+    }
+
     // ── Place ports to minimize crossings and avoidable bends ──
     var desiredPortY = {};
     function portKey(compName, alias) {
@@ -23175,6 +23608,7 @@
       return total / values.length;
     }
     function defaultPortSide(compName, portDef) {
+      if (isLeftStackedInterfacePort(parsed, portDef)) return 'left';
       if (portDef.kind === 'provide') return 'left';
       if (portDef.kind === 'require') return 'right';
       if (portDef.direction === 'in') return 'left';
@@ -23262,28 +23696,112 @@
       }
     }
 
-    for (var pn in entries) {
-      var pe = entries[pn];
-      var newLeftPorts = [];
-      var newRightPorts = [];
-      for (var pidx = 0; pidx < pe.comp.ports.length; pidx++) {
-        var portDef = pe.comp.ports[pidx];
-        var partnerSamples = collectPortPartnerSamples(pn, portDef.alias);
-        var side = chooseInitialPortSide(pe, portDef, partnerSamples);
-        if (side === 'left') newLeftPorts.push(portDef.alias);
-        else newRightPorts.push(portDef.alias);
+    // In the second pass of `layout ports facing`, every port keeps the side
+    // the plan gives it.
+    if (!pins) {
+      for (var pn in entries) {
+        var pe = entries[pn];
+        var newLeftPorts = [];
+        var newRightPorts = [];
+        for (var pidx = 0; pidx < pe.comp.ports.length; pidx++) {
+          var portDef = pe.comp.ports[pidx];
+          if (facingPorts[pn + '.' + portDef.alias]) continue;
+          var partnerSamples = collectPortPartnerSamples(pn, portDef.alias);
+          var side = chooseInitialPortSide(pe, portDef, partnerSamples);
+          if (side === 'left') newLeftPorts.push(portDef.alias);
+          else newRightPorts.push(portDef.alias);
+        }
+        pe.leftPorts = newLeftPorts;
+        pe.rightPorts = newRightPorts;
       }
-      pe.leftPorts = newLeftPorts;
-      pe.rightPorts = newRightPorts;
     }
 
     // Compute port positions (after x,y are finalized and ports are reordered)
     var portHalf = CFG.portSize / 2;
+
+    // Puts the two ports of each assembly that face each other at one
+    // coordinate, so its line runs straight across the gap: stack neighbours
+    // (facingStackPorts) at one x, and the turned ports of `layout ports
+    // facing` at one x across a vertical gap or one y across a horizontal one.
+    // Several assemblies of one pair spread across the span where both ports
+    // can sit, in connector order, the outer ones near its ends, so each label
+    // can sit outside the lines beside its own. One assembly runs down the
+    // middle of a shared x span, and along the bottom of a shared y span: the
+    // renderer keeps the ball beside its box and puts the interface name
+    // under it, where the name then clears the box. Without such a span,
+    // stack neighbours use the first box's side and turned ports keep their
+    // places. Runs again whenever the boxes moved.
+    function alignFacingStackPorts() {
+      var pairs = {};
+      connectors.forEach(function(conn) {
+        var fromFacing = facingPorts[conn.from + '.' + conn.fromPort];
+        var toFacing = facingPorts[conn.to + '.' + conn.toPort];
+        if (!fromFacing || !toFacing || fromFacing.partner !== conn.to || toFacing.partner !== conn.from) return;
+        var key = [conn.from, conn.to].sort().join('\n');
+        if (!pairs[key]) {
+          var across = fromFacing.side === 'left' || fromFacing.side === 'right' ? 'y' : 'x';
+          pairs[key] = { a: entries[conn.from], b: entries[conn.to], across: across, ends: [] };
+        }
+        pairs[key].ends.push([[conn.from, conn.fromPort], [conn.to, conn.toPort]]);
+      });
+      Object.keys(pairs).forEach(function(key) {
+        var pair = pairs[key];
+        var span = pair.across === 'x' ? sharedSpanX(pair.a, pair.b) : sharedSpanY(pair.a, pair.b);
+        if (!span) return;
+        var low = span.low, high = span.high;
+        var inset = Math.min(48, (high - low) / 4);
+        var single = pair.across === 'x' ? (low + high) / 2 : high;
+        pair.ends.forEach(function(ends, index) {
+          var at = pair.ends.length === 1 ? single
+            : low + inset + (high - low - 2 * inset) * index / (pair.ends.length - 1);
+          ends.forEach(function(end) {
+            var pos = entries[end[0]].portPositions[end[1]];
+            if (!pos) return;
+            if (pair.across === 'x') {
+              pos.x = at - portHalf;
+              pos.cx = at;
+              pos.connX = at;
+            } else {
+              pos.y = at - portHalf;
+              pos.cy = at;
+              pos.connY = at;
+            }
+          });
+        });
+      });
+    }
+    // The x range two boxes share. Stack neighbours that share none use the
+    // first box's; turned ports of `layout ports facing` stay where they are.
+    function sharedSpanX(a, b) {
+      var low = Math.max(a.x, b.x);
+      var high = Math.min(a.x + a.box.width, b.x + b.box.width);
+      if (high > low) return { low: low, high: high };
+      return pins ? null : { low: a.x, high: a.x + a.box.width };
+    }
+    // The heights at which a port can sit on the left or right side of both
+    // boxes, or null when they share none.
+    function sharedSpanY(a, b) {
+      var spanA = boxSidePortRange(a), spanB = boxSidePortRange(b);
+      var low = Math.max(spanA.lower, spanB.lower);
+      var high = Math.min(spanA.upper, spanB.upper);
+      return high > low ? { low: low, high: high } : null;
+    }
+    function boxSidePortRange(entry) {
+      var headerHeight = entry.hasPorts ? entry.headerHeight : 0;
+      return sidePortRange(entry.y + headerHeight, entry.box.height - headerHeight);
+    }
+    // The topmost and bottommost centre (`lower` and `upper` y) of a port on
+    // the left or right side of a box whose port area starts at `portTop` and
+    // is `portAreaH` high: clear of the header above and the bottom edge.
+    function sidePortRange(portTop, portAreaH) {
+      return { lower: portTop + portHalf + 4, upper: portTop + portAreaH - componentPortBottomInset() };
+    }
     function computeOrderedPortCenters(entry, sidePorts, portTop, portAreaH) {
       var centers = {};
       if (!sidePorts.length) return centers;
-      var lower = portTop + portHalf + 4;
-      var upper = portTop + portAreaH - componentPortBottomInset();
+      var range = sidePortRange(portTop, portAreaH);
+      var lower = range.lower;
+      var upper = range.upper;
       if (sidePorts.length === 1) {
         var onlyKey = portKey(entry.comp.name, sidePorts[0]);
         var onlyDesiredY = averagePortY(onlyKey);
@@ -23406,6 +23924,25 @@
         return score;
       }
 
+      // The y a port is ordered by. Partners on the same side of a box stacked
+      // above or below (an explicit vertical layout) are joined by nested
+      // C-shaped routes, which cross unless the order is mirrored: the port
+      // nearest the partner box connects the partner's port nearest this box.
+      function orderingPartnerY(group, neighbor, partnerY) {
+        if (!isExplicitVerticalLayout(parsed)) return partnerY;
+        var separator = neighbor.groupKey.lastIndexOf(':');
+        var partner = entries[neighbor.groupKey.slice(0, separator)];
+        var self = entries[group.compName];
+        if (neighbor.groupKey.slice(separator + 1) !== group.side || !partner || partner === self) return partnerY;
+        if (partner.y + partner.box.height <= self.y) {
+          return self.y + (partner.y + partner.box.height - partnerY);
+        }
+        if (partner.y >= self.y + self.box.height) {
+          return self.y + self.box.height - (partnerY - partner.y);
+        }
+        return partnerY;
+      }
+
       function buildDesiredYMapForGroup(group, provisionalCenters) {
         var desiredYMap = {};
         var desiredCount = 0;
@@ -23418,7 +23955,7 @@
           for (var ni = 0; ni < neighbors.length; ni++) {
             var neighbor = neighbors[ni];
             if (provisionalCenters[neighbor.portKey] === undefined) continue;
-            total += provisionalCenters[neighbor.portKey];
+            total += orderingPartnerY(group, neighbor, provisionalCenters[neighbor.portKey]);
             count++;
           }
           if (count > 0) {
@@ -23625,7 +24162,22 @@
             visualStyle: portVisualStyleByAlias[rpn] || null
           };
         }
+
+        e.topPorts.concat(e.bottomPorts).forEach(function(facingAlias) {
+          var facingSide = e.topPorts.indexOf(facingAlias) >= 0 ? 'top' : 'bottom';
+          var edgeY = facingSide === 'top' ? by : by + bh;
+          e.portPositions[facingAlias] = {
+            x: bx + bw / 2 - portHalf, y: edgeY - portHalf,
+            cx: bx + bw / 2, cy: edgeY,
+            connX: bx + bw / 2, connY: edgeY,
+            side: facingSide,
+            kind: portKindByAlias[facingAlias] || null,
+            label: portLabelByAlias[facingAlias] !== undefined ? portLabelByAlias[facingAlias] : facingAlias,
+            visualStyle: portVisualStyleByAlias[facingAlias] || null
+          };
+        });
       }
+      alignFacingStackPorts();
 
       if (layoutPass < 2) rebuildDesiredPortY(true);
     }
@@ -23934,7 +24486,10 @@
       }
     }
 
-    if (!givenPositions) nudgeComponentEntriesPreservingPortOrder(actualDirection);
+    // The second pass of `layout ports facing` keeps every box where the plan
+    // puts it, and compact's given positions stay as given, so neither nudges.
+    if (!pins && !givenPositions) nudgeComponentEntriesPreservingPortOrder(actualDirection);
+    alignFacingStackPorts();
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     var portLabelFs = CFG.fontSizePort;
@@ -24093,6 +24648,7 @@
       offsetX: -minX,
       offsetY: -minY,
       layoutResult: result,
+      direction: actualDirection,
       backEdgeLanes: backEdgeLanes,
       // What the layered engine was given, so compact layout can place the
       // same input again with packages kept together.
@@ -24771,71 +25327,77 @@
       return a.segmentIndex - b.segmentIndex;
     });
 
-    // Compact keeps a label by its own route, so it looks along more of it.
-    var fractions = opts.keepNearOwnRoute
-      ? [0.5, 0.35, 0.65, 0.22, 0.78, 0.1, 0.9]
-      : [0.5, 0.35, 0.65, 0.22, 0.78];
     var best = null;
 
-    for (var gi = 0; gi < segments.length; gi++) {
-      var segment = segments[gi];
-      var placements = segment.isH
-        ? [
-            { anchor: 'middle', dx: 0, dy: -10 - (metrics.lines.length - 1) * metrics.lineHeight, penalty: 0, vSide: 'above' },
-            { anchor: 'middle', dx: 0, dy: -24 - (metrics.lines.length - 1) * metrics.lineHeight, penalty: 4, vSide: 'above' },
-            { anchor: 'middle', dx: 0, dy: cfg.fontSize + 12, penalty: 8, vSide: 'below' },
-            { anchor: 'middle', dx: 0, dy: cfg.fontSize + 26, penalty: 14, vSide: 'below' }
-          ]
-        : [
-            { anchor: 'start', dx: 10, dy: -((metrics.lines.length - 1) * metrics.lineHeight) / 2, penalty: 2 },
-            { anchor: 'end', dx: -10, dy: -((metrics.lines.length - 1) * metrics.lineHeight) / 2, penalty: 6 }
-          ];
+    // Best clear spot beside the route at the given fractions of each segment.
+    function searchAlongSegments(fractions) {
+      for (var gi = 0; gi < segments.length; gi++) {
+        var segment = segments[gi];
+        var placements = segment.isH
+          ? [
+              { anchor: 'middle', dx: 0, dy: -10 - (metrics.lines.length - 1) * metrics.lineHeight, penalty: 0, vSide: 'above' },
+              { anchor: 'middle', dx: 0, dy: -24 - (metrics.lines.length - 1) * metrics.lineHeight, penalty: 4, vSide: 'above' },
+              { anchor: 'middle', dx: 0, dy: cfg.fontSize + 12, penalty: 8, vSide: 'below' },
+              { anchor: 'middle', dx: 0, dy: cfg.fontSize + 26, penalty: 14, vSide: 'below' }
+            ]
+          : [
+              { anchor: 'start', dx: 10, dy: -((metrics.lines.length - 1) * metrics.lineHeight) / 2, penalty: 2 },
+              { anchor: 'end', dx: -10, dy: -((metrics.lines.length - 1) * metrics.lineHeight) / 2, penalty: 6 }
+            ];
 
-      for (var pi = 0; pi < placements.length; pi++) {
-        var placement = placements[pi];
-        for (var fi = 0; fi < fractions.length; fi++) {
-          var fraction = fractions[fi];
-          var lx, ly;
-          if (segment.isH) {
-            lx = segment.x1 + (segment.x2 - segment.x1) * fraction + placement.dx;
-            ly = segment.y + placement.dy;
-          } else {
-            lx = segment.x + placement.dx;
-            ly = segment.y1 + (segment.y2 - segment.y1) * fraction + placement.dy;
-          }
+        for (var pi = 0; pi < placements.length; pi++) {
+          var placement = placements[pi];
+          for (var fi = 0; fi < fractions.length; fi++) {
+            var fraction = fractions[fi];
+            var lx, ly;
+            if (segment.isH) {
+              lx = segment.x1 + (segment.x2 - segment.x1) * fraction + placement.dx;
+              ly = segment.y + placement.dy;
+            } else {
+              lx = segment.x + placement.dx;
+              ly = segment.y1 + (segment.y2 - segment.y1) * fraction + placement.dy;
+            }
 
-          var rect = makeComponentLabelRect(lx, ly, metrics, placement.anchor);
-          if (labelRectHitsObstacles(rect, obstacles, 6)) continue;
-          if (labelRectHitsPlacedLabels(rect, placedLabels, 8)) continue;
-          // Within the label's font size of the route: the judge allows one
-          // line height (font + 6) from the glyphs, which sit inside `rect`.
-          if (opts.keepNearOwnRoute && !labelStaysWithRoute(rect, routeSegments, routeIndex, cfg.fontSize)) continue;
-          var hitsSegments = labelRectHitsSegments(rect, routeSegments, routeIndex, segment.segmentIndex, 3);
+            var rect = makeComponentLabelRect(lx, ly, metrics, placement.anchor);
+            if (labelRectHitsObstacles(rect, obstacles, 6)) continue;
+            if (labelRectHitsPlacedLabels(rect, placedLabels, 8)) continue;
+            // Within the label's font size of the route: the judge allows one
+            // line height (font + 6) from the glyphs, which sit inside `rect`.
+            if (opts.keepNearOwnRoute && !labelStaysWithRoute(rect, routeSegments, routeIndex, cfg.fontSize)) continue;
+            var hitsSegments = labelRectHitsSegments(rect, routeSegments, routeIndex, segment.segmentIndex, 3);
 
-          var clearance = minLabelClearance(rect, obstacles, placedLabels, routeSegments, routeIndex, segment.segmentIndex);
-          var score = segment.length * 2 + (segment.isH ? 24 : 0) + Math.min(clearance, 80) -
-            Math.abs(fraction - 0.5) * 30 - placement.penalty;
+            var clearance = minLabelClearance(rect, obstacles, placedLabels, routeSegments, routeIndex, segment.segmentIndex);
+            var score = segment.length * 2 + (segment.isH ? 24 : 0) + Math.min(clearance, 80) -
+              Math.abs(fraction - 0.5) * 30 - placement.penalty;
 
-          if (segment.isH && opts.preferredVerticalSide) {
-            if (placement.vSide === opts.preferredVerticalSide) score += 18;
-            else score -= 18;
-          }
+            if (segment.isH && opts.preferredVerticalSide) {
+              if (placement.vSide === opts.preferredVerticalSide) score += 18;
+              else score -= 18;
+            }
 
-          var candidate = {
-            x: lx,
-            y: ly,
-            anchor: placement.anchor,
-            rect: rect,
-            score: score,
-            lines: metrics.lines
-          };
+            var candidate = {
+              x: lx,
+              y: ly,
+              anchor: placement.anchor,
+              rect: rect,
+              score: score,
+              lines: metrics.lines
+            };
 
-          if (!hitsSegments && (!best || candidate.score > best.score)) {
-            best = candidate;
+            if (!hitsSegments && (!best || candidate.score > best.score)) {
+              best = candidate;
+            }
           }
         }
       }
     }
+
+    // Compact keeps a label by its own route, so it looks along more of it
+    // from the start.
+    searchAlongSegments(opts.keepNearOwnRoute ? COMPONENT_LABEL_FRACTIONS.concat([0.1, 0.9]) : COMPONENT_LABEL_FRACTIONS);
+    // A crowded lane may leave room only near a segment's ends; look there
+    // before giving up on a spot beside the route.
+    if (!best) searchAlongSegments(COMPONENT_LABEL_SCAN_FRACTIONS);
 
     if (best) return best;
     if (!segments.length) return null;
@@ -25255,12 +25817,21 @@
     for (var obn in entries) {
       var obe = entries[obn];
       var obLeftExt = 0, obRightExt = 0;
+      // A joined interface draws its symbol on the connector, not on a stick
+      // beside the box, so only unjoined symbols keep labels away.
+      var obLabelLeftExt = 0, obLabelRightExt = 0;
       for (var obpn in obe.portPositions) {
         var obpp = obe.portPositions[obpn];
-        if (obpp.kind) {
+        if (obpp.kind && (obpp.side === 'left' || obpp.side === 'right')) {
           var ife = CFG.ifaceStick + CFG.ifaceRadius + 4;
-          if (obpp.side === 'left') obLeftExt = Math.max(obLeftExt, ife);
-          else obRightExt = Math.max(obRightExt, ife);
+          var labelIfe = joinedPorts[obpn] ? 0 : ife;
+          if (obpp.side === 'left') {
+            obLeftExt = Math.max(obLeftExt, ife);
+            obLabelLeftExt = Math.max(obLabelLeftExt, labelIfe);
+          } else {
+            obRightExt = Math.max(obRightExt, ife);
+            obLabelRightExt = Math.max(obLabelRightExt, labelIfe);
+          }
         } else if (obe.standalonePort) {
           var vertical = connectors.some(function(conn) {
             var fromHere = conn.from === obn && conn.fromPort === obpn;
@@ -25279,9 +25850,9 @@
       }
       var labelPad = 4;
       labelObstacles.push({
-        x1: obe.x - labelPad - obLeftExt,
+        x1: obe.x - labelPad - obLabelLeftExt,
         y1: obe.y - labelPad,
-        x2: obe.x + obe.box.width + labelPad + obRightExt,
+        x2: obe.x + obe.box.width + labelPad + obLabelRightExt,
         y2: obe.y + obe.box.height + labelPad,
         name: obn
       });
@@ -25305,10 +25876,25 @@
     var componentSideAnchors = buildComponentSideAnchors(connectors, entries);
     var backEdgeLanes = layout.backEdgeLanes || {};
 
-    function placeSharedInterfaceConnectionLabel(labelInfo, x, y, radius, direction) {
-      var labelText = typeof labelInfo === 'string' ? labelInfo : (labelInfo && labelInfo.label) || '';
+    function labelRectCrossesRoutes(rect, pad) {
+      return scoredSegments.h.some(function(segment) {
+        return segment.y >= rect.top - pad && segment.y <= rect.bottom + pad &&
+          segment.x2 > rect.left - pad && segment.x1 < rect.right + pad;
+      }) || scoredSegments.v.some(function(segment) {
+        return segment.x >= rect.left - pad && segment.x <= rect.right + pad &&
+          segment.y2 > rect.top - pad && segment.y1 < rect.bottom + pad;
+      });
+    }
+
+    function sharedLabelText(labelInfo) {
+      return typeof labelInfo === 'string' ? labelInfo : (labelInfo && labelInfo.label) || '';
+    }
+
+    // Spots beside a joined symbol at (x, y) for its interface name, best
+    // first. `spot` is the first one clear of boxes, labels, and routes.
+    function sharedLabelSpots(labelInfo, x, y, radius, direction) {
+      var labelText = sharedLabelText(labelInfo);
       var labelDirection = !!(labelInfo && labelInfo.labelDirection);
-      if (!labelText && !labelDirection) return;
       var fs = CFG.fontSizePort;
       var labelW = UMLShared.labelDirectionTextWidth(labelText, labelDirection, fs);
       var labelH = fs + 6;
@@ -25338,22 +25924,24 @@
       // Compact keeps the name off the boxes here; the scene keeps it off
       // the interface symbols (they are recorded as port nodes).
       var nameObstacles = recorder ? boxLabelObstacles : labelObstacles;
-      var best = null;
-      for (var sci = 0; sci < candidates.length; sci++) {
-        var cand = candidates[sci];
-        var rect = makeLabelRect(cand.x, cand.y, labelW, labelH, 'middle');
-        if (labelRectHitsObstacles(rect, nameObstacles, 2)) continue;
-        if (labelRectHitsPlacedLabels(rect, placedLabels, 8)) continue;
-        best = { x: cand.x, y: cand.y, rect: rect };
-        break;
-      }
-      if (!best) {
-        best = {
-          x: candidates[0].x,
-          y: candidates[0].y,
-          rect: makeLabelRect(candidates[0].x, candidates[0].y, labelW, labelH, 'middle')
-        };
-      }
+      var spots = candidates.map(function(cand) {
+        return { x: cand.x, y: cand.y, rect: makeLabelRect(cand.x, cand.y, labelW, labelH, 'middle') };
+      });
+      var clear = spots.filter(function(spot) {
+        return !labelRectHitsObstacles(spot.rect, nameObstacles, 2) &&
+          !labelRectHitsPlacedLabels(spot.rect, placedLabels, 8) &&
+          !labelRectCrossesRoutes(spot.rect, 2);
+      });
+      return { spot: clear[0] || null, fallback: spots[0] };
+    }
+
+    function placeSharedInterfaceConnectionLabel(labelInfo, x, y, radius, direction) {
+      var labelText = sharedLabelText(labelInfo);
+      var labelDirection = !!(labelInfo && labelInfo.labelDirection);
+      if (!labelText && !labelDirection) return;
+      var fs = CFG.fontSizePort;
+      var spots = sharedLabelSpots(labelInfo, x, y, radius, direction);
+      var best = spots.spot || spots.fallback;
       placedLabels.push(best.rect);
       if (recorder) recorder.label('iface-label:' + labelText + '@' + best.x + ',' + best.y, best.rect, null, 'interface', fs);
       drawInterfaceConnectionLabel(svg, labelText, best.x, best.y, colors, fs);
@@ -26571,6 +27159,15 @@
     // Route long/high-pressure back-edges first so they reserve a compact
     // outside track. Local routes then see those tracks as occupied space and
     // choose the opposite side rather than being cut by a later return edge.
+    // The vertical distance between a connector's port ends under an explicit
+    // vertical layout (0 otherwise).
+    function verticalPortSpan(conn) {
+      if (!isExplicitVerticalLayout(parsed)) return 0;
+      var fromPos = conn.fromPort && entries[conn.from].portPositions[conn.fromPort];
+      var toPos = conn.toPort && entries[conn.to].portPositions[conn.toPort];
+      return fromPos && toPos ? Math.abs(fromPos.cy - toPos.cy) : 0;
+    }
+
     var connectorOrder = [];
     for (var coi = 0; coi < connectors.length; coi++) connectorOrder.push(coi);
     var hasHiddenOrderConstraints = !!(parsed.orderConstraints && parsed.orderConstraints.length);
@@ -26595,6 +27192,10 @@
         if (Math.abs(srcCxA - srcCxB) > 1) {
           return hasHiddenOrderConstraints ? srcCxA - srcCxB : srcCxB - srcCxA;
         }
+        // Nested C-shaped routes of a vertical stack: the outer route goes
+        // first, so the inner one and its labels see the outer lane.
+        var spanA = verticalPortSpan(ca), spanB = verticalPortSpan(cb);
+        if (Math.abs(spanA - spanB) > 1) return spanB - spanA;
         if (Math.abs(pressureA - pressureB) > 1) return pressureA - pressureB;
       }
       return a - b;
@@ -27446,8 +28047,9 @@
         var targetRouteId = 'edge-' + renderedRouteCount++;
         routeSourceDataAttr = connectorLayoutAttrs(conn, { source: true, target: false }, sourceRouteId);
         routeTargetDataAttr = connectorLayoutAttrs(conn, { source: false, target: true }, targetRouteId);
-        // Keep the joined symbol beside one of its component interfaces.
-        // Search every clear shaft because labels can occupy the nearest one.
+        // Keep the joined symbol beside the provider's interface, so the ball
+        // never reads as the consumer's. Search every clear shaft because
+        // labels can occupy the nearest one.
         var ballR = CFG.ifaceRadius;
         var socketR = CFG.ifaceSocketRadius;
         var bsPad = Math.max(ballR, socketR) + CFG.strokeWidth / 2 + 2;
@@ -27458,8 +28060,26 @@
         }).concat(placedLabels.map(function(rect) {
           return { x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom };
         }));
+        // Both ends of a clear stretch, and the points between them, where a
+        // label that does not fit beside an end may still fit.
+        function jointCandidatePositions(interval) {
+          var positions = [interval[0], interval[1]];
+          for (var position = interval[0] + JOINED_SYMBOL_SCAN_STEP; position < interval[1]; position += JOINED_SYMBOL_SCAN_STEP) {
+            positions.push(position);
+          }
+          return positions;
+        }
         var bsSi = 0, bsFallbackLength = 0, bsFallbackHorizontal = false;
         var bsPlacement = null;
+        var bsLabelInfo = sharedInterfaceConnectorLabels[ci];
+        function distanceToNearestBox(x, y) {
+          return Math.min.apply(null, Object.keys(entries).map(function(name) {
+            var entry = entries[name];
+            var dx = Math.max(entry.x - x, 0, x - (entry.x + entry.box.width));
+            var dy = Math.max(entry.y - y, 0, y - (entry.y + entry.box.height));
+            return Math.sqrt(dx * dx + dy * dy);
+          }));
+        }
         var bsRouteLength = UMLShared.measureOrthogonalRoute(points);
         var bsDistanceFromStart = 0;
         for (var bsi = 0; bsi < points.length - 1; bsi++) {
@@ -27493,10 +28113,20 @@
             bsIntervals = remaining;
           });
           bsIntervals.forEach(function(interval) {
-            [interval[0], interval[1]].forEach(function(position) {
+            jointCandidatePositions(interval).forEach(function(position) {
               var distanceAlongRoute = bsDistanceFromStart + Math.abs(position - points[bsi][bsAxis]);
-              var interfaceDistance = Math.min(distanceAlongRoute, bsRouteLength - distanceAlongRoute);
-              var placementScore = interfaceDistance + (bsSegIsH ? 0 : 4);
+              var providerDistance = fromKind === 'provide' ? distanceAlongRoute : bsRouteLength - distanceAlongRoute;
+              var placementScore = providerDistance + (bsSegIsH ? 0 : 4);
+              var spotX = bsSegIsH ? position : bsFixed;
+              var spotY = bsSegIsH ? bsFixed : position;
+              // The symbol stays beside a component; among such spots, prefer
+              // one where the interface name fits beside the symbol.
+              if (distanceToNearestBox(spotX, spotY) > JOINED_SYMBOL_MAX_BOX_GAP) {
+                placementScore += JOINED_SYMBOL_FLOATING_PENALTY;
+              } else if (bsLabelInfo && !sharedLabelSpots(bsLabelInfo, spotX, spotY,
+                  Math.max(ballR, socketR), bsSegIsH ? { x: 1, y: 0 } : { x: 0, y: 1 }).spot) {
+                placementScore += JOINED_SYMBOL_UNLABELLED_PENALTY;
+              }
               if (!bsPlacement || placementScore < bsPlacement.score) {
                 bsPlacement = { index: bsi, score: placementScore,
                   x: bsSegIsH ? position : bsFixed, y: bsSegIsH ? bsFixed : position };
@@ -27787,7 +28417,6 @@
     }
 
     // ── Draw component boxes ──
-    var nameAreaH2 = CFG.lineHeight + CFG.padY;
     for (var en in entries) {
       var e = entries[en];
       var bx = e.x, by = e.y, bw = e.box.width, bh = e.box.height;
@@ -28951,6 +29580,13 @@
     nodeMinW: 180,
     nodeMinH: 70,
     node3dDepth: 12,
+    // A link label keeps this far from both ends of the segment it sits on.
+    labelEndpointPad: 22,
+    // A node that contains other nodes leaves corridors around them, so links
+    // into nested nodes can cross its body clear of the nested outlines.
+    nestedNodePad: 36,
+    // Clearance the router keeps around every box (link labels keep it too).
+    obstaclePad: 10,
     compH: 36,
     compPadX: 10,
     compIconW: 14,
@@ -29137,10 +29773,53 @@
     return lines;
   }
 
+  function deploymentLabelWidth(element) {
+    return Math.max(...deploymentLabelLines(element).map(line => UMLShared.textWidth(
+      line.text, line.bold, line.bold ? CFG.fontSizeBold : CFG.fontSizeComp)));
+  }
+
+  // Vertical room between two stacked nested nodes for the label of a link
+  // running straight down between them, placed at the link's midpoint. The
+  // label box extends fontSize + 6 above its baseline and 4 below it, and
+  // keeps the router's clearance plus the label placer's spacing (UMLShared
+  // default 6) from the node above and from the cube top of the node below.
+  function deploymentNestedLabelGap() {
+    const clearance = CFG.obstaclePad + 6;
+    const halfSpan = Math.max(CFG.fontSize + 6 + clearance, 4 + clearance + CFG.node3dDepth);
+    return 2 * halfSpan - CFG.node3dDepth;
+  }
+
+  // Nodes holding nested nodes that a labelled link runs between: the
+  // innermost node that encloses both ends, when neither end contains the
+  // other, with the width of the widest such label it holds.
+  function deploymentNodesBetweenLabelledLinks(entries, links) {
+    const widths = new Map();
+    for (const link of links) {
+      if (!(link.label || link.labelDirection) || !entries[link.from] || !entries[link.to]) continue;
+      const sourceAncestors = deploymentAncestors(entries, link.from);
+      const targetAncestors = deploymentAncestors(entries, link.to);
+      if (sourceAncestors.includes(link.to) || targetAncestors.includes(link.from)) continue;
+      const common = sourceAncestors.find(id => targetAncestors.includes(id));
+      if (!common) continue;
+      const width = UMLShared.labelDirectionTextWidth(link.label, link.labelDirection, CFG.fontSize);
+      widths.set(common, Math.max(widths.get(common) || 0, width));
+    }
+    return widths;
+  }
+
+  // The width a node needs so that the label of a link running down between
+  // its stacked children fits beside that link inside it: the link runs near
+  // the centre of the narrowest child, and its label starts 8 beside it
+  // (placeDeploymentLinkLabel) and keeps the obstacle clearance from the
+  // node's right side. A label across the outline would read as part of it.
+  function deploymentLabelHolderWidth(entries, childIds, padX, labelWidth) {
+    const narrowest = Math.min(...childIds.map(childId => entries[childId].box.width));
+    return padX + narrowest / 2 + 8 + labelWidth + 2 * CFG.obstaclePad;
+  }
+
   function measureDeploymentElement(element) {
     const lines = deploymentLabelLines(element);
-    const labelWidth = Math.max(...lines.map(line => UMLShared.textWidth(
-      line.text, line.bold, line.bold ? CFG.fontSizeBold : CFG.fontSizeComp)));
+    const labelWidth = deploymentLabelWidth(element);
     const iconSpace = element.kind === 'node' ? 0 : CFG.compIconW + CFG.compPadX;
     const width = Math.max(CFG.nodeMinW, labelWidth + CFG.nodePadX * 2 + iconSpace);
     const headerHeight = CFG.nodePadY * 2 + lines.length * CFG.lineHeight;
@@ -29168,23 +29847,33 @@
       deploymentAncestors(entries, left).length - deploymentAncestors(entries, right).length);
     // Measure containers from the inside out, retaining an independent box for
     // every contained element so links and the layout editor share its identity.
+    const labelledLinkHolders = deploymentNodesBetweenLabelledLinks(entries, links);
     for (const id of outerFirst.slice().reverse()) {
       const entry = entries[id];
       const childIds = children[id] || [];
       if (!childIds.length) continue;
+      const holdsNodes = childIds.some(childId => entries[childId].node.kind === 'node');
+      const padX = holdsNodes ? CFG.nestedNodePad : CFG.nodePadX;
+      const gapY = !holdsNodes ? CFG.compGapY
+        : labelledLinkHolders.has(id) ? Math.max(CFG.nestedNodePad, deploymentNestedLabelGap()) : CFG.nestedNodePad;
+      const labelRoom = holdsNodes && labelledLinkHolders.has(id)
+        ? deploymentLabelHolderWidth(entries, childIds, padX, labelledLinkHolders.get(id)) : 0;
+      const padBottom = holdsNodes ? CFG.nestedNodePad : CFG.nodePadY;
       let childY = entry.box.headerHeight;
       let width = entry.box.width;
       for (const childId of childIds) {
         const child = entries[childId];
+        // Each nested level keeps its own cube depth clear of the header or
+        // sibling above it and of its parent's right border.
         const depth = child.node.kind === 'node' ? CFG.node3dDepth : 0;
         childY += depth;
-        child.relativeX = CFG.nodePadX;
+        child.relativeX = padX;
         child.relativeY = childY;
-        childY += child.box.height + CFG.compGapY;
-        width = Math.max(width, child.box.width + CFG.nodePadX * 2 + depth);
+        childY += child.box.height + gapY;
+        width = Math.max(width, child.box.width + padX * 2 + depth);
       }
-      entry.box.width = Math.ceil(width);
-      entry.box.height = Math.ceil(childY - CFG.compGapY + CFG.nodePadY);
+      entry.box.width = Math.ceil(Math.max(width, labelRoom));
+      entry.box.height = Math.ceil(childY - gapY + padBottom);
     }
     function topLevelId(id) {
       const ancestors = deploymentAncestors(entries, id);
@@ -29244,7 +29933,7 @@
       });
     }
 
-    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, {
+    var depLayoutOptions = {
       gapX: effectiveGapX,
       gapY: deployGapY,
       direction: parsed.direction || 'TB',
@@ -29253,7 +29942,24 @@
       labelFontSize: CFG.fontSize,
       markerExtent: CFG.arrowSize + CFG.node3dDepth + 4,
       edgeSizes: depEdgeSizes
-    });
+    };
+    var result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, depLayoutOptions);
+    // The gap between two ranks is budgeted from the labels' heights, which
+    // fits ranks stacked top to bottom. Laid out left to right, a link label
+    // runs along its link across the gap, so the gap must fit the label's
+    // width and the label's distance from both ends of the link; otherwise
+    // the label finds no place beside its link and drifts away from it.
+    if (result.direction === 'LR' || result.direction === 'RL') {
+      result = window.UMLAdvancedLayout.compute(layoutNodes, layoutEdges, Object.assign({}, depLayoutOptions, {
+        direction: result.direction,
+        directionLocked: true,
+        edgeSizes: depEdgeSizes.map(function(size) {
+          return Object.assign({}, size, {
+            labelHeight: size.labelWidth ? size.labelWidth + 2 * (CFG.labelEndpointPad + CFG.node3dDepth) : 0
+          });
+        })
+      }));
+    }
 
     for (var nm in result.nodes) {
       if (!entries[nm]) continue;
@@ -29276,7 +29982,11 @@
     for (const id of outerFirst) {
       const entry = entries[id];
       const parentId = entry.node.parentId;
-      if (!parentId || !entries[parentId] || (parsed.layout && parsed.layout.positions && parsed.layout.positions[id])) continue;
+      // Look a saved position up the way applyLayoutPositions does: a
+      // declaration with a stereotype after its alias saves under its label.
+      const saved = UMLShared.findLayoutPosition(parsed.layout, id) ||
+        UMLShared.findLayoutPosition(parsed.layout, entry.node.label);
+      if (!parentId || !entries[parentId] || saved) continue;
       entry.x += entries[parentId].x - before[parentId].x;
       entry.y += entries[parentId].y - before[parentId].y;
     }
@@ -29401,7 +30111,6 @@
     var svg = [];
     var labelSvg = [];
     var placedLabels = [];
-    var placedRouteSegments = [];
     // Keep editor coordinates and route points in the same SVG coordinate
     // system; the fitted viewBox supplies padding without translating content.
     svg.push(UMLShared.svgOpen(svgW, svgH, 0, 0, CFG.fontFamily));
@@ -29463,7 +30172,7 @@
     }
 
     // ── Obstacle-aware routing helpers ──
-    var obPad = 10;
+    var obPad = CFG.obstaclePad;
     var obstacles = [];
     for (var obn in entries) {
       var obe = entries[obn];
@@ -29656,12 +30365,159 @@
       });
     }
 
+    // A link may cross the borders of the nodes that enclose its endpoints,
+    // so those nodes are skipped as routing obstacles. For a link that
+    // touches a nested node, their headers stay blocked (a connector must
+    // never strike through a node's name), and the connector must not run
+    // along their borders, where it would read as part of the outline.
+    function deploymentHeaderObstacle(entry) {
+      const depth = entry.node.kind === 'node' ? CFG.node3dDepth : 0;
+      return {
+        x1: entry.x,
+        y1: entry.y - depth,
+        x2: entry.x + entry.box.width + depth,
+        y2: entry.y + entry.box.headerHeight
+      };
+    }
+
+    // The straight edges of a node's drawn outline (its box and, for a node,
+    // the outer edges of its cube faces), as orthogonal segments.
+    function deploymentOutlineSegments(entry) {
+      const depth = entry.node.kind === 'node' ? CFG.node3dDepth : 0;
+      const left = entry.x, right = entry.x + entry.box.width;
+      const top = entry.y, bottom = entry.y + entry.box.height;
+      const outline = [
+        { isH: true, y: top, x1: left, x2: right },
+        { isH: true, y: bottom, x1: left, x2: right },
+        { isH: false, x: left, y1: top, y2: bottom },
+        { isH: false, x: right, y1: top, y2: bottom }
+      ];
+      if (depth) {
+        outline.push({ isH: true, y: top - depth, x1: left + depth, x2: right + depth });
+        outline.push({ isH: false, x: right + depth, y1: top - depth, y2: bottom - depth });
+      }
+      return outline;
+    }
+
+    // Length of a route that runs on top of an enclosing node's outline.
+    function deploymentBorderRunLength(points, enclosingEntries) {
+      let total = 0;
+      for (let index = 1; index < points.length; index++) {
+        const a = points[index - 1], b = points[index];
+        const horizontal = Math.abs(a.y - b.y) < 1;
+        const lo = horizontal ? Math.min(a.x, b.x) : Math.min(a.y, b.y);
+        const hi = horizontal ? Math.max(a.x, b.x) : Math.max(a.y, b.y);
+        const fixed = horizontal ? a.y : a.x;
+        for (const entry of enclosingEntries) {
+          for (const edge of deploymentOutlineSegments(entry)) {
+            if (edge.isH !== horizontal || Math.abs((horizontal ? edge.y : edge.x) - fixed) > 3) continue;
+            const overlap = Math.min(hi, horizontal ? edge.x2 : edge.y2) - Math.max(lo, horizontal ? edge.x1 : edge.y1);
+            if (overlap > 0) total += overlap;
+          }
+        }
+      }
+      return total;
+    }
+
+    // Everything outside a node, as obstacles that keep a label inside it.
+    function deploymentOutsideObstacles(entry) {
+      const far = 1e6;
+      const left = entry.x, right = entry.x + entry.box.width;
+      const top = entry.y, bottom = entry.y + entry.box.height;
+      return [
+        { x1: -far, y1: -far, x2: left, y2: far },
+        { x1: right, y1: -far, x2: far, y2: far },
+        { x1: -far, y1: -far, x2: far, y2: top },
+        { x1: -far, y1: bottom, x2: far, y2: far }
+      ];
+    }
+
     const paintOrder = Object.keys(entries).sort((left, right) =>
       deploymentAncestors(entries, left).length - deploymentAncestors(entries, right).length);
     for (const id of paintOrder) drawDeploymentElement(svg, entries[id], colors);
 
+    // Places the label of one routed link beside its route, clear of every
+    // other link's route (`otherRouteSegments`) and of labels placed before.
+    function placeDeploymentLinkLabel(routedLink, otherRouteSegments) {
+      var lk = routedLink.link;
+      var points = routedLink.points;
+      var labelObstacles = routedLink.labelObstacles;
+      var touchesNestedNode = routedLink.touchesNestedNode;
+      var sourceAncestors = routedLink.sourceAncestors;
+      var targetAncestors = routedLink.targetAncestors;
+      var enclosingEntries = routedLink.enclosingEntries;
+      if (lk.label || lk.labelDirection) {
+        var deploymentLabelText = UMLShared.labelDirectionPlacementText(lk.label, lk.labelDirection);
+        var placeDeploymentLabel = function(labelObstacleList, segmentsToAvoid, adjacentOnly) {
+          var labelOptions = {
+            fontSize: CFG.fontSize,
+            otherSegments: segmentsToAvoid,
+            endpointPad: CFG.labelEndpointPad,
+            scoreCandidate: function(segment) {
+              return segment.isH ? 10 : -4;
+            }
+          };
+          if (adjacentOnly) {
+            // Only the positions touching the link (UMLShared's first two per
+            // direction), never the offsets one label height further away.
+            var labelHeight = CFG.fontSize + 6;
+            labelOptions.horizontalPlacements = [
+              { anchor: 'middle', dx: 0, dy: -8, penalty: 0 },
+              { anchor: 'middle', dx: 0, dy: labelHeight + 2, penalty: 8 }
+            ];
+            labelOptions.verticalPlacements = [
+              { anchor: 'start', dx: 8, dy: 0, penalty: 2 },
+              { anchor: 'end', dx: -8, dy: 0, penalty: 4 }
+            ];
+          }
+          return UMLShared.placeOrthogonalLabel(deploymentLabelText, points, labelObstacleList, placedLabels, labelOptions);
+        };
+        var labelPlacement = null;
+        // A label straddling an outline would read as part of it.
+        var outlines = touchesNestedNode
+          ? enclosingEntries.reduce((all, entry) => all.concat(deploymentOutlineSegments(entry)), [])
+          : [];
+        var clearPlacement = function(placement) {
+          return placement && isFinite(placement.score) ? placement : null;
+        };
+        if (touchesNestedNode) {
+          // Preferred: beside the link, inside the innermost node that
+          // encloses both ends (an endpoint that contains the other counts),
+          // and clear of every outline the link crosses. A crowded nesting
+          // falls back to the relaxed placements below, which still keep
+          // clear of those outlines when they can.
+          const sourceChain = [lk.from].concat(sourceAncestors);
+          const commonId = sourceChain.find(id => id === lk.to || targetAncestors.includes(id));
+          const insideObstacles = commonId ? labelObstacles.concat(deploymentOutsideObstacles(entries[commonId])) : labelObstacles;
+          labelPlacement = clearPlacement(placeDeploymentLabel(insideObstacles, otherRouteSegments.concat(outlines), true));
+          if (!labelPlacement) labelPlacement = clearPlacement(placeDeploymentLabel(labelObstacles, otherRouteSegments.concat(outlines), true));
+        }
+        if (!labelPlacement) labelPlacement = placeDeploymentLabel(labelObstacles, otherRouteSegments, false);
+        if (labelPlacement) {
+          var deploymentLabelRect = labelPlacement.rect;
+          if (lk.label) {
+            labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
+              '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
+              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke" font-style="italic">' +
+              UMLShared.escapeXml(lk.label) + '</text>');
+          }
+          var deploymentDirectionRect = UMLShared.pushLabelDirectionTriangle(
+            labelSvg,
+            lk.label,
+            lk.labelDirection,
+            labelPlacement,
+            points,
+            colors,
+            { fontSize: CFG.fontSize }
+          );
+          placedLabels.push(UMLShared.unionRects(deploymentLabelRect, deploymentDirectionRect));
+        }
+      }
+    }
+
     // ── Draw links ──
     var occupiedSegments = { h: [], v: [] };
+    var routedLinks = [];
     for (var li = 0; li < links.length; li++) {
       var lk = links[li];
       var fromE = entries[lk.from], toE = entries[lk.to];
@@ -29683,8 +30539,29 @@
       const targetAncestors = deploymentAncestors(entries, lk.to);
       const containingEndpoint = targetAncestors.includes(lk.from) ? fromE
         : sourceAncestors.includes(lk.to) ? toE : null;
-      for (const parent of sourceAncestors.concat(targetAncestors)) skipN[parent] = true;
-      var routeObstacles = obstacles.concat(deploymentEndpointObstacles(fromE, toE));
+      const enclosingIds = sourceAncestors.concat(targetAncestors).filter((id, index, all) => all.indexOf(id) === index);
+      for (const parent of enclosingIds) skipN[parent] = true;
+      const enclosingEntries = enclosingIds.map(id => entries[id]);
+      // A link that starts or ends at a nested node (a node within a node),
+      // or inside one, may run a long way inside several enclosing nodes, so
+      // it keeps clear of their names and borders, and its label may stay
+      // inside them. A link between top-level nodes and the components or
+      // artifacts directly inside them leaves its node at once and needs
+      // neither.
+      const touchesNestedNode = [lk.from, lk.to].concat(enclosingIds).some(id =>
+        entries[id].node.kind === 'node' && deploymentAncestors(entries, id).length > 0);
+      const headerObstacles = touchesNestedNode ? enclosingEntries.map(deploymentHeaderObstacle) : [];
+      var routeObstacles = obstacles.concat(headerObstacles, deploymentEndpointObstacles(fromE, toE));
+      // Such a label may sit inside its endpoints' enclosing nodes (including
+      // an endpoint that contains the other one); only their names stay
+      // blocked. Every other label keeps every node blocked whole, so it never
+      // straddles an outline, even when that takes it further from its link.
+      var labelObstacles = !touchesNestedNode ? obstacles : obstacles.map(function(obstacle) {
+        if (enclosingIds.indexOf(obstacle.name) === -1) return obstacle;
+        var enclosing = entries[obstacle.name];
+        return { x1: obstacle.x1, y1: obstacle.y1, x2: enclosing.x + CFG.nodePadX + deploymentLabelWidth(enclosing.node) + obPad,
+          y2: enclosing.y + enclosing.box.headerHeight, name: obstacle.name };
+      });
 
       var sourceSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, true);
       var targetSideOrder = buildDeploymentPreferredSideOrder(fromE, toE, false);
@@ -29728,7 +30605,7 @@
         var sourceCandidate = sourceCandidates[sci];
         for (var tci = 0; tci < targetCandidates.length; tci++) {
           var targetCandidate = targetCandidates[tci];
-          var searchObstacles = obstacles.concat(deploymentEndpointObstacles(
+          var searchObstacles = obstacles.concat(headerObstacles, deploymentEndpointObstacles(
             fromE, toE, sourceCandidate.anchor.side, targetCandidate.anchor.side));
           var routed = UMLShared.routeOrthogonalConnector(sourceCandidate.anchor, targetCandidate.anchor, searchObstacles, {
             skipNames: skipN,
@@ -29744,7 +30621,8 @@
           if (!deploymentRouteFitsContainer(routed.points, containingEndpoint)) continue;
 
           var crosses = UMLShared.countRouteCrossings(routed.points, occupiedSegments);
-          var score = routed.length + routed.bends * 40 + crosses * 5000;
+          var borderRun = touchesNestedNode ? deploymentBorderRunLength(routed.points, enclosingEntries) : 0;
+          var score = routed.length + routed.bends * 40 + crosses * 5000 + (borderRun > 6 ? 3000 + borderRun * 20 : 0);
           score += sourceCandidate.sideRank * 28 + targetCandidate.sideRank * 28;
           score += sourceCandidate.anchorRank * 6 + targetCandidate.anchorRank * 6;
 
@@ -29838,40 +30716,22 @@
           (pLast.x - adx * as - px * hw) + ',' + (pLast.y - ady * as - py * hw) +
           '" fill="none" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"/>');
       }
-      var routeSegments = UMLShared.buildOrthogonalSegments(points);
+      // The label is placed once every route is drawn (below), so it can keep
+      // clear of links drawn after its own as well as before it.
+      routedLinks.push({
+        link: lk, points: points, segments: UMLShared.buildOrthogonalSegments(points), labelObstacles: labelObstacles,
+        touchesNestedNode: touchesNestedNode, sourceAncestors: sourceAncestors, targetAncestors: targetAncestors,
+        enclosingEntries: enclosingEntries
+      });
+    }
 
-      // Label — obstacle-aware placement over orthogonal routes
-      if (lk.label || lk.labelDirection) {
-        var deploymentLabelText = UMLShared.labelDirectionPlacementText(lk.label, lk.labelDirection);
-        var labelPlacement = UMLShared.placeOrthogonalLabel(deploymentLabelText, points, obstacles, placedLabels, {
-          fontSize: CFG.fontSize,
-          otherSegments: placedRouteSegments,
-          endpointPad: 22,
-          scoreCandidate: function(segment) {
-            return segment.isH ? 10 : -4;
-          }
-        });
-        if (labelPlacement) {
-          var deploymentLabelRect = labelPlacement.rect;
-          if (lk.label) {
-            labelSvg.push('<text x="' + labelPlacement.x + '" y="' + labelPlacement.y +
-              '" text-anchor="' + labelPlacement.anchor + '" font-size="' + CFG.fontSize + '" fill="' + colors.text +
-              '" stroke="' + colors.fill + '" stroke-width="4" stroke-opacity="0.85" stroke-linejoin="round" paint-order="stroke" font-style="italic">' +
-              UMLShared.escapeXml(lk.label) + '</text>');
-          }
-          var deploymentDirectionRect = UMLShared.pushLabelDirectionTriangle(
-            labelSvg,
-            lk.label,
-            lk.labelDirection,
-            labelPlacement,
-            points,
-            colors,
-            { fontSize: CFG.fontSize }
-          );
-          placedLabels.push(UMLShared.unionRects(deploymentLabelRect, deploymentDirectionRect));
-        }
+    // ── Place link labels ──
+    for (var rli = 0; rli < routedLinks.length; rli++) {
+      var otherRouteSegments = [];
+      for (var orli = 0; orli < routedLinks.length; orli++) {
+        if (orli !== rli) otherRouteSegments = otherRouteSegments.concat(routedLinks[orli].segments);
       }
-      placedRouteSegments = placedRouteSegments.concat(routeSegments);
+      placeDeploymentLinkLabel(routedLinks[rli], otherRouteSegments);
     }
 
     // ── Draw labels on top ──
@@ -36178,6 +37038,149 @@
 
   UMLShared.createAutoInit('pre > code.diagram-crc, pre > code.language-crc', render, { type: 'crc' });
   window.UMLCRCDiagram = { render, parse };
+})();
+/**
+ * UMLC4Diagram — the `c4` diagram type.
+ *
+ * The C4 toolkit (js/ArchUML/c4/, publishing ArchUMLC4 and ArchUMLC4Render) is not part of this bundle. Pages
+ * about C4 preload its scripts, and this stub renders synchronously there. Anywhere else the first C4 figure loads
+ * the scripts, and every figure that asked meanwhile is completed once they arrive (spec §3.3, the lazy
+ * completion contract).
+ */
+(function () {
+  'use strict';
+
+  // A copy of c4/manifest.json's `core` list followed by its `render` list, in load order. The bundle cannot read
+  // JSON, so tests/c4/bundle-stub.test.js keeps this copy equal to the manifest.
+  var CORE_SCRIPTS = [
+    'vendor/yaml/2.9.1/yaml.js',
+    'c4/c4-schema.js',
+    'c4/c4-yaml.js',
+    'c4/c4-model.js',
+    'c4/c4-projection.js',
+    'c4/c4-checks.js',
+    'c4/c4-query.js',
+    'c4/c4-constraints.js',
+    'c4/c4-edit-splices.js',
+    'c4/c4-edit-results.js',
+    'c4/c4-edit-references.js',
+    'c4/c4-edit-elements.js',
+    'c4/c4-edit-sections.js',
+    'c4/c4-edit-interfaces.js',
+    'c4/c4-edit.js',
+    'c4/c4-describe.js',
+    'c4/c4-uml.js',
+    'c4/c4-core.js',
+    'c4/c4-place-frame.js',
+    'c4/c4-place-ranks.js',
+    'c4/c4-place-corridors.js',
+    'c4/c4-place-cross.js',
+    'c4/c4-place-settle.js',
+    'c4/c4-place.js',
+    'c4/c4-route-frame.js',
+    'c4/c4-route-shapes.js',
+    'c4/c4-route-labels.js',
+    'c4/c4-route-candidates.js',
+    'c4/c4-route-costs.js',
+    'c4/c4-route-state.js',
+    'c4/c4-route-pricing.js',
+    'c4/c4-route-separate.js',
+    'c4/c4-route-select.js',
+    'c4/c4-route-growth.js',
+    'c4/c4-route-evidence.js',
+    'c4/c4-route.js',
+    'c4/c4-markup.js',
+    'c4/c4-card.js',
+    'c4/c4-render.js'
+  ];
+
+  var LOADING_MESSAGE = 'Loading diagram';
+  var LOAD_ERROR_MESSAGE = 'This diagram could not be loaded because the C4 scripts failed to load.';
+  var RENDER_ERROR_MESSAGE = 'This diagram could not be drawn because of an error in the C4 renderer.';
+
+  // Manifest paths are relative to the ArchUML folder, which holds this bundle. `currentScript` is set only while
+  // the bundle runs, so the URL is read now. A bundle inlined into a page has no URL; such pages preload C4.
+  var BUNDLE_URL = document.currentScript && document.currentScript.src ? document.currentScript.src : null;
+  var scriptsLoading = null;
+
+  function scriptsLoaded() {
+    return !!(window.ArchUMLC4 && window.ArchUMLC4Render);
+  }
+
+  /** The design `ArchUMLC4.load` reads from `text`, or null while the C4 core is not loaded. */
+  function parse(text) {
+    return window.ArchUMLC4 ? window.ArchUMLC4.load(text) : null;
+  }
+
+  function loadScript(url) {
+    return new Promise(function (resolve, reject) {
+      var script = document.createElement('script');
+      script.src = url;
+      script.async = false;
+      script.onload = function () { resolve(); };
+      script.onerror = function () { reject(new Error('Could not load the C4 script ' + url)); };
+      document.head.appendChild(script);
+    });
+  }
+
+  /** The one load of the C4 scripts, one after another so each runs after those it needs; never retried. */
+  function loadScripts() {
+    if (scriptsLoading) return scriptsLoading;
+    var loaded = BUNDLE_URL
+      ? CORE_SCRIPTS.reduce(function (previous, file) {
+          return previous.then(function () { return loadScript(new URL(file, BUNDLE_URL).href); });
+        }, Promise.resolve())
+      : Promise.reject(new Error('The C4 scripts cannot be located: the ArchUML bundle was not loaded from a URL.'));
+    scriptsLoading = loaded.catch(function (error) {
+      console.error(error);
+      throw error;
+    });
+    return scriptsLoading;
+  }
+
+  /** Shows `message` instead of a figure, labelled with the same text; returns the message element. */
+  function showMessage(container, state, className, message) {
+    UMLShared.prepareDiagramContainer(container, 'c4');
+    var element = document.createElement('div');
+    element.className = className;
+    element.textContent = message;
+    container.replaceChildren(element);
+    container.setAttribute('data-c4-state', state);
+    container.setAttribute('role', 'img');
+    container.setAttribute('aria-label', message);
+    return element;
+  }
+
+  /**
+   * Draws `text` with the loaded C4 scripts, whose `render` also labels, describes, and sizes the figure like every
+   * ArchUML type (spec §3.3 step 2); a renderer failure leaves an accessible error state, not a stale figure.
+   */
+  function renderOrShowError(container, text) {
+    try {
+      window.ArchUMLC4Render.render(container, text);
+    } catch (error) {
+      console.error(error);
+      showMessage(container, 'render-error', 'uml-error-msg', RENDER_ERROR_MESSAGE);
+    }
+  }
+
+  function render(container, text) {
+    if (scriptsLoaded()) {
+      renderOrShowError(container, text);
+      return;
+    }
+    // A later render of the same container replaces this placeholder, which makes this request stale.
+    var placeholder = showMessage(container, 'loading', 'uml-empty-msg', LOADING_MESSAGE);
+    var isCurrent = function () { return container.isConnected && placeholder.parentNode === container; };
+    loadScripts().then(function () {
+      if (isCurrent()) renderOrShowError(container, text);
+    }, function () {
+      if (isCurrent()) showMessage(container, 'load-error', 'uml-error-msg', LOAD_ERROR_MESSAGE);
+    });
+  }
+
+  UMLShared.createAutoInit('pre > code.diagram-c4, pre > code.language-c4', render, { type: 'c4' });
+  window.UMLC4Diagram = { render: render, parse: parse, CORE_SCRIPTS: CORE_SCRIPTS };
 })();
 /**
  * UML Notation Symbol Renderer

@@ -89,13 +89,15 @@ Workflow --> Callbacks : notify`;
 
 // A required interface of a member joined to a provided one outside; in a
 // wide pane the ball and socket are drawn at the member.
+// A joined ball and socket is drawn beside its provider, so the provider is
+// the package member here.
 const JOINED_AT_MEMBER = `package Backend {
   component Workflow {
-    require "payments" as w_pay
+    provide "payments" as w_pay
   }
 }
 component Bank {
-  provide "payments" as b_pay
+  require "payments" as b_pay
 }
 w_pay --> b_pay`;
 

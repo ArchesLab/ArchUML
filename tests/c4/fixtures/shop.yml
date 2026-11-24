@@ -1,0 +1,19 @@
+schema: c4-design/1
+name: Shop
+people:
+  shopper: {name: Shopper, collaborators: {storefront: browses products using}}
+systems:
+  shop:
+    name: Shop
+    containers:
+      storefront: {name: Storefront, kind: browser_app, technology: React, collaborators: {gateway: {description: calls, technology: JSON/HTTPS}}}
+      gateway: {name: API Gateway, collaborators: {catalog: routes catalog requests to, orders: routes orders to, accounts: routes sign-ins to}}
+      catalog: {name: Catalog Service, collaborators: {catalog-db: reads products from, search: queries}}
+      catalog-db: {name: Catalog Database, kind: database}
+      search: {name: Search Index}
+      orders: {name: Order Service, collaborators: {orders-db: writes orders to, events: {description: publishes order events to, connector: message}}}
+      orders-db: {name: Order Database, kind: database}
+      events: {name: Order Events, kind: queue}
+      mailer: {name: Mailer, collaborators: {events: reads order events from}}
+      accounts: {name: Account Service, collaborators: {payments: charges cards through}}
+  payments: {name: Payment Provider, external: true}

@@ -1,0 +1,12 @@
+schema: c4-design/1
+name: Landing
+people:
+  student: {name: Student, collaborators: {registration: plans a schedule using}}
+systems:
+  registration:
+    name: Registration
+    collaborators: {billing: requests tuition charges from}
+    containers:
+      web: {name: Planner}
+      api: {name: API}
+  billing: {name: Billing, external: true}

@@ -84,6 +84,16 @@ html.dark-mode .uml-fit-button:focus-visible { outline-color: #8ecfff; }
     max-width: 100% !important;
     transform: none !important;
   }
+  /* A figure that fits only at a readable size gets no control. Its drawing
+     takes the width the renderer writes (--uml-readable-fit-width, from the
+     figure's width, 100cqi), so the figure is a size container. Print keeps
+     the shared rule that fits every drawing to the paper. */
+  [data-uml-fit="readable"] {
+    container-type: inline-size;
+  }
+  [data-uml-fit="readable"] svg {
+    width: var(--uml-readable-fit-width, var(--uml-readable-width, auto)) !important;
+  }
 }
 @media (forced-colors: active) {
   .uml-fit-icon { background: ButtonText; }

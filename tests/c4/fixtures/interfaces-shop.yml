@@ -1,0 +1,77 @@
+schema: c4-design/1
+name: Campus Shop
+systems:
+  shop:
+    name: Campus Shop
+    description: Sells printed course readers to students.
+    containers:
+      app:
+        name: Shop App
+        technology: Python, Flask
+        description: Takes orders for course readers and charges for them.
+        responsibilities:
+          - do: take an order for a course reader
+            id: app-orders
+        collaborators:
+          payments:
+            description: charges the order total through
+            technology: JSON/HTTPS
+            uses: card-payments.charge
+        # Shorthand: one interface with id "app" and operations get-readers-id and post-orders.
+        # interface/unused (info): no relationship uses it yet.
+        provides: ["GET /readers/{id}", "POST /orders"]
+  payments:
+    name: Payment Provider
+    external: true
+    description: Charges credit and debit cards for online shops.
+    provides:
+      card-payments:
+        name: Card Payments API
+        style: rest
+        technology: JSON/HTTPS
+        version: 3
+        operations:
+          charge:
+            syntax: POST /v3/charges
+            input:
+              amount:
+                type: integer
+                meaning: total to charge, including sales tax
+                unit: US cents
+              card_token:
+                type: string
+                meaning: one-time token the browser received for the card
+              idempotency_key:
+                type: string
+                meaning: see the vocabulary entry idempotency key
+            output: Charge
+            purpose: When a shop sends an amount and a card token, the provider charges the card once and reports whether the money moved.
+            side_effects:
+              - The card is charged once; a repeated idempotency key charges nothing.
+            restrictions:
+              - Callers authenticate with the shop's secret key.
+            errors:
+              card-declined:
+                code: 402
+                when: the card issuer refused the charge; the shop asks for another card
+              invalid-amount:
+                code: 400
+                when: the amount is zero or negative; the shop fixes its total before trying again
+            examples:
+              - input: {amount: 1250, card_token: tok_visa, idempotency_key: order-77}
+                output: {id: ch_1, status: succeeded}
+                note: A 12.50 USD charge that succeeds.
+          # Operation shorthand (syntax only): interface/no-purpose (warning),
+          # interface/no-errors (warning: a REST interface), and
+          # interface/unused-operation (info: the shop uses only charge).
+          refund: POST /v3/refunds
+        types:
+          Charge:
+            description: The result of one charge.
+            fields:
+              id: string    # field shorthand; interface/no-meaning (info)
+              # A value list without meanings on an interface used across a system boundary:
+              # interface/no-meaning (info).
+              status: {type: string, meaning: whether the money moved, values: [succeeded, failed]}
+        vocabulary:
+          idempotency key: a client-chosen string that makes a repeated request take effect only once

@@ -6,7 +6,8 @@
  *   echo "<spec>" | node uml_render.js <type> <output.svg>
  *   cat diagram.txt | node uml_render.js class out.svg
  *
- * Types: class, sequence, state, component, deployment, usecase, activity
+ * Types: class, sequence, state, component, deployment, usecase, activity,
+ *        freeform, gitgraph, folder-tree, venn, er, crc, c4
  */
 
 'use strict';
@@ -14,9 +15,10 @@
 const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { readC4Scripts } = require('./uml_to_svg');
 const CALLOUT_CSS = fs.readFileSync(path.join(__dirname, 'css', 'callouts.css'), 'utf8');
 
-const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er', 'crc'];
+const VALID_TYPES = ['class', 'sequence', 'state', 'component', 'deployment', 'usecase', 'activity', 'freeform', 'gitgraph', 'folder-tree', 'venn', 'er', 'crc', 'c4'];
 const BUNDLE_PATH = path.join(__dirname, 'uml-bundle.js');
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const GIT_GRAPH_PATH = path.join(REPO_ROOT, 'js', 'git-graph.js');
@@ -45,7 +47,9 @@ async function main() {
 
   const bundleJs = fs.readFileSync(BUNDLE_PATH, 'utf8');
   const gitGraphJs = fs.existsSync(GIT_GRAPH_PATH) ? fs.readFileSync(GIT_GRAPH_PATH, 'utf8') : '';
-  const html = `<html><head><script>${gitGraphJs}</script><script>${bundleJs}</script></head><body><div id="c"></div></body></html>`;
+  // The C4 scripts load before the bundle so its C4 stub renders synchronously.
+  const c4Js = readC4Scripts(__dirname).map((script) => `<script>${script.source}</script>`).join('');
+  const html = `<html><head><script>${gitGraphJs}</script>${c4Js}<script>${bundleJs}</script></head><body><div id="c"></div></body></html>`;
 
   const browser = await chromium.launch();
   const page    = await browser.newPage(); page.on("console", msg => console.log(msg.text()));
@@ -66,6 +70,7 @@ async function main() {
       venn:       window.UMLVennDiagram,
       er:         window.UMLERDiagram,
       crc:        window.UMLCRCDiagram,
+      c4:         window.UMLC4Diagram,
     };
     const R = RENDERERS[type];
     if (!R) return { error: 'Unknown renderer: ' + type };
