@@ -164,6 +164,19 @@ test('a dynamic view\'s contents count its message anchors and its relations in 
   }
 });
 
+test('a fragment\'s branches carry the model\'s guards, although the drawing replaces quotes, braces, and arrows', () => {
+  const guard = 'seats["A"] > {0} -> ok';
+  const text = REFERENCE.replace('- when: eligible', `- when: '${guard}'`);
+  assert.notEqual(text, REFERENCE, 'the fixture has the guard "eligible"');
+  const { adapter, state } = harness({ text, view: 'dynamic enroll' });
+  const alt = state.getDesign().model.scenarios.get('enroll').steps.find((step) => step.kind === 'fragment');
+
+  const [fragment] = adapter.contents().fragments;
+
+  assert.deepEqual(fragment.branches.map((branch) => branch.guard), alt.branches.map((branch) => branch.when));
+  assert.equal(fragment.branches[0].guard, guard);
+});
+
 test('in a deployment drawing every node and hosted instance can be pressed and moved (axis xy), whichever boxes hold positions', () => {
   const topLevel = (context) => new Set(Object.keys(context.uml.ids).filter((alias) => {
     const id = context.uml.ids[alias];

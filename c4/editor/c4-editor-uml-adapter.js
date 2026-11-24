@@ -42,7 +42,6 @@
   // Every box of a deployment drawing can be pressed, dragged, and dropped on (see readContents).
   const DEPLOYMENT_BOX_AXIS = 'xy';
   const LINE_ENDS = /^\s*([A-Za-z0-9_]+)\s+\S+\s+([A-Za-z0-9_]+)(.*)$/;
-  const GUARD = /\[([^\]]*)\]/;
 
   /**
    * The adapter of one editor. `options`: `state` (the editor state), `actions` (the shared actions), `views` (the view
@@ -459,9 +458,28 @@
       && JSON.stringify(fragment.ref.containerPath) === JSON.stringify(entry.containerPath));
   }
 
-  function guardOn(line) {
-    const match = GUARD.exec(line);
-    return match ? match[1] : null;
+  /**
+   * The guard of branch `branch` of the fragment drawn at `entry`'s step place, as the model writes it (spec §3.4: an
+   * in-place editor starts from the model's text, never from the drawn one, where quotes, braces, and arrows are
+   * replaced by look-alikes); null for a branch without one.
+   */
+  function modelGuard(read, entry, branch) {
+    const fragment = fragmentItemAt(read.context.viewModel.uml.items, entry);
+    const drawn = fragment ? fragment.branches.find((candidate) => candidate.index === branch) : null;
+    return drawn && typeof drawn.guard === 'string' ? drawn.guard : null;
+  }
+
+  /** The fragment among a dynamic view model's `items` whose step place is `place`, at any depth, or null. */
+  function fragmentItemAt(items, place) {
+    for (const item of items) {
+      if (item.type !== 'fragment') continue;
+      if (item.step.index === place.index && JSON.stringify(item.step.containerPath) === JSON.stringify(place.containerPath)) return item;
+      for (const branch of item.branches) {
+        const inner = fragmentItemAt(branch.items, place);
+        if (inner) return inner;
+      }
+    }
+    return null;
   }
 
   // One reader per source-map entry kind (spec §4.1's line entries).
@@ -538,12 +556,12 @@
     fragment(entry, index, read) {
       read.reading.fragments.push({
         id: `frag:${index}`, operator: entry.operator, startLine: index, endLine: null,
-        branches: [{ line: index, index: 0, guard: guardOn(read.lines[index]) }],
+        branches: [{ line: index, index: 0, guard: modelGuard(read, entry, 0) }],
         ref: { scenarioId: read.scope, containerPath: entry.containerPath, index: entry.index },
       });
     },
     branch(entry, index, read) {
-      fragmentAt(read, entry).branches.push({ line: index, index: entry.branch, guard: guardOn(read.lines[index]) });
+      fragmentAt(read, entry).branches.push({ line: index, index: entry.branch, guard: modelGuard(read, entry, entry.branch) });
     },
     'fragment-end'(entry, index, read) {
       fragmentAt(read, entry).endLine = index;

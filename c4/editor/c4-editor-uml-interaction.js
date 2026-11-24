@@ -1095,7 +1095,7 @@
       return true;
     }
 
-    /** "Guard of branch 1 of ‹operator›" (spec §7.4 In-place editors), starting with the guard as drawn. */
+    /** "Guard of branch 1 of ‹operator›" (spec §7.4 In-place editors), starting with the model's guard. */
     function beginGuardEdit(ref, fragment) {
       const branch = fragment.branches[0];
       const value = branch.guard || '';
