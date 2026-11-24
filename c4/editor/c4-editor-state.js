@@ -339,6 +339,10 @@
       redo: () => stepHistory('redo'),
       canUndo: () => !options.readOnly && history.canUndo(),
       canRedo: () => !options.readOnly && history.canRedo(),
+      /** The label of the step Undo would take back ("Rename Student"), or null: none, a host's change, a host history. */
+      undoLabel: () => (options.readOnly ? null : history.undoLabel()),
+      /** The label of the step Redo would repeat, or null. */
+      redoLabel: () => (options.readOnly ? null : history.redoLabel()),
       /** The design visual commands and dry runs work on: the last one whose YAML could be read. */
       getDesign: () => readableDesign || design,
       openView,
@@ -395,6 +399,10 @@
       future.length = 0;
     }
 
+    function labelOnTop(stack) {
+      return stack.length > 0 ? stack[stack.length - 1].label : null;
+    }
+
     function move(from, to, currentText) {
       if (from.length === 0) return null;
       const step = from.pop();
@@ -410,6 +418,8 @@
       redo: (currentText) => move(future, past, currentText),
       canUndo: () => past.length > 0,
       canRedo: () => future.length > 0,
+      undoLabel: () => labelOnTop(past),
+      redoLabel: () => labelOnTop(future),
     };
   }
 
@@ -423,6 +433,9 @@
       redo() { host.performRedo(); return { text: null, label: null }; },
       canUndo: () => Boolean(host.canUndo()),
       canRedo: () => Boolean(host.canRedo()),
+      // The host's stack (Monaco's, in a tutorial) has no step labels.
+      undoLabel: () => null,
+      redoLabel: () => null,
     };
   }
 

@@ -455,6 +455,19 @@ html.dark-mode .c4-editor {
   cursor: not-allowed;
 }
 
+/* Undo and Redo (ED-11): the glyph of the site's UML editor before the word. Their disabled look belongs to this group,
+   not the shared rule above: they are always-present commands whose availability follows the history, so they keep
+   the solid outline and background of a button and only mute the text, which stays readable as "Undo"/"Redo". */
+.c4-editor__history-glyph {
+  margin-inline-end: 0.3em;
+  font-weight: bold;
+}
+
+.c4-editor__history-button[aria-disabled="true"] {
+  background: var(--c4-ui-control-bg);
+  border-style: solid;
+}
+
 .c4-editor__button--primary {
   font-weight: bold;
   color: var(--c4-ui-on-accent);

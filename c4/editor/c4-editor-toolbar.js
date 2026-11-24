@@ -60,6 +60,15 @@
     deployment: ['node', 'infrastructure', 'host'],
   };
   const ELEMENT_TILES = ['person', 'system', 'container', 'component', 'code'];
+  // Undo and Redo (ED-11): the state's command, its availability, the label of its step, the glyph of the site's UML
+  // editor, and the keys listenForCanvasKeys (c4-editor-mount.js) routes to it, as aria-keyshortcuts and in words.
+  const HISTORY_COMMANDS = [
+    { label: 'Undo', run: 'undo', can: 'canUndo', stepLabel: 'undoLabel', glyph: '↶', nothing: 'Nothing to undo.',
+      unnamed: 'Undo the last change.', keyshortcuts: 'Control+Z Meta+Z', keys: 'Ctrl+Z (Cmd+Z on a Mac)' },
+    { label: 'Redo', run: 'redo', can: 'canRedo', stepLabel: 'redoLabel', glyph: '↷', nothing: 'Nothing to redo.',
+      unnamed: 'Redo the last undone change.', keyshortcuts: 'Control+Y Control+Shift+Z Meta+Shift+Z Meta+Y',
+      keys: 'Ctrl+Y or Ctrl+Shift+Z (Cmd+Shift+Z on a Mac)' },
+  ];
   // The element types an `interfaces of` view can show (spec §5.1).
   const INTERFACE_SCOPES = new Set(['system', 'container', 'component']);
   const INTERFACES_ANNOTATION = 'interfaces';
@@ -584,16 +593,38 @@
 
   // ---- History ------------------------------------------------------------------------------------------
 
+  /**
+   * Undo and Redo, made easy to find (ED-11), as in the site's UML editor: a glyph (hidden from assistive technology)
+   * before the word, a tooltip that is also the accessible description, naming the step the button would take back or
+   * repeat and its keys, and `aria-keyshortcuts` with exactly the keys the mount routes (listenForCanvasKeys).
+   */
   function createHistory({ dom, state }) {
-    const undo = dom.el('button', { type: 'button', class: 'c4-editor__button', on: { click: (event) => isDisabled(event.currentTarget) || state.undo() } }, 'Undo');
-    const redo = dom.el('button', { type: 'button', class: 'c4-editor__button', on: { click: (event) => isDisabled(event.currentTarget) || state.redo() } }, 'Redo');
+    const buttons = HISTORY_COMMANDS.map((command) => {
+      const button = dom.el('button', {
+        type: 'button',
+        class: 'c4-editor__button c4-editor__history-button',
+        'aria-keyshortcuts': command.keyshortcuts,
+        on: { click: (event) => isDisabled(event.currentTarget) || state[command.run]() },
+      }, [dom.el('span', { class: 'c4-editor__history-glyph', 'aria-hidden': 'true', text: command.glyph }), command.label]);
+      return { command, button };
+    });
     return {
-      element: dom.el('div', { role: 'group', class: 'c4-editor__group', 'aria-label': 'History' }, [undo, redo]),
+      element: dom.el('div', { role: 'group', class: 'c4-editor__group c4-editor__group--history', 'aria-label': 'History' },
+        buttons.map(({ button }) => button)),
       update() {
-        setDisabled(undo, !state.canUndo());
-        setDisabled(redo, !state.canRedo());
+        buttons.forEach(({ command, button }) => {
+          const available = state[command.can]();
+          setDisabled(button, !available);
+          button.title = historyDescription(command, available ? state[command.stepLabel]() : null, available);
+        });
       },
     };
+  }
+
+  /** "Undo: Rename Student. Ctrl+Z (Cmd+Z on a Mac)"; "Nothing to undo. …" when there is no step. */
+  function historyDescription(command, stepLabel, available) {
+    const what = !available ? command.nothing : stepLabel ? `${command.label}: ${stepLabel}.` : command.unnamed;
+    return `${what} ${command.keys}`;
   }
 
   // ---- Magnification ------------------------------------------------------------------------------------

@@ -366,6 +366,23 @@ test('undo keeps at most 100 steps', () => {
   assert.equal(technologyOf(state, 'api'), 'Go 0', 'the oldest step is dropped');
 });
 
+test('the label of the step Undo and Redo would take back or repeat is readable before they run', () => {
+  const clock = fakeClock();
+  const state = createEditorState({ text: REFERENCE, host: recordingHost().host, now: clock.now });
+  assert.deepEqual([state.undoLabel(), state.redoLabel()], [null, null]);
+
+  state.dispatch(setTechnology('api', 'Go'), { label: 'Edit the technology of Registration API' });
+  clock.advance(1000);
+  state.dispatch(setTechnology('web', 'Elm'), { label: 'Edit the technology of Planner Web App' });
+  assert.equal(state.undoLabel(), 'Edit the technology of Planner Web App');
+
+  state.undo();
+  assert.deepEqual([state.undoLabel(), state.redoLabel()],
+    ['Edit the technology of Registration API', 'Edit the technology of Planner Web App']);
+  state.setText(REFERENCE.replace('Planner Web App', 'Planner App'), { reason: 'external' });
+  assert.equal(state.undoLabel(), null, 'a change from the host has no label');
+});
+
 test('host undo mode delegates to host methods', () => {
   const asked = [];
   const { host, calls } = recordingHost({
@@ -383,6 +400,7 @@ test('host undo mode delegates to host methods', () => {
   state.undo();
   state.redo();
   assert.deepEqual(asked, ['canUndo', 'canRedo', 'undo', 'redo']);
+  assert.deepEqual([state.undoLabel(), state.redoLabel()], [null, null], 'the steps of the host have no labels');
   assert.equal(calls.text.length, 1, 'the editor changes no text itself in host mode');
   assert.equal(technologyOf(state, 'api'), 'Go');
 });
