@@ -236,6 +236,7 @@
       renameElement: idCommands.renameElement,
       renameNode: idCommands.renameNode,
       renameInterface: idCommands.renameInterface,
+      editElementText: elements.editElementText,
       parentCandidates: elements.parentCandidates,
       moveElementTo: elements.moveElementTo,
       pinElement: elements.pinElement,

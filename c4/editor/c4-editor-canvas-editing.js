@@ -1,6 +1,8 @@
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(function () { return { drag: require('./c4-editor-drag.js') }; });
+    module.exports = factory(function () {
+      return { drag: require('./c4-editor-drag.js'), canvasText: require('./c4-editor-canvas-text.js') };
+    });
   } else {
     var parts = root.ArchUMLC4EditorParts = root.ArchUMLC4EditorParts || {};
     parts.canvasEditing = factory(function () { return root.ArchUMLC4EditorParts; });
@@ -19,11 +21,12 @@
   // | Add an element     | drag a palette tile onto the drawing | click the tile                          | A (the Add menu)    |
   // | Refine a parent    | drag a carry-down tray item onto a   | the item's "Refine into…" menu (the     | the same menu       |
   // | responsibility     | part of the scope                    | tray's own)                             |                     |
-  // | Rename             | —                                    | click the selected element's name       | F2                  |
+  // | Edit a text        | —                                    | double-click the text (a box: its name) | F2 (the name)       |
   // | Context menu       | —                                    | right-click, long press, or "⋯"         | Shift+F10, Menu key |
   //
   // Every change is one shared command of the actions (Ruling 5), so one undo step with its announcement; this part
-  // owns only the gestures, the modes ("Move", "Add relationship"), their feedback, and focus. It reaches the drawing
+  // owns only the gestures, the modes ("Move", "Add relationship"), their feedback, and focus. Text edited in place
+  // (F2, a double-click; ED-12) is the canvas-text part's (c4-editor-canvas-text.js), which this part creates. It reaches the drawing
   // through the canvas's surface and registers its pointer gestures on the canvas's one dispatcher (Ruling 4).
   // A mode's instruction and its refusals are announced with a kind, so the editor's message region shows them
   // (UML-view editing spec §7.5, §14 D6); the instruction leaves the region when its mode ends.
@@ -40,10 +43,6 @@
   const KEY_STEP_LARGE_UNITS = 50;
   // A touch long press also fires contextmenu; within this time after the press's own menu it is ignored.
   const CONTEXT_MENU_REPEAT_MS = 1500;
-  // A click on the selected element's name renames it once a double-click (zoom in) can no longer follow.
-  const RENAME_CLICK_DELAY_MS = 500;
-  // The rename field is at least this wide (CSS px), so a short name still leaves room to type.
-  const RENAME_MIN_WIDTH_PX = 160;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const TYPING_TARGETS = 'input, select, textarea, [contenteditable=""], [contenteditable="true"]';
   // A menu inside the canvas (the carry-down tray's Refine into…) owns its keys, even while a mode is on.
@@ -59,6 +58,8 @@
       + 'and Left and Right a lifeline\'s'],
     ['C', 'Start a relationship from the focused element, then press Enter on its target; on a step of a dynamic view, '
       + 'add a step after it'],
+    ['Double-click', 'Edit the text under the pointer in place: a name, description, technology, or responsibility, or a '
+      + 'relationship\'s description or technology; Enter keeps it, Escape cancels'],
     ['Shift+F10 or the Menu key',
       'Open the focused element\'s or line\'s commands; in a UML view a line\'s commands add, move, and remove its bends'],
   ]);
@@ -78,10 +79,8 @@
     const editorRoot = region.closest('.c4-editor') || region;
     const marks = drag.createTargetMarks();
     let mode = null;
-    let renaming = null;
     let hoveredId = null;
     let lastLongPressMenu = -Infinity;
-    let pendingRename = null;
 
     // ---- The drawing ------------------------------------------------------------------------------------------
 
@@ -255,10 +254,9 @@
       return `Move canceled; ${nameOf(elementId)} stays where it was.`;
     }
 
-    /** A press on an element: a tap selects it (on its name, when already selected, renames it), a drag moves it. */
+    /** A press on an element: a tap selects it, a drag moves it (a double-click edits its text: the canvas-text part). */
     function pressElement(option, event, press) {
       const elementId = elementIdOf(option);
-      const wasSelected = option.getAttribute('aria-selected') === 'true';
       const movable = option.classList.contains('c4-editor__option--box');
       let ghost = null;
       return drag.createDragSession({
@@ -278,9 +276,6 @@
           }
           placeElement(elementId, ghost);
         },
-        onTap(released) {
-          if (wasSelected && onName(option, released)) renameAfterClick(elementId);
-        },
         onLongPress(pressed) {
           lastLongPressMenu = pressed.timeStamp;
           openElementMenu(elementId, { point: pointOf(pressed), returnFocus: option });
@@ -290,26 +285,6 @@
           moveCancelled(elementId);
         },
       });
-    }
-
-    function renameAfterClick(elementId) {
-      cancelPendingRename();
-      pendingRename = doc.defaultView.setTimeout(() => {
-        pendingRename = null;
-        if (surface.optionFor(elementId)) beginRename(elementId);
-      }, RENAME_CLICK_DELAY_MS);
-    }
-
-    function cancelPendingRename() {
-      if (pendingRename !== null) doc.defaultView.clearTimeout(pendingRename);
-      pendingRename = null;
-    }
-
-    /** Whether a release lies on the element's name (its first line of text), where a click renames it. */
-    function onName(option, event) {
-      const node = nodeOf(elementIdOf(option));
-      const name = node ? node.querySelector('text') : null;
-      return name === null || inside(grown(name.getBoundingClientRect(), 6), event);
     }
 
     /**
@@ -673,93 +648,18 @@
       ghost.style.setProperty('--c4-drag-y', `${event.clientY}px`);
     }
 
-    // ---- Rename in place (spec §9.2: F2, or a click on the selected element's name) -----------------------------
+    // ---- Text in place (spec §9.2 rename in place; ED-12): the canvas-text part -------------------------------
 
-    /**
-     * A text field over the element's name: Enter keeps the new name, Escape keeps the old one, and leaving the field
-     * keeps what was typed. Without a drawn option (a view that does not show it) the inspector's Name field renames.
-     */
+    const text = editorParts().canvasText.createCanvasText(surface, context, { focusElement });
+
     function beginRename(elementId) {
-      const option = surface.optionFor(elementId);
-      if (!option) {
-        if (context.layout && typeof context.layout.revealRegion === 'function') context.layout.revealRegion('inspector');
-        announce(`Rename ${nameOf(elementId)} in the inspector's Name field.`);
-        return;
-      }
-      endRename();
-      const problemId = context.ids('canvas-rename-problem');
-      const field = dom.el('input', {
-        type: 'text', class: 'c4-editor__canvas-rename', value: nameOf(elementId), autocomplete: 'off', spellcheck: 'false',
-        'aria-label': `Name of ${nameOf(elementId)}`, 'aria-describedby': problemId,
-        on: { keydown: onRenameKeydown, blur: onRenameBlur },
-      });
-      const problem = dom.el('p', { id: problemId, class: 'c4-editor__canvas-rename-problem', hidden: true });
-      const holder = dom.el('div', { class: 'c4-editor__canvas-rename-holder' }, [field, problem]);
-      renaming = { elementId, holder, field, problem, committing: false };
-      placeRename();
-      field.focus({ preventScroll: true });
-      field.select();
-      surface.reveal(holder);
+      text.beginRename(elementId);
     }
 
-    /** Puts the field over the element's option (positions are measured, so they are set through the CSSOM). */
-    function placeRename() {
-      const option = surface.optionFor(renaming.elementId);
-      if (!renaming.holder.isConnected) stage.appendChild(renaming.holder);
-      const box = option.getBoundingClientRect();
-      const frame = stage.getBoundingClientRect();
-      renaming.holder.style.setProperty('--c4-rename-x', `${box.left - frame.left - stage.clientLeft}px`);
-      renaming.holder.style.setProperty('--c4-rename-y', `${box.top - frame.top - stage.clientTop}px`);
-      renaming.holder.style.setProperty('--c4-rename-width', `${Math.max(box.width, RENAME_MIN_WIDTH_PX)}px`);
-    }
-
-    function onRenameKeydown(event) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        commitRename({ keepOpenOnRefusal: true });
-      } else if (event.key === 'Escape') {
-        // Taken here, so neither a mode nor the selection is closed by the same press.
-        event.preventDefault();
-        const { elementId } = renaming;
-        endRename();
-        announce(`Kept the name ${nameOf(elementId)}.`);
-        focusElement(elementId);
-      }
-    }
-
-    function onRenameBlur() {
-      if (renaming && !renaming.committing) commitRename({ keepOpenOnRefusal: false });
-    }
-
-    /** Renames through the actions; a refusal stays in the field (Enter) or is only announced (focus left). */
-    function commitRename({ keepOpenOnRefusal }) {
-      const { elementId, field, problem } = renaming;
-      if (field.value.trim() === nameOf(elementId)) {
-        endRename();
-        if (keepOpenOnRefusal) focusElement(elementId);
-        return;
-      }
-      renaming.committing = true;
-      const result = actions.renameElement(elementId, field.value);
-      if (renaming === null) return;
-      renaming.committing = false;
-      if (result.ok || !keepOpenOnRefusal) {
-        endRename();
-        // A first name can also give the element its id (actions.renameElement), so focus follows the id it has now.
-        if (keepOpenOnRefusal) focusElement((result.ok && result.elementId) || elementId);
-        return;
-      }
-      problem.textContent = result.message;
-      problem.hidden = false;
-      field.setAttribute('aria-invalid', 'true');
-      field.focus();
-    }
-
-    function endRename() {
-      if (renaming === null) return;
-      const { holder } = renaming;
-      renaming = null;
-      holder.remove();
+    /** A double-click on the drawing edits the text under the pointer (ED-12); it never zooms. */
+    function onDoubleClick(event) {
+      if (mode !== null || event.defaultPrevented || surface.svg() === null) return;
+      if (text.editAt(event)) event.preventDefault();
     }
 
     // ---- Context menu, Delete, and keys -----------------------------------------------------------------------
@@ -881,7 +781,6 @@
     function startGesture(event, press) {
       // The scope header's tray has its own controls and drags (startRefineDrag); a press there is not on the drawing.
       if (event.target.closest('[data-c4-scope-header]')) return null;
-      cancelPendingRename();
       if (mode !== null) return pressInMode(event);
       const handle = event.target.closest('[data-c4-handle]');
       if (handle && region.contains(handle)) return pressHandle(handle.getAttribute('data-c4-handle'), event, press);
@@ -899,7 +798,7 @@
 
     /**
      * After a redraw the options are new: a connect mode marks its targets again; a Move ends (its ghost belonged
-     * to the old drawing); a rename in progress is laid over the element again when it is still drawn.
+     * to the old drawing); a text being edited in place is laid over its text again when it is still drawn.
      */
     function onDraw(kind) {
       if (mode && mode.kind === 'connect' && mode.sourceId !== null) marks.show(connectTargets(mode.sourceId));
@@ -907,15 +806,7 @@
         leaveMode();
         announce('Move canceled: the drawing changed.');
       }
-      if (renaming && !renaming.committing) {
-        if (surface.optionFor(renaming.elementId)) {
-          const focused = doc.activeElement === renaming.field;
-          placeRename();
-          if (!focused) renaming.field.focus({ preventScroll: true });
-        } else {
-          endRename();
-        }
-      }
+      text.onDraw();
       showAffordances();
     }
 
@@ -932,7 +823,7 @@
     region.addEventListener('contextmenu', onContextMenu, listen);
     region.addEventListener('pointermove', onPointerMove, listen);
     region.addEventListener('pointerleave', () => setHovered(null), listen);
-    region.addEventListener('dblclick', cancelPendingRename, listen);
+    region.addEventListener('dblclick', onDoubleClick, listen);
     const stops = [
       surface.pointer.use({ start: startGesture }),
       surface.onDraw(onDraw),
@@ -947,9 +838,8 @@
     return {
       helpKeys: HELP_KEYS,
       destroy() {
-        cancelPendingRename();
         leaveMode();
-        endRename();
+        text.end();
         marks.clear();
         stops.forEach((stop) => stop());
         controller.abort();
@@ -984,10 +874,6 @@
 
   function inside(box, event) {
     return event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
-  }
-
-  function grown(box, by) {
-    return { left: box.left - by, right: box.right + by, top: box.top - by, bottom: box.bottom + by };
   }
 
   function pointOf(event) {

@@ -455,6 +455,19 @@ html.dark-mode .c4-editor {
   cursor: not-allowed;
 }
 
+/* Undo and Redo (ED-11): the glyph of the site's UML editor before the word. Their disabled look belongs to this group,
+   not the shared rule above: they are always-present commands whose availability follows the history, so they keep
+   the solid outline and background of a button and only mute the text, which stays readable as "Undo"/"Redo". */
+.c4-editor__history-glyph {
+  margin-inline-end: 0.3em;
+  font-weight: bold;
+}
+
+.c4-editor__history-button[aria-disabled="true"] {
+  background: var(--c4-ui-control-bg);
+  border-style: solid;
+}
+
 .c4-editor__button--primary {
   font-weight: bold;
   color: var(--c4-ui-on-accent);
@@ -2605,7 +2618,7 @@ html.dark-mode .c4-editor {
   translate: 0.75em 0.75em;
 }
 
-/* ---- Rename in place: a field over the element's name ------------------------------------------------------ */
+/* ---- Text in place: a field over the text it edits (F2, a double-click; ED-12) ------------------------------- */
 
 .c4-editor__canvas-rename-holder {
   position: absolute;
@@ -2627,6 +2640,13 @@ html.dark-mode .c4-editor {
   border-radius: 4px;
   font: inherit;
   scroll-margin-block: var(--c4-ui-scroll-margin-top, 96px) var(--c4-ui-scroll-margin-bottom, 5em);
+}
+
+/* A description edited in place (ED-12): a wrapping field as many rows high as the drawing shows the text. */
+.c4-editor__canvas-rename--multiline {
+  display: block;
+  resize: vertical;
+  line-height: 1.4;
 }
 
 .c4-editor__canvas-rename:focus-visible {

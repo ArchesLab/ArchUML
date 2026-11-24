@@ -625,13 +625,21 @@
     return parts.join(', ');
   }
 
-  /** Box text (spec §6.1): the description, else the first responsibilities and how many more there are. */
+  /**
+   * Box text (spec §6.1): the description, else the first responsibilities and how many more there are. `lines` are the
+   * texts; `lineParts` say, line for line, which part of the element each shows (`{ part: 'description' }`,
+   * `{ part: 'responsibility', index }`, `{ part: 'more' }`), so an editor can edit the part a reader points at.
+   */
   function boxLines(element) {
-    if (element.description) return [element.description];
-    const shown = element.responsibilities.slice(0, BOX_RESPONSIBILITY_LINES)
+    if (element.description) return { lines: [element.description], lineParts: [{ part: 'description' }] };
+    const shownResponsibilities = element.responsibilities.slice(0, BOX_RESPONSIBILITY_LINES);
+    const shown = shownResponsibilities
       .map((responsibility) => (responsibility.kind ? `${responsibility.kind.toUpperCase()} ${responsibility.text}` : responsibility.text));
+    const parts = shownResponsibilities.map((responsibility, index) => ({ part: 'responsibility', index }));
     const hidden = element.responsibilities.length - shown.length;
-    return hidden > 0 ? shown.concat(`+${hidden} more`) : shown;
+    return hidden > 0
+      ? { lines: shown.concat(`+${hidden} more`), lineParts: parts.concat({ part: 'more' }) }
+      : { lines: shown, lineParts: parts };
   }
 
   /** Annotations drawn from an element's design choices; `interfaces` is drawn from the model's interfaces instead. */
@@ -675,7 +683,7 @@
     const groupId = groupBoundaryId(model, element);
     return {
       id: element.id, type: element.type, kind: element.kind, name: element.name, typeLabel: typeLabel(element),
-      technology: element.technology, lines: boxLines(element), external: element.external, inEnterprise: element.inEnterprise,
+      technology: element.technology, ...boxLines(element), external: element.external, inEnterprise: element.inEnterprise,
       groupId, boundaryId: groupId || enclosingBoundary(model, element, view), drill: drillTarget(model, element.id),
       annotations: annotationsOf(element, view.annotations.filter((kind) => CHOICE_ANNOTATIONS.includes(kind))),
       interfaces: view.annotations.includes('interfaces') ? nodeInterfaces(model, element) : [],

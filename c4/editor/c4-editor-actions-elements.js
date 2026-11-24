@@ -11,13 +11,16 @@
   'use strict';
 
   // Element commands (spec §9.2), a unit of the shared commands (c4-editor-actions.js): Delete with confirmation,
-  // Move to… another parent, pinning a position, Zoom in, and the element's context menus. Renaming and Change id…
-  // are in c4-editor-actions-ids.js.
+  // Move to… another parent, pinning a position, a text edited in place (ED-12), Zoom in, and the element's context
+  // menus. Renaming and Change id… are in c4-editor-actions-ids.js.
 
   /**
    * The element commands. `actions` is the shared context of createActions (state, dom, menus, reading the model,
    * results, dialogs) with the commands of the canvas unit (where a pin is drawn) and the id unit (Change id…).
    */
+  // The element texts editElementText writes with setElementField (a responsibility goes through updateResponsibility).
+  const ELEMENT_TEXT_FIELDS = ['description', 'technology'];
+
   function createElementCommands(actions) {
     const { state, dom, host, menus, announce, model, elementOf, nameOf, readOnlyReason, lockedProblem, missingElement,
       succeed, refuse, dispatch, unopened, finish, trackedDialog, isDestroyed, drawnCorners, landingOf, openChangeIdDialog } = actions;
@@ -114,6 +117,36 @@
       return succeed(`Moved ${name} ${how || `to ${pin[0]}, ${pin[1]}`}${landing.nudged}; position pinned.${landing.madeRoom}`);
     }
 
+    /**
+     * Writes one text of an element, edited in place on the canvas (ED-12): `part` is 'description', 'technology', or
+     * `{ responsibility: index }`. One undo step with the inspector's label; an empty description or technology removes
+     * the field (as the inspector's fields do), an empty responsibility is refused. Unchanged text writes nothing.
+     * Resolves `{ ok, unchanged? }`; a refusal (read-only, a lock, the core's) is announced with its reason.
+     */
+    function editElementText(elementId, part, value) {
+      const problem = readOnlyReason() || missingElement(elementId);
+      if (problem) return refuse(problem);
+      const element = elementOf(elementId);
+      const name = nameOf(elementId);
+      const text = String(value).trim();
+      if (typeof part === 'object' && part !== null) {
+        const index = part.responsibility;
+        const number = index + 1;
+        const current = element.responsibilities[index];
+        if (!current) return refuse(`Error: ${name} has no responsibility ${number}.`);
+        if (text === '') return refuse(`Error: A responsibility needs some text; remove responsibility ${number} in the inspector instead.`);
+        if (text === current.text) return { ok: true, unchanged: true };
+        const result = dispatch({ op: 'updateResponsibility', elementId, index, text }, `Edit a responsibility of ${name}`);
+        return result.ok ? succeed(`Changed responsibility ${number} of ${name}.`) : result;
+      }
+      if (!ELEMENT_TEXT_FIELDS.includes(part)) return refuse(`Error: ${part} is not a text of an element.`);
+      const written = text === '' ? null : text;
+      if (written === (element[part] || null)) return { ok: true, unchanged: true };
+      const result = dispatch({ op: 'setElementField', elementId, field: part, value: written }, `Edit the ${part} of ${name}`);
+      if (!result.ok) return result;
+      return succeed(written === null ? `Removed the ${part} of ${name}.` : `Changed the ${part} of ${name}.`);
+    }
+
     /** Opens the view one level inside the element; the view change is announced by whoever announces views. */
     function zoomIn(elementId) {
       const element = elementOf(elementId);
@@ -175,7 +208,7 @@
       return menus.open({ label: `Move ${nameOf(elementId)} into`, groups, placement });
     }
 
-    return { deleteElement, parentCandidates, moveElementTo, pinElement, zoomIn, openElementMenu, openMoveToMenu };
+    return { deleteElement, parentCandidates, moveElementTo, pinElement, editElementText, zoomIn, openElementMenu, openMoveToMenu };
   }
 
   return { createElementCommands };

@@ -335,6 +335,21 @@ test('box text shows the description or the first three responsibilities', () =>
   assert.deepEqual(node(view, 't').lines, ['Takes payments.']);
 });
 
+test('each box line says which part of the element it shows, so an editor can edit that part in place', () => {
+  const model = load([
+    'systems:',
+    '  s:',
+    '    responsibilities: [DO a, KNOW b, DECIDE c, DO d]',
+    '  t:',
+    '    description: Takes payments.',
+  ].join('\n'));
+  const view = p.projectView(model, 'landscape');
+  assert.deepEqual(node(view, 's').lineParts, [
+    { part: 'responsibility', index: 0 }, { part: 'responsibility', index: 1 }, { part: 'responsibility', index: 2 }, { part: 'more' },
+  ]);
+  assert.deepEqual(node(view, 't').lineParts, [{ part: 'description' }]);
+});
+
 test('type labels state the abstraction, technology, and external', () => {
   const containers = p.projectView(reference, 'containers of registration');
   assert.equal(node(containers, 'api').typeLabel, 'Container: Python, FastAPI');

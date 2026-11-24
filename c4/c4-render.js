@@ -151,11 +151,22 @@
   var round = markup.round;
   var element = markup.element;
 
+  /**
+   * One line of text. A line of a box or a relationship label carries the part it shows (`line.part`: `data-c4-text`,
+   * with `data-c4-index` for a responsibility), which the editor reads to edit that part in place (ED-12).
+   */
   function textLine(line, x, y, palette, anchor) {
     return element('text', {
       x: x, y: y, 'font-size': CFG.fontSize, 'font-weight': line.bold ? 'bold' : null,
       'font-style': line.italic ? 'italic' : null, 'text-anchor': anchor || null, fill: palette.text,
+      'data-c4-text': line.part || null, 'data-c4-index': line.index === undefined ? null : line.index,
     }, escapeSvgText(line.text));
+  }
+
+  /** `lines` (wrapped) marked as showing `part` (`{ part, index }`, or a part name). */
+  function showing(lines, part) {
+    var marks = typeof part === 'string' ? { part: part } : part;
+    return lines.map(function (line) { return Object.assign(line, marks); });
   }
 
   // ---- Text measurement and wrapping ----------------------------------------------------------
@@ -338,12 +349,17 @@
    * provided interfaces (`node.interfaces`, filled only in a view annotated with interfaces).
    */
   function boxText(node, width, measure) {
-    var heading = wrap(node.name, width, { bold: true }, measure)
-      .concat(wrap('[' + node.typeLabel + ']', width, { italic: true }, measure));
+    var heading = showing(wrap(node.name, width, { bold: true }, measure), 'name')
+      .concat(showing(wrap('[' + node.typeLabel + ']', width, { italic: true }, measure), 'type'));
     var body = [];
-    node.lines.concat(node.annotations, node.interfaces.length ? [providesLine(node.interfaces)] : []).forEach(function (line) {
-      body = body.concat(wrap(line, width, {}, measure));
+    var lineParts = node.lineParts || [];
+    node.lines.forEach(function (line, index) {
+      body = body.concat(showing(wrap(line, width, {}, measure), lineParts[index] || 'line'));
     });
+    node.annotations.forEach(function (line) {
+      body = body.concat(showing(wrap(line, width, {}, measure), 'annotation'));
+    });
+    if (node.interfaces.length) body = body.concat(showing(wrap(providesLine(node.interfaces), width, {}, measure), 'interfaces'));
     return { heading: heading, body: body };
   }
 
@@ -422,16 +438,16 @@
    */
   function edgeLabelTexts(edge, annotations) {
     var texts = [];
-    if (edge.description) texts.push(edge.description + (edge.moreCount ? ' (+' + edge.moreCount + ' more)' : ''));
-    if (edge.technology) texts.push('[' + edge.technology + ']');
-    if (annotations.indexOf('interfaces') >= 0 && edge.interfaces.length) texts.push(viaLine(edge.interfaces));
+    if (edge.description) texts.push({ part: 'description', text: edge.description + (edge.moreCount ? ' (+' + edge.moreCount + ' more)' : '') });
+    if (edge.technology) texts.push({ part: 'technology', text: '[' + edge.technology + ']' });
+    if (annotations.indexOf('interfaces') >= 0 && edge.interfaces.length) texts.push({ part: 'interfaces', text: viaLine(edge.interfaces) });
     return texts;
   }
 
-  /** The label texts of an edge, each wrapped at the box width (spec §6.1). */
+  /** The label texts of an edge, each wrapped at the box width (spec §6.1) and marked with the part it shows. */
   function edgeLabelLines(edge, annotations, measure) {
-    return edgeLabelTexts(edge, annotations).reduce(function (lines, text) {
-      return lines.concat(wrap(text, CFG.boxWidth, {}, measure));
+    return edgeLabelTexts(edge, annotations).reduce(function (lines, entry) {
+      return lines.concat(showing(wrap(entry.text, CFG.boxWidth, {}, measure), entry.part));
     }, []);
   }
 

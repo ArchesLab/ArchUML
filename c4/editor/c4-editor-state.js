@@ -14,6 +14,8 @@
   // so every UI module (and a test) drives the same rules.
 
   const UNDO_LIMIT = 100;
+  // The selector of the whole-model view, which the editor shows only before a model has a system of its own (ED-10).
+  const LANDSCAPE = 'landscape';
   const COALESCE_MS = 600;
   const EVENTS = ['text', 'view', 'selection', 'diagnostics', 'mode'];
   const DISPLAY_MODES = ['live', 'on-request', 'after-submit'];
@@ -95,7 +97,7 @@
       if (design.model !== null) readableDesign = design;
       diagnosticsCache = null;
       mode = modeOf(design);
-      view = resolveView(view).selector;
+      view = resolveView(view, { requested: false }).selector;
       if (selection !== null && !survives(selection)) selection = null;
 
       if (toHost) host.onTextChange(text, info);
@@ -202,13 +204,24 @@
 
     // ---- View --------------------------------------------------------------------------------
 
-    /** `{ selector, problem }`: the canonical selector, or the default view and the diagnostic of an unknown one. */
-    function resolveView(selector) {
+    /**
+     * `{ selector, problem }`: the canonical selector, or the default view and the diagnostic of an unknown one. The
+     * editor has no landscape level (decision ED-10): a landscape request opens the default view, the context view of
+     * the first internal system, unless the model has none yet. Called again on every text change with the open view
+     * (`{ requested: false }`), it keeps a landscape already open, so an edit never switches views under the reader.
+     */
+    function resolveView(selector, { requested = true } = {}) {
       if (readableDesign === null) return { selector, problem: null };
       if (selector === null) return { selector: C4.defaultView(readableDesign), problem: null };
       const projected = C4.project(readableDesign, selector);
+      if (projected.type === LANDSCAPE && requested) return { selector: C4.defaultView(readableDesign), problem: null };
       if (projected.type !== null) return { selector: projected.selector, problem: null };
       return { selector: C4.defaultView(readableDesign), problem: projected.diagnostics[0] || null };
+    }
+
+    /** The trail the editor shows for `viewModel`: the core's breadcrumbs without the landscape (ED-10). */
+    function breadcrumbs(viewModel) {
+      return viewModel ? viewModel.breadcrumbs.filter((crumb) => crumb.selector !== LANDSCAPE) : [];
     }
 
     function announceView() {
@@ -326,9 +339,14 @@
       redo: () => stepHistory('redo'),
       canUndo: () => !options.readOnly && history.canUndo(),
       canRedo: () => !options.readOnly && history.canRedo(),
+      /** The label of the step Undo would take back ("Rename Student"), or null: none, a host's change, a host history. */
+      undoLabel: () => (options.readOnly ? null : history.undoLabel()),
+      /** The label of the step Redo would repeat, or null. */
+      redoLabel: () => (options.readOnly ? null : history.redoLabel()),
       /** The design visual commands and dry runs work on: the last one whose YAML could be read. */
       getDesign: () => readableDesign || design,
       openView,
+      breadcrumbs,
       getView: () => view,
       /** The diagnostic of the unknown selector the last `openView` (or `options.view`) replaced, else null. */
       getViewProblem: () => viewProblem,
@@ -381,6 +399,10 @@
       future.length = 0;
     }
 
+    function labelOnTop(stack) {
+      return stack.length > 0 ? stack[stack.length - 1].label : null;
+    }
+
     function move(from, to, currentText) {
       if (from.length === 0) return null;
       const step = from.pop();
@@ -396,6 +418,8 @@
       redo: (currentText) => move(future, past, currentText),
       canUndo: () => past.length > 0,
       canRedo: () => future.length > 0,
+      undoLabel: () => labelOnTop(past),
+      redoLabel: () => labelOnTop(future),
     };
   }
 
@@ -409,6 +433,9 @@
       redo() { host.performRedo(); return { text: null, label: null }; },
       canUndo: () => Boolean(host.canUndo()),
       canRedo: () => Boolean(host.canRedo()),
+      // The host's stack (Monaco's, in a tutorial) has no step labels.
+      undoLabel: () => null,
+      redoLabel: () => null,
     };
   }
 

@@ -23,9 +23,9 @@
   // layout entry. A model without scenarios or environments offers "New scenario…" or "New environment…" beside the
   // levels, so its Dynamic and Deployment views can be reached without typing YAML.
 
-  // The view types in their toolbar order: the zoom levels from the landscape down to code, then the supporting views.
+  // The view types in their toolbar order: the zoom levels from the context view down to code, then the supporting
+  // views. The editor has no landscape level (ED-10): the context view is its top view.
   const LEVELS = [
-    { type: 'landscape', label: 'Landscape' },
     { type: 'context', label: 'Context' },
     { type: 'containers', label: 'Containers' },
     { type: 'components', label: 'Components' },
@@ -49,6 +49,8 @@
     host: { kind: 'host', label: 'Host a container or system' },
   };
   const TILES_BY_VIEW = {
+    // The whole-model drawing is no level, only the starting canvas of a model without a system of its own (ED-10),
+    // where the first person or system is added: it offers the Context view's tiles.
     landscape: ['person', 'system'],
     context: ['person', 'system'],
     containers: ['container'],
@@ -58,6 +60,15 @@
     deployment: ['node', 'infrastructure', 'host'],
   };
   const ELEMENT_TILES = ['person', 'system', 'container', 'component', 'code'];
+  // Undo and Redo (ED-11): the state's command, its availability, the label of its step, the glyph of the site's UML
+  // editor, and the keys listenForCanvasKeys (c4-editor-mount.js) routes to it, as aria-keyshortcuts and in words.
+  const HISTORY_COMMANDS = [
+    { label: 'Undo', run: 'undo', can: 'canUndo', stepLabel: 'undoLabel', glyph: '↶', nothing: 'Nothing to undo.',
+      unnamed: 'Undo the last change.', keyshortcuts: 'Control+Z Meta+Z', keys: 'Ctrl+Z (Cmd+Z on a Mac)' },
+    { label: 'Redo', run: 'redo', can: 'canRedo', stepLabel: 'redoLabel', glyph: '↷', nothing: 'Nothing to redo.',
+      unnamed: 'Redo the last undone change.', keyshortcuts: 'Control+Y Control+Shift+Z Meta+Shift+Z Meta+Y',
+      keys: 'Ctrl+Y or Ctrl+Shift+Z (Cmd+Shift+Z on a Mac)' },
+  ];
   // The element types an `interfaces of` view can show (spec §5.1).
   const INTERFACE_SCOPES = new Set(['system', 'container', 'component']);
   const INTERFACES_ANNOTATION = 'interfaces';
@@ -370,13 +381,16 @@
 
   // ---- Breadcrumbs --------------------------------------------------------------------------------------
 
-  /** The trail of the open view as links; the current view is the last, marked aria-current="page". */
+  /**
+   * The trail of the open view as links, from the context view down (ED-10: the editor's trail, `state.breadcrumbs`);
+   * the current view is the last, marked aria-current="page".
+   */
   function createBreadcrumbs({ dom, ids, state }) {
     const list = dom.el('ol', { class: 'c4-editor__crumbs' });
     const element = dom.el('nav', { class: 'c4-editor__breadcrumbs', 'aria-label': 'Breadcrumbs' }, list);
 
     function update(snapshot) {
-      const crumbs = snapshot.viewModel ? snapshot.viewModel.breadcrumbs : [];
+      const crumbs = state.breadcrumbs(snapshot.viewModel);
       element.hidden = crumbs.length === 0;
       // Focus stays on the crumb just followed: it becomes the current one, with the same key.
       replaceKeepingFocus(list, crumbs.map((crumb, index) => dom.el('li', {}, dom.el('a', {
@@ -579,16 +593,43 @@
 
   // ---- History ------------------------------------------------------------------------------------------
 
-  function createHistory({ dom, state }) {
-    const undo = dom.el('button', { type: 'button', class: 'c4-editor__button', on: { click: (event) => isDisabled(event.currentTarget) || state.undo() } }, 'Undo');
-    const redo = dom.el('button', { type: 'button', class: 'c4-editor__button', on: { click: (event) => isDisabled(event.currentTarget) || state.redo() } }, 'Redo');
+  /**
+   * Undo and Redo, made easy to find (ED-11), as in the site's UML editor: a glyph (hidden from assistive technology)
+   * before the word, a tooltip that is also the accessible description, naming the step the button would take back or
+   * repeat and its keys, and `aria-keyshortcuts` with exactly the keys the mount routes (listenForCanvasKeys).
+   */
+  function createHistory({ dom, ids, state }) {
+    const buttons = HISTORY_COMMANDS.map((command) => {
+      // The description is its own element: a page's tooltip script may move `title` away (the site's does).
+      const description = dom.el('span', { id: ids(`history-${command.run}-description`), class: 'c4-editor__sr-only' });
+      const button = dom.el('button', {
+        type: 'button',
+        class: 'c4-editor__button c4-editor__history-button',
+        'aria-keyshortcuts': command.keyshortcuts,
+        'aria-describedby': description.id,
+        on: { click: (event) => isDisabled(event.currentTarget) || state[command.run]() },
+      }, [dom.el('span', { class: 'c4-editor__history-glyph', 'aria-hidden': 'true', text: command.glyph }), command.label]);
+      return { command, button, description };
+    });
     return {
-      element: dom.el('div', { role: 'group', class: 'c4-editor__group', 'aria-label': 'History' }, [undo, redo]),
+      element: dom.el('div', { role: 'group', class: 'c4-editor__group c4-editor__group--history', 'aria-label': 'History' },
+        buttons.flatMap(({ button, description }) => [button, description])),
       update() {
-        setDisabled(undo, !state.canUndo());
-        setDisabled(redo, !state.canRedo());
+        buttons.forEach(({ command, button, description }) => {
+          const available = state[command.can]();
+          setDisabled(button, !available);
+          const text = historyDescription(command, available ? state[command.stepLabel]() : null, available);
+          description.textContent = text;
+          button.title = text;
+        });
       },
     };
+  }
+
+  /** "Undo: Rename Student. Ctrl+Z (Cmd+Z on a Mac)"; "Nothing to undo. …" when there is no step. */
+  function historyDescription(command, stepLabel, available) {
+    const what = !available ? command.nothing : stepLabel ? `${command.label}: ${stepLabel}.` : command.unnamed;
+    return `${what} ${command.keys}`;
   }
 
   // ---- Magnification ------------------------------------------------------------------------------------
