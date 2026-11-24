@@ -84,6 +84,17 @@
   const ORDER_KEYS = Object.freeze({ ArrowLeft: 'Move left', ArrowRight: 'Move right' });
   const EDGE_HIT = `${HOST_LAYER} .uml-pg-edge-hitbox`;
   const STEP_NUMBER = /^Step (\d+):/;
+  // A member line's {static} or {abstract} modifier, which the renderer draws as an underline or italics, not as text.
+  const MEMBER_MODIFIER = /\{(?:static|abstract)\}/gi;
+
+  /**
+   * A member line as the renderer draws it, to compare a drawn text with a drawn line: without its modifier, and
+   * without white space, since the renderer drops the space after the visibility. In a drawn line only the modifier
+   * keeps plain braces: drawing turns every other brace into a look-alike.
+   */
+  function drawnMemberKey(line) {
+    return String(line).replace(MEMBER_MODIFIER, '').replace(/\s+/g, '');
+  }
 
   /**
    * The ways in of one editor's session. `kit`: `session()` and `drawing()` (the current ones), `adapter` (the
@@ -609,33 +620,54 @@
     /** A double-click edits the text under the pointer in place, a member line or a name; it never opens a view. */
     function onDoubleClick(event) {
       if (mode || !kit.drawing()) return;
-      const ref = hitAt(event.clientX, event.clientY);
-      if (ref === null) return;
+      const hit = hitAt(event.clientX, event.clientY);
+      if (hit === null) return;
       event.preventDefault();
-      const member = memberAt(event.clientX, event.clientY, ref);
+      const ref = hit.getAttribute('data-layout-id');
+      const member = memberAt(event.clientX, event.clientY, ref, hit);
       if (member) inline.beginMemberEdit(ref, member);
       else inline.beginNameEdit(ref);
     }
 
-    /** The box under a client point (its hit target's layout id), or null. */
+    /** The hit target of the box under a client point, or null. */
     function hitAt(x, y) {
       const hit = doc.elementsFromPoint(x, y).find((element) => element.matches && element.matches(HIT_BOX));
-      return hit && kit.drawing().svg.contains(hit) ? hit.getAttribute('data-layout-id') : null;
+      return hit && kit.drawing().svg.contains(hit) ? hit : null;
     }
 
     /**
-     * The member line of box `ref` whose drawn text lies under a client point, or null. The renderer draws a member
-     * without the spaces the model's text may have ("+ decide(…)" is drawn "+decide(…)"), so the two are compared
-     * without white space.
+     * The member line of box `ref` (hit target `hit`) whose drawn text lies under a client point, or null. A member is
+     * found by the drawn line it stands for (its line in `contents().lines`), never by the model's text, which drawing
+     * changes: quotes, braces, and arrows become look-alikes, and a function's own call is in no list. The renderer
+     * draws a line without its {static} or {abstract} modifier and without the space after its visibility, so the two
+     * are compared without those (drawnMemberKey). Two lines drawn alike are told apart by their drawn order.
      */
-    function memberAt(x, y, ref) {
+    function memberAt(x, y, ref, hit) {
       const element = read.elementOf(ref);
-      const svg = kit.drawing().svg;
-      const text = doc.elementsFromPoint(x, y).find((candidate) => candidate.tagName && candidate.tagName.toLowerCase() === 'text'
-        && svg.contains(candidate) && !candidate.closest(HOST_LAYER));
-      const compact = (words) => words.replace(/\s+/g, '');
-      const words = text ? compact(text.textContent) : '';
-      return element && words ? element.members.find((member) => member.text !== null && compact(member.text) === words) || null : null;
+      const pressed = doc.elementsFromPoint(x, y).find(isDrawnText);
+      if (!element || !pressed) return null;
+      const lines = read.contents().lines;
+      const key = drawnMemberKey(pressed.textContent);
+      const alike = element.members.filter((member) => drawnMemberKey(lines[member.line]) === key);
+      if (alike.length < 2) return alike[0] || null;
+      const drawnAlike = Array.from(kit.drawing().svg.querySelectorAll('text'))
+        .filter((text) => isDrawnText(text) && insideBox(text, hit) && drawnMemberKey(text.textContent) === key);
+      return alike[Math.max(drawnAlike.indexOf(pressed), 0)] || null;
+    }
+
+    /** Whether `element` is a text the renderer drew (not one of the session's hit layer). */
+    function isDrawnText(element) {
+      return Boolean(element.tagName) && element.tagName.toLowerCase() === 'text' && kit.drawing().svg.contains(element)
+        && !element.closest(HOST_LAYER);
+    }
+
+    /** Whether the middle of `element` lies inside the box of hit target `hit`. */
+    function insideBox(element, hit) {
+      const drawn = element.getBoundingClientRect();
+      const box = hit.getBoundingClientRect();
+      const x = drawn.left + drawn.width / 2;
+      const y = drawn.top + drawn.height / 2;
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
     }
 
     // ---- Palette drops (spec §6 rule 2: a tile dropped at a point is placed there and pinned) -----------------

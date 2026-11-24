@@ -459,6 +459,16 @@
   }
 
   /**
+   * The text a member line's in-place editor starts with (spec §3.4): the model's. A function that declares no
+   * operation is drawn with its own call (`synthesized`), which no list holds: its text is the call the view model
+   * draws, which the function's first operation starts from (spec §5.2).
+   */
+  function memberText(read, entry) {
+    if (!entry.synthesized) return String(read.model.elements.get(entry.id).code[entry.list][entry.index]);
+    return read.context.viewModel.uml.classes.find((drawn) => drawn.id === entry.id).operations[entry.index];
+  }
+
+  /**
    * The guard of branch `branch` of the fragment drawn at `entry`'s step place, as the model writes it (spec §3.4: an
    * in-place editor starts from the model's text, never from the drawn one, where quotes, braces, and arrows are
    * replaced by look-alikes); null for a branch without one.
@@ -497,9 +507,7 @@
     },
     member(entry, index, read) {
       const owner = read.reading.elements.filter((element) => element.ref.elementId === entry.id).pop();
-      const declared = read.model.elements.get(entry.id).code[entry.list][entry.index];
-      owner.members.push({ line: index, list: entry.list, index: entry.index, synthesized: entry.synthesized,
-        text: entry.synthesized ? null : String(declared) });
+      owner.members.push({ line: index, list: entry.list, index: entry.index, synthesized: entry.synthesized, text: memberText(read, entry) });
     },
     participant(entry, index, read) {
       addElement(read, index, { key: entry.id, kind: 'participant', label: nameOf(read, entry.id), name: nameOf(read, entry.id),

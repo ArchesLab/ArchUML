@@ -105,8 +105,9 @@ function expectModelRef(found, entry, viewModel, design) {
   assert.equal(found.as, as, `a ${entry.kind} line is ${as === 'element' ? 'an' : 'a'} ${as}`);
   if (as === 'member') {
     const declared = design.model.elements.get(entry.id).code[entry.list][entry.index];
+    const drawnCall = () => viewModel.uml.classes.find((drawn) => drawn.id === entry.id).operations[entry.index];
     assert.deepEqual([found.owner.ref.elementId, found.item.list, found.item.index], [entry.id, entry.list, entry.index]);
-    assert.equal(found.item.text, entry.synthesized ? null : declared, 'a member starts from the model\'s text');
+    assert.equal(found.item.text, entry.synthesized ? drawnCall() : declared, 'a member starts from the model\'s text');
     return;
   }
   assert.deepEqual(found.item.ref, ref);
@@ -175,6 +176,18 @@ test('a fragment\'s branches carry the model\'s guards, although the drawing rep
 
   assert.deepEqual(fragment.branches.map((branch) => branch.guard), alt.branches.map((branch) => branch.when));
   assert.equal(fragment.branches[0].guard, guard);
+});
+
+test('a function\'s own call, drawn as its one operation, carries the call as its text, which its line\'s editor starts from', () => {
+  const text = REFERENCE.replace('              EnrollmentRule:\n                kind: interface',
+    '              scoreSection:\n                kind: function\n              EnrollmentRule:\n                kind: interface');
+  assert.notEqual(text, REFERENCE, 'the fixture declares EnrollmentRule');
+  const { adapter } = harness({ text });
+
+  const call = adapter.contents().elements.find((element) => element.ref.elementId === 'scoreSection');
+
+  assert.deepEqual(call.members.map(({ list, index, synthesized, text: memberText }) => ({ list, index, synthesized, text: memberText })),
+    [{ list: 'operations', index: 0, synthesized: true, text: 'scoreSection()' }]);
 });
 
 test('in a deployment drawing every node and hosted instance can be pressed and moved (axis xy), whichever boxes hold positions', () => {
