@@ -84,6 +84,7 @@
     "c4/editor/c4-editor-overlay.js",
     "c4/editor/c4-editor-pointer.js",
     "c4/editor/c4-editor-drag.js",
+    "c4/editor/c4-editor-canvas-text.js",
     "c4/editor/c4-editor-canvas-editing.js",
     "c4/editor/c4-editor-card.js",
     "c4/editor/c4-editor-canvas.js",

@@ -16,11 +16,12 @@
   // The editor's canvas (spec §9.1 Canvas, §9.2). It draws the current view with the normal renderer and, on a
   // C4-notation view, lays the accessible listbox of its elements over the drawing (c4-editor-overlay.js). It owns
   // navigation on the drawing: the roving tab stop, arrow keys in reading order with selection following focus,
-  // zooming into an element (Enter, double-click, the zoom badge) and out of a view (Alt+ArrowUp), the focus rules
+  // zooming into an element (Enter, the zoom badge) and out of a view (Alt+ArrowUp), the focus rules
   // of spec §9.2 for those moves and for re-rendering, view announcements, and the one pointer dispatcher (pan,
   // Ctrl/Cmd+wheel, pinch; Ruling 4). Zooming in goes through the shared `actions.zoomIn` command (Ruling 5). Editing
-  // on the drawing (drags, connecting, Move, rename in place, the context menu, Delete) is the canvas-editing part
-  // (c4-editor-canvas-editing.js), which this canvas creates over a narrow surface of its drawing and options.
+  // on the drawing (drags, connecting, Move, text in place by F2 or a double-click, the context menu, Delete) is the
+  // canvas-editing part (c4-editor-canvas-editing.js), which this canvas creates over a narrow surface of its drawing
+  // and options. On a C4-notation view a double-click edits text and never zooms (ED-12).
   //
   // A UML-notation view (code, dynamic, deployment, interfaces) is drawn through the renderer's delegated-view seam. Its
   // view module, `ArchUMLC4EditorParts.umlViews[notation]`, decides what the canvas offers on it (UML-view editing spec
@@ -545,8 +546,9 @@
     }
 
     /**
-     * Enter or a double-click on the option keyed `key`: on a C4-notation view the inside of its element, in an
-     * interfaces view its element's own interfaces view. On the other UML-notation views it opens nothing.
+     * Enter on the option keyed `key` (and a double-click on a UML-notation view): on a C4-notation view the inside of
+     * its element, in an interfaces view its element's own interfaces view. On the other UML-notation views it opens
+     * nothing.
      */
     function openFrom(key) {
       if (drawn.svg !== null) {
@@ -622,7 +624,9 @@
       if (option) focusInCanvas(option);
     }
 
+    /** A double-click on a UML-notation view opens as Enter does; on a C4-notation view it is the editing part's (ED-12). */
     function onDoubleClick(event) {
+      if (drawn.svg !== null) return;
       const option = event.target.closest('[role="option"]');
       if (option && options.includes(option)) openFrom(option.getAttribute('data-c4-option'));
     }
