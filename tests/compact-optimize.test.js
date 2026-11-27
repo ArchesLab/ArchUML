@@ -152,6 +152,66 @@ test('a squeeze that adds a crossing is rejected and the reference is kept', () 
   assert.equal(result.metrics.crossings, 0);
 });
 
+test('an already-rendered valid drawing is retained when it shows larger text', () => {
+  const fallback = fakeAdapter({
+    candidates: [],
+    sizes: { A: { width: 70, height: 50 }, B: { width: 70, height: 50 } }
+  }).adapter;
+  const { adapter, log } = fakeAdapter({
+    candidates: [candidate('compact', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } })]
+  });
+  adapter.fallback = fallback.realize(candidate('default', { A: { x: 0, y: 0 }, B: { x: 90, y: 0 } }));
+
+  const result = UMLCompactLayout.optimize(adapter, PANE);
+
+  assert.equal(result.svg, adapter.fallback.svg);
+  assert.equal(result.issues, 0);
+  assert.equal(result.passes, log.length, 'retaining a drawing consumes no additional routing pass');
+});
+
+test('an invalid default drawing never replaces valid compact geometry', () => {
+  const fallback = fakeAdapter({ candidates: [] }).adapter;
+  const { adapter } = fakeAdapter({
+    candidates: [candidate('compact', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } })]
+  });
+  adapter.fallback = fallback.realize(candidate('overlapping-default', { A: { x: 0, y: 0 }, B: { x: 50, y: 0 } }));
+
+  const result = UMLCompactLayout.optimize(adapter, PANE);
+
+  assert.equal(candidateOf(result), 'compact');
+  assert.equal(result.issues, 0);
+});
+
+test('an invalid default drawing is excluded even when no compact drawing is valid', () => {
+  const fallback = fakeAdapter({ candidates: [] }).adapter;
+  const { adapter } = fakeAdapter({
+    candidates: [candidate('compact', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } })],
+    decorate: () => ({ labels: [
+      { id: 'note-1', kind: 'note', x: 0, y: 0, width: 1000, height: 1000 },
+      { id: 'note-2', kind: 'note', x: 0, y: 0, width: 1000, height: 1000 },
+    ] })
+  });
+  adapter.fallback = fallback.realize(candidate('overlapping-default', { A: { x: 0, y: 0 }, B: { x: 50, y: 0 } }));
+
+  const result = UMLCompactLayout.optimize(adapter, PANE);
+
+  assert.equal(candidateOf(result), 'compact');
+  assert.ok(result.issues > 0, 'the compact drawing still reports its unresolved issues');
+});
+
+test('compact retains larger text when a valid default drawing fits less well', () => {
+  const fallback = fakeAdapter({ candidates: [] }).adapter;
+  const { adapter } = fakeAdapter({
+    candidates: [candidate('compact', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } })]
+  });
+  adapter.fallback = fallback.realize(candidate('default', { A: { x: 0, y: 0 }, B: { x: 500, y: 0 } }));
+
+  const result = UMLCompactLayout.optimize(adapter, PANE);
+
+  assert.equal(candidateOf(result), 'compact');
+  assert.ok(result.metrics.fit > UMLLayoutQuality.evaluate(adapter.fallback.scene, PANE).fit);
+});
+
 test('a rejected squeeze is retried with wider gaps at most twice', () => {
   const { adapter } = fakeAdapter({
     candidates: [candidate('ref', { A: { x: 0, y: 0 }, B: { x: 300, y: 0 } })],

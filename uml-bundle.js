@@ -4273,11 +4273,11 @@
     return source ? { type: source.type, text: source.text } : null;
   }
 
-  // Figures of these types fit their pane only at a readable size (`data-uml-fit="readable"`, see
-  // sizeDiagramForReadability): a C4 view's labels carry its notation, so it scrolls rather than shrink them.
-  var READABLE_FIT_TYPES = { c4: true };
+  // C4 notation stays at least paragraph-sized; prose-heavy CRC cards retain
+  // their measured size. Both scroll when the pane cannot contain that width.
+  var FIGURE_FIT_POLICIES = { c4: 'readable', crc: 'off' };
 
-  function createArchUmlFigure(type, text, explicitCaption) {
+  function createArchUmlFigure(type, text, explicitCaption, fitPolicy, defaultFit) {
     var captionInfo = extractArchUmlCaption(text, type);
     const attributeCaption = (explicitCaption || '').trim();
     if (attributeCaption) {
@@ -4292,7 +4292,8 @@
     var container = document.createElement('div');
     prepareDiagramContainer(container, normalized);
     container.setAttribute('data-uml-type', normalized);
-    if (READABLE_FIT_TYPES[normalized]) container.setAttribute('data-uml-fit', 'readable');
+    var fit = fitPolicy || FIGURE_FIT_POLICIES[normalized] || defaultFit;
+    if (fit) container.setAttribute('data-uml-fit', fit);
     container.dataset.umlRendered = 'true';
     container.setAttribute('role', 'img');
     container.setAttribute('aria-label', captionInfo.caption);
@@ -4491,7 +4492,7 @@
         var codeEl = blocks[i];
         var pre = codeEl.parentElement;
         var text = extractText(codeEl);
-        var wrapped = createArchUmlFigure(opts && opts.type, text);
+        var wrapped = createArchUmlFigure(opts && opts.type, text, null, pre.getAttribute('data-uml-fit'));
         pre.parentElement.replaceChild(wrapped.figure, pre);
         renderFn(wrapped.container, wrapped.text);
         hideNestedSvgFromAccessibility(wrapped.container);
@@ -5098,7 +5099,7 @@
     const view = diagramViews.get(container);
     if (!view || !view.fitted) return;
     view.fitted = false;
-    view.viewport.classList.remove('uml-fit-controls-inline');
+    if (view.viewport) view.viewport.classList.remove('uml-fit-controls-inline');
     container.classList.remove('uml-fit-fitted');
     container.style.removeProperty('--uml-fit-width');
     view.previous.scroll.forEach(({ element, left, top }) => {
@@ -5165,12 +5166,16 @@
       diagramViews.delete(container);
       view = null;
     }
-    // Hidden render staging/measurement hosts must never produce controls, and
-    // fitting would shrink a readable-fit figure below its readable size.
-    if (!container.isConnected || !container.clientWidth || !container.querySelector('svg') ||
-        container.closest('.uml-render-staging, .uml-measure-host, [data-uml-fit="off"]') ||
-        fitsOnlyReadably(container)) {
-      if (view) { view.host.hidden = true; releaseDiagramViewport(view); }
+    const fittingDisabled = fitsOnlyReadably(container) || container.closest('[data-uml-fit="off"]');
+    // Hidden and staging diagrams keep the reader's view for when they return.
+    // An explicit sizing policy can instead require removing the fitted scale.
+    if (fittingDisabled || !container.isConnected || !container.clientWidth || !container.querySelector('svg') ||
+        container.closest('.uml-render-staging, .uml-measure-host')) {
+      if (view) {
+        if (fittingDisabled) restoreDiagramView(container);
+        view.host.hidden = true;
+        releaseDiagramViewport(view);
+      }
       return;
     }
     const viewport = view && view.fitted && view.viewport ? view.viewport : diagramScrollViewport(container);
@@ -5248,7 +5253,7 @@
   /**
    * Whether `container` is (or is drawn inside) a figure that fits its pane
    * only at a readable size: `data-uml-fit="readable"`, which the figure
-   * wrapper sets for READABLE_FIT_TYPES (and the static build mirrors).
+   * wrapper sets through FIGURE_FIT_POLICIES (and the static build mirrors).
    */
   function fitsOnlyReadably(container) {
     return !!(container.closest && container.closest('[data-uml-fit="readable"]'));
@@ -7254,7 +7259,21 @@
     placeNoteRect: placeNoteRect,
     computeAnchoredNotes: computeAnchoredNotes,
 
-    renderAll: function() {
+    renderAll: function(options) {
+      // A host with constrained panes can choose a default for its own authored
+      // figures without changing other diagrams or their interactive viewers.
+      var root = options && options.root || document;
+      var defaultFit = options && options.fit;
+      // Static builds and eager auto-init may have drawn a host's figures
+      // already. Keep their explicit/type policies, applying only its default.
+      if (defaultFit) {
+        root.querySelectorAll('.sebook-figure--archuml > [role="img"][data-uml-rendered]:not([data-uml-fit])')
+          .forEach(function (container) {
+            var type = normalizeDiagramType(container.getAttribute('data-uml-type'));
+            container.setAttribute('data-uml-fit', FIGURE_FIT_POLICIES[type] || defaultFit);
+            sizeDiagramForReadability(container);
+          });
+      }
       var RENDERERS = {
         class:      function () { return window.UMLClassDiagram; },
         sequence:   function () { return window.UMLSequenceDiagram; },
@@ -7273,7 +7292,7 @@
       };
 
       // 1. Process data-uml-type attributes
-      var els = document.querySelectorAll('[data-uml-type]');
+      var els = root.querySelectorAll('[data-uml-type]');
       for (var i = 0; i < els.length; i++) {
         var el = els[i];
         if (el.dataset.umlRendered) continue;
@@ -7283,7 +7302,8 @@
         if (!getR || !spec) continue;
         var R = getR();
         if (R) {
-          var wrapped = createArchUmlFigure(type, spec, el.getAttribute('data-uml-caption'));
+          var wrapped = createArchUmlFigure(type, spec, el.getAttribute('data-uml-caption'),
+            el.getAttribute('data-uml-fit'), defaultFit);
           if (el.parentElement) {
             el.parentElement.replaceChild(wrapped.figure, el);
           }
@@ -7316,7 +7336,7 @@
       };
       for (var key in RENDERERS) {
         var selector = DIAGRAM_SELECTORS[key] || ('pre > code.language-uml-' + key);
-        var blocks = document.querySelectorAll(selector);
+        var blocks = root.querySelectorAll(selector);
         for (var j = 0; j < blocks.length; j++) {
           var codeEl = blocks[j];
           var pre = codeEl.parentElement;
@@ -7325,7 +7345,7 @@
           var R2 = RENDERERS[key]();
           if (R2) {
             var text = codeEl.textContent;
-            var wrappedBlock = createArchUmlFigure(key, text);
+            var wrappedBlock = createArchUmlFigure(key, text, null, pre.getAttribute('data-uml-fit'), defaultFit);
             pre.parentElement.replaceChild(wrappedBlock.figure, pre);
             R2.render(wrappedBlock.container, wrappedBlock.text);
             hideNestedSvgFromAccessibility(wrappedBlock.container);
@@ -11027,6 +11047,8 @@
    *   estimate(placement) → {width, height}  (optional, ranks candidates)
    *   limits: {crossings, bends}  (optional; those of the renderer's drawing
    *     without compact layout, which compact should not exceed)
+   *   fallback: {svg, scene}  (optional; an already-rendered drawing with
+   *     annotations; considered only if it passes the same quality judge)
    *   annotate({svg, scene}) → {svg, scene}  (optional; what is drawn over a
    *     finished drawing, such as teaching callouts: may only add labels,
    *     lower the smallest font and grow the size, and must leave the
@@ -11080,6 +11102,14 @@
       while (!job.done && hasPass(run)) stepSqueezeJob(run, job);
     });
     jobs.forEach(function (job) { if (job.result) drawings.push(job.result); });
+
+    if (adapter.fallback) {
+      var fallback = recordAttempt(run, null, adapter.fallback, false);
+      if (fallback.metrics.valid) {
+        fallback.shown = true;
+        drawings.push(fallback);
+      }
+    }
 
     function preferred(a, b) {
       var byBound = excessOver(a, bound) - excessOver(b, bound);
@@ -14202,11 +14232,11 @@
         if (!child) return segments;
         var childCx = childCxArr ? childCxArr[0] : childConnX(child, group.children[0], gk);
         if (Math.abs(parentCx - childCx) < 1) {
-          segments.push({ x1: parentCx, y1: triBot, x2: childCx, y2: child.y });
+          segments.push({ x1: parentCx, y1: triBot, x2: childCx, y2: child.y, child: group.children[0] });
         } else {
           segments.push({ x1: parentCx, y1: triBot, x2: parentCx, y2: junctionY });
           segments.push({ x1: parentCx, y1: junctionY, x2: childCx, y2: junctionY });
-          segments.push({ x1: childCx, y1: junctionY, x2: childCx, y2: child.y });
+          segments.push({ x1: childCx, y1: junctionY, x2: childCx, y2: child.y, child: group.children[0] });
         }
         return segments;
       }
@@ -14218,14 +14248,15 @@
       for (var hci = 0; hci < group.children.length; hci++) {
         var ch = entries[group.children[hci]];
         if (!ch) continue;
-        segments.push({ x1: childCxArr[hci], y1: junctionY, x2: childCxArr[hci], y2: ch.y });
+        segments.push({ x1: childCxArr[hci], y1: junctionY, x2: childCxArr[hci], y2: ch.y, child: group.children[hci] });
       }
       return segments;
     }
 
     function drawHierarchySegment(segment, dashAttr) {
       svg.push('<line x1="' + segment.x1 + '" y1="' + segment.y1 + '" x2="' + segment.x2 + '" y2="' + segment.y2 +
-        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr + '/>');
+        '" stroke="' + colors.line + '" stroke-width="' + CFG.strokeWidth + '"' + dashAttr +
+        (segment.child ? ' data-uml-hierarchy-child="' + UMLShared.escapeXml(segment.child) + '"' : '') + '/>');
       pushOrthogonalSegment(noteRouteSegments, segment.x1, segment.y1, segment.x2, segment.y2);
       reserveClassHierarchySegment(segment.x1, segment.y1, segment.x2, segment.y2);
     }
@@ -14382,9 +14413,12 @@
           drawObstacleAwareHierarchyEdge(gk, group, group.children[hdc], parentCx, triBot, dashAttr);
         }
       } else {
+        svg.push('<g data-uml-hierarchy="' + UMLShared.escapeXml(gk) +
+          '" data-uml-hierarchy-root="' + parentCx + ',' + triBot + '">');
         for (var hds = 0; hds < sharedSegments.length; hds++) {
           drawHierarchySegment(sharedSegments[hds], dashAttr);
         }
+        svg.push('</g>');
         if (scene) recordSharedHierarchyFan(gk, group, parentCx, triBot, group.children.length === 1 ? junctionYSingle : junctionY);
       }
     }
@@ -25638,7 +25672,7 @@
 
   // With a scene (compact), also records what it draws there and frames the
   // drawing tightly around it.
-  function generateSVG(layout, parsed, colors, scene) {
+  function generateSVG(layout, parsed, colors, scene, frameMargin) {
     var entries = layout.entries;
     var connectors = parsed.connectors;
     var recorder = scene ? createComponentSceneRecorder(scene, entries) : null;
@@ -28680,7 +28714,7 @@
       if (recorder) recorder.note(ni, np2, [cF, cT]);
     }
 
-    if (recorder) svg[0] = recorder.frame(CFG.svgPad);
+    if (recorder) svg[0] = recorder.frame(frameMargin === undefined ? CFG.svgPad : frameMargin);
     svg.push(UMLShared.svgClose());
     return svg.join('\n');
   }
@@ -29334,25 +29368,36 @@
         return { width: b.right - b.left + CFG.svgPad * 2, height: b.bottom - b.top + CFG.svgPad * 2 };
       },
 
-      limits: withoutLayoutLine.counts
+      limits: withoutLayoutLine.counts,
+      fallback: withoutLayoutLine.drawing
     };
   }
 
   // The drawing the spec gets without a layout line in this pane (one extra
   // routing, with the normal metrics in force): `counts`, its crossings and
   // bends, which compact should not exceed, and `centres`, where it puts
-  // each component's centre.
+  // each component's centre. Keep its geometry as a fallback with compact's
+  // frame margin: narrower component boxes can force taller label gaps.
   function defaultComponentDrawing(parsed, colors, pane) {
     var scene = UMLLayoutQuality.createScene();
     var layout = computeLayout(parsed, { containerAspect: pane.width / pane.height });
-    generateSVG(layout, parsed, colors, scene);
+    var svg = generateSVG(layout, parsed, colors, scene, COMPACT_COMPONENT_METRICS.svgPad);
     var metrics = UMLLayoutQuality.evaluate(scene, pane);
+    var drawing = null;
+    // Annotations only add geometry, so cannot rescue an invalid drawing.
+    // Compact text must also stay at or above the component's base size.
+    if (metrics.valid && scene.smallestFont >= CFG.fontSize) {
+      svg = UMLCallouts.drawCompact(svg, scene, parsed.layout && parsed.layout.callouts,
+        { fontSize: CFG.fontSize, margin: COMPACT_COMPONENT_METRICS.svgPad, pane: pane });
+      drawing = { svg: svg, scene: scene };
+    }
     var centres = {};
     Object.keys(layout.entries).forEach(function(name) {
       var e = layout.entries[name];
       centres[name] = { x: e.x + e.box.width / 2, y: e.y + e.box.height / 2 };
     });
-    return { counts: { crossings: metrics.crossings, bends: metrics.bends }, centres: centres };
+    return { counts: { crossings: metrics.crossings, bends: metrics.bends }, centres: centres,
+      drawing: drawing };
   }
 
   // Draws the compact SVG into the container (remembered for the same

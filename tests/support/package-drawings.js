@@ -1,5 +1,7 @@
 'use strict';
 
+const { readRenderedRoutes } = require('./rendered-routes');
+
 // What a reader can check of a class or component drawing with packages,
 // measured from the rendered SVG in the browser (getBBox and the CTM, in the
 // SVG's own user units), and the checks themselves as plain functions. The
@@ -11,7 +13,7 @@
  * measure it. `page` has the bundle loaded.
  */
 async function measurePackageDrawing(page, renderer, source, pane) {
-  return page.evaluate(({ renderer, source, pane }) => {
+  const drawing = await page.evaluate(({ renderer, source, pane }) => {
     const host = document.getElementById('diagram');
     host.style.width = pane.width + 'px';
     host.style.height = pane.height + 'px';
@@ -26,10 +28,6 @@ async function measurePackageDrawing(page, renderer, source, pane) {
       const p = new DOMPoint(b.x, b.y).matrixTransform(m);
       const q = new DOMPoint(b.x + b.width, b.y + b.height).matrixTransform(m);
       return { x: p.x, y: p.y, width: q.x - p.x, height: q.y - p.y };
-    };
-    const points = (el) => {
-      const m = toSvg.multiply(el.getScreenCTM());
-      return [...el.points].map((pt) => new DOMPoint(pt.x, pt.y).matrixTransform(m)).map((pt) => ({ x: pt.x, y: pt.y }));
     };
     const vb = svg.viewBox.baseVal;
     return {
@@ -46,10 +44,10 @@ async function measurePackageDrawing(page, renderer, source, pane) {
       })),
       texts: [...svg.querySelectorAll('text')].filter((el) => el.textContent.trim())
         .map((el) => ({ text: el.textContent, size: Number(el.getAttribute('font-size')) || parseFloat(getComputedStyle(el).fontSize), box: box(el) })),
-      routes: [...svg.querySelectorAll('polyline[data-layout-route-id], polyline.uml-class-hierarchy-route')]
-        .map((el) => ({ id: el.getAttribute('data-layout-route-id'), points: points(el) })),
     };
   }, { renderer, source, pane });
+  drawing.routes = await page.evaluate(readRenderedRoutes);
+  return drawing;
 }
 
 const right = (r) => r.x + r.width;
